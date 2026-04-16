@@ -16,7 +16,7 @@ export default function Home() {
           <div className="flex flex-col outline-1 outline-accent rounded-2xl p-5 gap-7 w-full max-w-[1000px]">
             <Textarea
               placeholder="What do you want to know?"
-              className="w-full text-start focus:outline-1 focus:outline-none field-sizing-content max-h-40 resize-none"
+              className="w-full text-start focus:outline-none field-sizing-content max-h-40 resize-none"
             />
             <div className="flex w-full justify-between">
               <p>(:</p>
@@ -25,7 +25,7 @@ export default function Home() {
                 aria-label="Submit"
               >
                 <div>
-                  <ArrowUp area-hidden="true" />
+                  <ArrowUp aria-hidden="true" />
                 </div>
               </Button>
             </div>
