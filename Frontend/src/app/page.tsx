@@ -25,7 +25,7 @@ export default function Home() {
             </div>
             <Button
               className="flex h-10 bg-primary rounded-md justify-center items-center p-2 text-primary-foreground"
-              aria-label="Submit"
+              aria-label="Process"
             >
               Process
             </Button>
