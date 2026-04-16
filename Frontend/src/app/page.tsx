@@ -1,6 +1,6 @@
 import Header from "@/components/header";
-import { Button, Textarea } from "@headlessui/react";
-import { ArrowUp } from "lucide-react";
+import { Button, Input, Textarea } from "@headlessui/react";
+import { ArrowUp, Link } from "lucide-react";
 
 export default function Home() {
   return (
@@ -13,6 +13,23 @@ export default function Home() {
           <div className="flex justify-center">
             <h2 className="text-4xl">Peep into a Codebase</h2>
           </div>
+          <div className="flex w-full gap-4 items-center">
+            <div className="flex flex-row outline-1 outline-accent rounded-2xl p-3 gap-4 w-2/3">
+              <div className="flex items-center">
+                <Link className="w-4 h-4" />
+              </div>
+              <Input
+                placeholder="https://github.com/..."
+                className="focus:outline-none w-115"
+              />
+            </div>
+            <Button
+              className="flex h-10 bg-primary rounded-md justify-center items-center p-2 text-primary-foreground"
+              aria-label="Process"
+            >
+              Process
+            </Button>
+          </div>
           <div className="flex flex-col outline-1 outline-accent rounded-2xl p-5 gap-7 w-full max-w-[1000px]">
             <Textarea
               placeholder="What do you want to know?"
@@ -21,7 +38,7 @@ export default function Home() {
             <div className="flex w-full justify-between">
               <p>(:</p>
               <Button
-                className="flex w-7 h-7 bg-primary rounded-md justify-center items-center"
+                className="flex w-7 h-7 bg-primary rounded-md justify-center items-center text-primary-foreground"
                 aria-label="Submit"
               >
                 <div>
