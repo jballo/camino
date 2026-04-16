@@ -10,6 +10,7 @@ const fontSans = Outfit({
 const fontSerif = Merriweather({
   subsets: ["latin"],
   variable: "--font-serif",
+  weight: ["400", "700"],
 });
 
 const fontMono = JetBrains_Mono({

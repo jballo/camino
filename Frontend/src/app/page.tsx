@@ -20,9 +20,12 @@ export default function Home() {
             />
             <div className="flex w-full justify-between">
               <p>(:</p>
-              <Button className="flex w-7 h-7 bg-primary rounded-md justify-center content-center">
+              <Button
+                className="flex w-7 h-7 bg-primary rounded-md justify-center items-center"
+                aria-label="Submit"
+              >
                 <div>
-                  <ArrowUp />
+                  <ArrowUp area-hidden="true" />
                 </div>
               </Button>
             </div>
