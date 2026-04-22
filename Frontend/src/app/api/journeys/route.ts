@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 
 export async function POST(req: Request) {
-  const body = await req.json();
-  const { repoUrl, prompt } = body;
+  try {
+    const body = await req.json();
+    const { url, prompt } = body;
 
-  if (repoUrl === null || repoUrl.length === 0)
-    throw new NextResponse(`Failure to process`, { status: 500 });
+    if (!url || url.length === 0) throw new Error(`Failure to process`);
 
-  console.log("Generating journey for: ", repoUrl, " with prompt: ", prompt);
-  return new NextResponse(`Sucess`, { status: 200 });
+    console.log("Generating journey for: ", url, " with prompt: ", prompt);
+    return new NextResponse(`Success`, { status: 200 });
+  } catch (error) {
+    console.error("[/api/journeys]: ", error);
+    return new NextResponse(`Processing error`, { status: 500 });
+  }
 }

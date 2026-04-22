@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 
 export async function POST(req: Request) {
-  const body = await req.json();
-  const { repoUrl } = body;
+  try {
+    const body = await req.json();
+    const { url } = body;
 
-  if (repoUrl === null || repoUrl.length === 0)
-    throw new NextResponse(`Failure processing ${repoUrl}`, { status: 500 });
+    if (!url || url.length === 0) throw new Error(`Failure processin`);
 
-  console.log("Respo url: ", repoUrl);
-  return new NextResponse(`Sucess processing ${repoUrl}`, { status: 200 });
+    console.log("Repo url: ", url);
+    return new NextResponse(`Success processing ${url}`, { status: 200 });
+  } catch (error) {
+    console.error("[/api/repositories]: ", error);
+    return new Response(`System failed`, { status: 500 });
+  }
 }

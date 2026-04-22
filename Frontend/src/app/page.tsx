@@ -1,25 +1,37 @@
 "use client";
 
 import Header from "@/components/header";
-import { Button, Input, Textarea } from "@headlessui/react";
-import { ArrowUp, Link } from "lucide-react";
+import { Button, Label, Radio, RadioGroup, Textarea } from "@headlessui/react";
+import { ArrowUp, CheckCircleIcon } from "lucide-react";
 import { useCallback, useState } from "react";
+import {
+  Description,
+  Dialog,
+  DialogPanel,
+  DialogTitle,
+} from "@headlessui/react";
+
+const sampleRepos: { id: string; repoName: string }[] = [
+  { id: "abc", repoName: "RepositoryABC" },
+  { id: "lmn", repoName: "RepositoryLMN" },
+  { id: "xyz", repoName: "RepositoryXYZ" },
+];
 
 export default function Home() {
-  const [url, setUrl] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [repoSelectionDialog, setRepoSelectionDialog] = useState(false);
+  const [repoSelected, setRepoSelected] = useState(sampleRepos[0].id);
 
   const onSubmitRepo = useCallback(async () => {
     try {
-      console.log("url: ", url);
-      if (url.length == 0) throw new Error("Invalid");
+      if (repoSelected.length == 0) throw new Error("Invalid");
       const response = await fetch("/api/repositories", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          repoUrl: url,
+          url: repoSelected,
         }),
       });
 
@@ -30,20 +42,20 @@ export default function Home() {
     } catch (error) {
       console.log("error: ", error);
     }
-  }, [url]);
+  }, [repoSelected]);
 
   const onSubmitPrompt = useCallback(async () => {
-    console.log("url: ", url);
-    console.log("prompt: ", prompt);
-
     try {
+      if (prompt.length <= 0 || repoSelected.length <= 0)
+        throw new Error(`Invalid input`);
+
       const response = await fetch("/api/journeys", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          repoUrl: url,
+          url: repoSelected,
           prompt,
         }),
       });
@@ -55,7 +67,7 @@ export default function Home() {
     } catch (error) {
       console.log("error: ", error);
     }
-  }, [url, prompt]);
+  }, [repoSelected, prompt]);
 
   return (
     <div className="flex flex-col w-full h-screen">
@@ -67,28 +79,6 @@ export default function Home() {
           <div className="flex justify-center">
             <h2 className="text-4xl">Peep into a Codebase</h2>
           </div>
-          <div className="flex w-full gap-4 items-center">
-            <div className="flex flex-row outline-1 outline-accent rounded-2xl p-3 gap-4 w-2/3">
-              <div className="flex items-center">
-                <Link className="w-4 h-4" />
-              </div>
-              <Input
-                placeholder="https://github.com/..."
-                className="focus:outline-none w-115"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-              />
-            </div>
-            <Button
-              className="flex h-10 bg-primary rounded-md justify-center items-center p-2 text-primary-foreground"
-              aria-label="Process"
-              onClick={async () => {
-                await onSubmitRepo();
-              }}
-            >
-              Process
-            </Button>
-          </div>
           <div className="flex flex-col outline-1 outline-accent rounded-2xl p-5 gap-7 w-full max-w-[1000px]">
             <Textarea
               placeholder="What do you want to know?"
@@ -97,7 +87,58 @@ export default function Home() {
               onChange={(e) => setPrompt(e.target.value)}
             />
             <div className="flex w-full justify-between">
-              <p>(:</p>
+              <Button onClick={() => setRepoSelectionDialog(true)}>
+                Select Repo
+              </Button>
+              <Dialog
+                open={repoSelectionDialog}
+                onClose={() => setRepoSelectionDialog(false)}
+                className="relative z-50"
+              >
+                <div className="fixed inset-0 flex w-screen items-center justify-center p-4">
+                  <DialogPanel className="max-w-lg space-y-4 border bg-primary-foreground p-12 rounded-md">
+                    <DialogTitle className="font-bold">
+                      Select Repository
+                    </DialogTitle>
+                    <Description>
+                      This will be the repository the journeys will be based on.
+                    </Description>
+                    <RadioGroup
+                      value={repoSelected}
+                      onChange={setRepoSelected}
+                      className="flex flex-col gap-3"
+                    >
+                      {sampleRepos.map((repo) => (
+                        <Radio
+                          key={repo.id}
+                          value={repo.id}
+                          className="group flex flex-row items-center justify-between relative data-checked:bg-secondary h-10 p-3 rounded-sm"
+                        >
+                          <Label>{repo.repoName}</Label>
+                          <CheckCircleIcon className="size-5 fill-white opacity-0 transition group-data-checked:opacity-100" />
+                        </Radio>
+                      ))}
+                    </RadioGroup>
+                    <div className="flex gap-4">
+                      <Button
+                        className="w-20 h-6 rounded-sm"
+                        onClick={() => setRepoSelectionDialog(false)}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        className="bg-primary text-white w-20 h-6 rounded-sm"
+                        onClick={() => {
+                          setRepoSelectionDialog(false);
+                          onSubmitRepo();
+                        }}
+                      >
+                        Process
+                      </Button>
+                    </div>
+                  </DialogPanel>
+                </div>
+              </Dialog>
               <Button
                 className="flex w-7 h-7 bg-primary rounded-md justify-center items-center text-primary-foreground"
                 aria-label="Submit"
