@@ -142,7 +142,7 @@ export default function Home() {
               <Button
                 className="flex w-7 h-7 bg-primary rounded-md justify-center items-center text-primary-foreground"
                 aria-label="Submit"
-                onClick={async () => await onSubmitPrompt()}
+                onClick={onSubmitPrompt}
               >
                 <div>
                   <ArrowUp aria-hidden="true" />
