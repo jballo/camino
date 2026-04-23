@@ -1,25 +1,20 @@
 from typing import Annotated
 from fastapi import FastAPI, Depends
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlmodel import Field, Session, SQLModel, create_engine, table
-from dotenv import load_dotenv
-import os
-
-load_dotenv('.env')
-db_url = os.getenv('DATABASE_URL')
-print("db_url", db_url)
+from sqlmodel import Field, Session, SQLModel, create_engine
 
 class Settings(BaseSettings):
     database_url: str
     model_config = SettingsConfigDict(env_file=".env")
 
+settings = Settings()
 
 class Users(SQLModel, table=True):
     id: str = Field(default=None, primary_key=True)
     email: str = Field(default=None)
 
 connect_args = {"check_same_thread": False}
-engine = create_engine(db_url)
+engine = create_engine(settings.database_url)
 
 def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
