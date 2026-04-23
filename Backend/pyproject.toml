@@ -9,4 +9,5 @@ dependencies = [
     "pydantic-settings>=2.13.1",
     "sqlmodel>=0.0.38",
     "psycopg2>=2.9.12",
+    "sqlalchemy>=2.0.49",
 ]
