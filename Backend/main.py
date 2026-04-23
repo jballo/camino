@@ -7,18 +7,15 @@ class Settings(BaseSettings):
     database_url: str
     model_config = SettingsConfigDict(env_file=".env")
 
-settings = Settings()
 
-class Users(SQLModel, table=True):
+class User(SQLModel, table=True):
+    __tablename__ = "users"
+
     id: str = Field(default=None, primary_key=True)
     email: str = Field(default=None)
 
-connect_args = {"check_same_thread": False}
+settings = Settings()
 engine = create_engine(settings.database_url)
-
-def create_db_and_tables():
-    SQLModel.metadata.create_all(engine)
-    print("url: ", Settings.database_url)
 
 def get_session():
     with Session(engine) as session:
@@ -26,23 +23,11 @@ def get_session():
 
 SessionDep = Annotated[Session, Depends(get_session)]
 
-
-
 app = FastAPI()
 
 
-@app.get("/")
-def read_root():
-    return {"Hello": "World"}
-
-
-@app.get("/items/{item_id}")
-def read_item(item_id: int, q: str | None = None):
-    return {"item_id": item_id, "q": q}
-
-
 @app.post("/users")
-def create_user(user: Users, session: SessionDep) -> Users:
+def create_user(user: User, session: SessionDep) -> User:
     session.add(user)
     session.commit()
     session.refresh(user)
