@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Outfit, Merriweather, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
+import { ClerkProvider } from "@clerk/nextjs";
 
 const fontSans = Outfit({
   subsets: ["latin"],
@@ -34,7 +35,7 @@ export default function RootLayout({
       className={`${fontSans.variable} ${fontSerif.variable} ${fontMono.variable} h-full antialiased dark`}
     >
       <body className="min-h-full flex flex-col bg-background text-foreground">
-        {children}
+        <ClerkProvider>{children}</ClerkProvider>
       </body>
     </html>
   );
