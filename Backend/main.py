@@ -5,7 +5,6 @@ from sqlmodel import Field, Session, SQLModel, create_engine, select
 from sqlalchemy import exc
 from contextlib import asynccontextmanager
 from svix.webhooks import Webhook, WebhookVerificationError
-import pprint
 
 
 class Settings(BaseSettings):
@@ -62,15 +61,12 @@ async def webhook_handler(request: Request, response: Response, session: Session
         wh = Webhook(settings.clerk_wh_key)
         msg = wh.verify(payload, headers)
         event = msg["type"]
-        
-        pp = pprint.PrettyPrinter(indent=3, width=50)
-        pp.pprint(msg)
 
+        print("Event: ", event)
         if event == "user.created":
-            print("user created")
             userId = msg["data"]["id"]
             email = msg["data"]["email_addresses"][0]["email_address"] if len(msg["data"]["email_addresses"]) > 0 else "randomeEmail@email.com"
-            name = msg["data"]["first_name"]
+            name = msg["data"]["first_name"] if msg["data"].get("first_name") != None else ""
             user = User(id=userId, email=email, name=name)
             try:
                 session.add(user)
@@ -82,10 +78,9 @@ async def webhook_handler(request: Request, response: Response, session: Session
                 raise HTTPException(status_code=409, detail="Already exists")
             
         elif event == "user.updated":
-            print("user updated")
             userId = msg["data"]["id"]
             newEmail = msg["data"]["email_addresses"][0]["email_address"] if len(msg["data"]["email_addresses"]) > 0 else "randomeEmail@email.com"
-            newName = msg["data"]["first_name"]
+            newName = msg["data"]["first_name"] if msg["data"].get("first_name") != None else ""
             try:
                 statement = select(User).where(User.id == userId)
                 results = session.exec(statement)
@@ -96,21 +91,25 @@ async def webhook_handler(request: Request, response: Response, session: Session
                 session.commit()
                 session.refresh(user)
                 return user
+            except exc.NoResultFound:
+                session.rollback()
+                raise HTTPException(status_code=404, detail="User not found")
             except exc.IntegrityError:
                 session.rollback()
                 raise HTTPException(status_code=500, detail="Failed to update user")
 
         elif event == "user.deleted":
-            print("user deleted")
             userId = msg["data"]["id"]
             try:
                 statement = select(User).where(User.id == userId)
                 results = session.exec(statement)
                 user = results.one()
-                print("deleting user: ", user)
                 session.delete(user)
                 session.commit()
                 return "user deleted"
+            except exc.NoResultFound:
+                session.rollback()
+                raise HTTPException(status_code=404, detail="User not found")
             except exc.IntegrityError:
                 session.rollback()
                 raise HTTPException(status_code=500, detail="Failed to delete user")
