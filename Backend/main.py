@@ -18,10 +18,11 @@ class User(SQLModel, table=True):
 
     id: str = Field(primary_key=True)
     email: str
+    name: str
 
 
     def __repr__(self):
-        return "<User(id='%s', email='%s')>" % ( self.id, self.email)
+        return "<User(id='%s', email='%s', name='%s')>" % ( self.id, self.email, self.name)
 
 settings = Settings()
 engine = create_engine(settings.database_url)
@@ -69,7 +70,8 @@ async def webhook_handler(request: Request, response: Response, session: Session
             print("user created")
             userId = msg["data"]["id"]
             email = msg["data"]["email_addresses"][0]["email_address"] if len(msg["data"]["email_addresses"]) > 0 else "randomeEmail@email.com"
-            user = User(id=userId, email=email)
+            name = msg["data"]["first_name"]
+            user = User(id=userId, email=email, name=name)
             try:
                 session.add(user)
                 session.commit()
@@ -81,6 +83,23 @@ async def webhook_handler(request: Request, response: Response, session: Session
             
         elif event == "user.updated":
             print("user updated")
+            userId = msg["data"]["id"]
+            newEmail = msg["data"]["email_addresses"][0]["email_address"] if len(msg["data"]["email_addresses"]) > 0 else "randomeEmail@email.com"
+            newName = msg["data"]["first_name"]
+            try:
+                statement = select(User).where(User.id == userId)
+                results = session.exec(statement)
+                user = results.one()
+                user.email = newEmail
+                user.name = newName
+                session.add(user)
+                session.commit()
+                session.refresh(user)
+                return user
+            except exc.IntegrityError:
+                session.rollback()
+                raise HTTPException(status_code=500, detail="Failed to update user")
+
         elif event == "user.deleted":
             print("user deleted")
             userId = msg["data"]["id"]
