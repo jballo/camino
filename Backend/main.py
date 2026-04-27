@@ -119,4 +119,4 @@ async def webhook_handler(request: Request, response: Response, session: Session
         
         return "Succesfully processed user event"
     except WebhookVerificationError as err:
-        raise HTTPException(status_code=400, details="Bad request")
+        raise HTTPException(status_code=400, detail="Bad request")
