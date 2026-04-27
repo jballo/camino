@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Optional
 from fastapi import FastAPI, Depends, HTTPException, Request, Response
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlmodel import Field, Session, SQLModel, create_engine, select
@@ -17,7 +17,7 @@ class User(SQLModel, table=True):
 
     id: str = Field(primary_key=True)
     email: str
-    name: str
+    name: Optional[str] = None
 
 
     def __repr__(self):
@@ -65,7 +65,7 @@ async def webhook_handler(request: Request, response: Response, session: Session
         print("Event: ", event)
         if event == "user.created":
             userId = msg["data"]["id"]
-            email = msg["data"]["email_addresses"][0]["email_address"] if len(msg["data"]["email_addresses"]) > 0 else "randomeEmail@email.com"
+            email = msg["data"]["email_addresses"][0]["email_address"] if len(msg["data"]["email_addresses"]) > 0 else ""
             name = msg["data"]["first_name"] if msg["data"].get("first_name") != None else ""
             user = User(id=userId, email=email, name=name)
             try:
@@ -79,7 +79,7 @@ async def webhook_handler(request: Request, response: Response, session: Session
             
         elif event == "user.updated":
             userId = msg["data"]["id"]
-            newEmail = msg["data"]["email_addresses"][0]["email_address"] if len(msg["data"]["email_addresses"]) > 0 else "randomeEmail@email.com"
+            newEmail = msg["data"]["email_addresses"][0]["email_address"] if len(msg["data"]["email_addresses"]) > 0 else ""
             newName = msg["data"]["first_name"] if msg["data"].get("first_name") != None else ""
             try:
                 statement = select(User).where(User.id == userId)
