@@ -11,4 +11,5 @@ dependencies = [
     "psycopg2>=2.9.12",
     "sqlalchemy>=2.0.49",
     "svix>=1.92.2",
+    "pygithub>=2.9.1",
 ]

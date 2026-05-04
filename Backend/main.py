@@ -1,15 +1,25 @@
+import datetime as dt
+from re import split
+from time import timezone
 from typing import Annotated, Optional
 from fastapi import FastAPI, Depends, HTTPException, Request, Response
+from fastapi.responses import RedirectResponse
+from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlmodel import Field, Session, SQLModel, create_engine, select
-from sqlalchemy import exc
+from sqlalchemy import exc, Column, DateTime, func
 from contextlib import asynccontextmanager
 from svix.webhooks import Webhook, WebhookVerificationError
+from pprint import pprint
+from github import AccessToken, BadCredentialsException, Github, GithubException, Auth, RateLimitExceededException
 
 
 class Settings(BaseSettings):
     database_url: str
     clerk_wh_key: str
+    gh_app_client_id: str
+    gh_app_secret: str
+    backend_api_key: str
     model_config = SettingsConfigDict(env_file=".env")
 
 class User(SQLModel, table=True):
@@ -22,6 +32,39 @@ class User(SQLModel, table=True):
 
     def __repr__(self):
         return "<User(id='%s', email='%s', name='%s')>" % ( self.id, self.email, self.name)
+
+class GithubConnections(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    userId: str = Field(unique=True)
+    githubUsername: str
+    accessToken: str
+    refreshToken: str
+    tokenExpiresAt: dt.datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+    refreshTokenExpiresAt: dt.datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    createdAt: dt.datetime = Field(
+        sa_column=Column[dt.datetime](
+            DateTime(timezone=True),
+            nullable=False,
+            server_default=func.now(),
+        )
+    )
+    updatedAt: dt.datetime = Field(
+        sa_column=Column[dt.datetime](
+            DateTime(timezone=True),
+            nullable=False,
+            server_default=func.now(),
+            onupdate=func.now(),
+        )
+    )
+
+
+class _GithubConnectBody(BaseModel):
+    code: str
+    userId: str
 
 settings = Settings()
 engine = create_engine(settings.database_url)
@@ -120,3 +163,64 @@ async def webhook_handler(request: Request, response: Response, session: Session
         return "Succesfully processed user event"
     except WebhookVerificationError as err:
         raise HTTPException(status_code=400, detail="Bad request")
+
+
+@app.post("/api/github/connect")
+async def add_github_connection(payload: _GithubConnectBody, request: Request, session: SessionDep) -> str:
+    headers = request.headers
+    authorization = headers.get("authorization")
+
+    
+    if authorization is None or authorization != f"Bearer {settings.backend_api_key}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        g = Github()
+        app = g.get_oauth_application(settings.gh_app_client_id, settings.gh_app_secret)
+        accessToken: AccessToken = app.get_access_token(payload.code)
+        g = Github(auth=Auth.AppUserAuth(client_id=settings.gh_app_client_id, client_secret=settings.gh_app_secret,token=accessToken.token))
+        user = g.get_user()
+        username = user.name if user.name else ""
+        access_token: str = accessToken.token
+        expires_in: int | None = accessToken.expires_in
+        refresh_token: str | None = accessToken.refresh_token
+        refresh_expires_in: int | None = accessToken.refresh_expires_in
+        created_at: dt.datetime = accessToken.created
+    except BadCredentialsException:
+        raise HTTPException(status_code=400, detail="Invalid Github code")
+    except RateLimitExceededException:
+        raise HTTPException(status_code=429, detail="GitHub rate limit exceeded")
+    except GithubException as e:
+        if e.status in (400, 401, 403):
+            raise HTTPException(status_code=400, detail="Invalid Github code")
+        raise HTTPException(status_code=502, detail="Github error")
+
+    if expires_in is None or refresh_token is None or refresh_expires_in is None:
+        raise HTTPException(status_code=502, detail="Github returned a non expiring token. Expected an expirign user to server token")
+
+    
+
+    try:
+        token_expires_at = created_at + dt.timedelta(seconds=expires_in)
+        refresh_token_expires_at = created_at + dt.timedelta(seconds=refresh_expires_in)
+
+        connection = GithubConnections(
+            userId=payload.userId,
+            githubUsername=username,
+            accessToken=access_token,
+            refreshToken=accessToken.refresh_token,
+            tokenExpiresAt=token_expires_at,
+            refreshTokenExpiresAt=refresh_token_expires_at
+
+        )
+        session.add(connection)
+        session.commit()
+        session.refresh(connection)
+        return "Sucessfully added github connection"
+    except exc.IntegrityError:
+        session.rollback()
+        raise HTTPException(status_code=409, detail="Already connected")
+    except exc.OperationalError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+
