@@ -11,14 +11,16 @@ from sqlalchemy import exc, Column, DateTime, func
 from contextlib import asynccontextmanager
 from svix.webhooks import Webhook, WebhookVerificationError
 from pprint import pprint
-from github import AccessToken, BadCredentialsException, Github, GithubException, Auth, RateLimitExceededException
+from github import AccessToken, BadCredentialsException, Github, GithubException, Auth, GithubIntegration, RateLimitExceededException, Installation
 
 
 class Settings(BaseSettings):
     database_url: str
     clerk_wh_key: str
+    gh_app_id: int
     gh_app_client_id: str
     gh_app_secret: str
+    gh_app_private_key: str
     backend_api_key: str
     model_config = SettingsConfigDict(env_file=".env")
 
@@ -37,6 +39,7 @@ class GithubConnections(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     userId: str = Field(unique=True)
     githubUsername: str
+    installationId: int
     accessToken: str
     refreshToken: str
     tokenExpiresAt: dt.datetime = Field(
@@ -65,6 +68,7 @@ class GithubConnections(SQLModel, table=True):
 class _GithubConnectBody(BaseModel):
     code: str
     userId: str
+    installationId: str
 
 settings = Settings()
 engine = create_engine(settings.database_url)
@@ -201,12 +205,14 @@ async def add_github_connection(payload: _GithubConnectBody, request: Request, s
     
 
     try:
+        installation_id = payload.installationId
         token_expires_at = created_at + dt.timedelta(seconds=expires_in)
         refresh_token_expires_at = created_at + dt.timedelta(seconds=refresh_expires_in)
 
         connection = GithubConnections(
             userId=payload.userId,
             githubUsername=username,
+            installationId=installation_id,
             accessToken=access_token,
             refreshToken=accessToken.refresh_token,
             tokenExpiresAt=token_expires_at,
@@ -224,3 +230,33 @@ async def add_github_connection(payload: _GithubConnectBody, request: Request, s
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
 
+
+@app.get("/api/respositories/{userId}")
+async def list_respositories(userId: str, request: Request, session: SessionDep) -> list[str]:
+    headers = request.headers
+    authorization = headers.get("authorization")
+    if authorization is None or authorization != f"Bearer {settings.backend_api_key}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        statement = select(GithubConnections).where(GithubConnections.userId == userId)
+        result = session.exec(statement)
+        gh_connection = result.one()
+    except exc.OperationalError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+
+    try:
+        app_auth = Auth.AppAuth(app_id=settings.gh_app_id, private_key=settings.gh_app_private_key)
+        gi = GithubIntegration(auth=app_auth)
+
+        installation = gi.get_app_installation(gh_connection.installationId)
+        repos = installation.get_repos()
+        parsedRepos = []
+        for repo in repos:
+            parsedRepos.append(repo.full_name)
+        print("parsedRepos: ", parsedRepos)
+        return parsedRepos
+        
+    except GithubException:
+        raise HTTPException(status_code=500, detail="Github error")

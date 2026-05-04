@@ -10,6 +10,7 @@ import {
   DialogPanel,
   DialogTitle,
 } from "@headlessui/react";
+import { Show } from "@clerk/nextjs";
 
 const sampleRepos: { id: string; repoName: string }[] = [
   { id: "abc", repoName: "RepositoryABC" },
@@ -21,6 +22,7 @@ export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [repoSelectionDialog, setRepoSelectionDialog] = useState(false);
   const [repoSelected, setRepoSelected] = useState(sampleRepos[0].id);
+  const [repos, setRepos] = useState<string[]>([]);
 
   const onSubmitRepo = useCallback(async () => {
     try {
@@ -69,6 +71,21 @@ export default function Home() {
     }
   }, [repoSelected, prompt]);
 
+  const getRepositories = async () => {
+    try {
+      const response = await fetch("/api/repositories", {
+        method: "GET",
+      });
+      if (!response.ok) throw new Error("Error");
+
+      const result = await response.json();
+      console.log("Result: ", result);
+      setRepos(result);
+    } catch (error) {
+      console.error("error: ", error);
+    }
+  };
+
   return (
     <div className="flex flex-col w-full h-screen">
       <div className="flex w-full h-1/12">
@@ -108,13 +125,13 @@ export default function Home() {
                       onChange={setRepoSelected}
                       className="flex flex-col gap-3"
                     >
-                      {sampleRepos.map((repo) => (
+                      {repos.map((repo) => (
                         <Radio
-                          key={repo.id}
-                          value={repo.id}
+                          key={repo}
+                          value={repo}
                           className="group flex flex-row items-center justify-between relative data-checked:bg-secondary h-10 p-3 rounded-sm"
                         >
-                          <Label>{repo.repoName}</Label>
+                          <Label>{repo}</Label>
                           <CheckCircleIcon className="size-5 fill-white opacity-0 transition group-data-checked:opacity-100" />
                         </Radio>
                       ))}
@@ -136,6 +153,9 @@ export default function Home() {
                         Process
                       </Button>
                     </div>
+                    <Show when="signed-in">
+                      <Button onClick={getRepositories}>Get repos</Button>
+                    </Show>
                   </DialogPanel>
                 </div>
               </Dialog>
