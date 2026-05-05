@@ -3,14 +3,13 @@
 import Header from "@/components/header";
 import { Button, Label, Radio, RadioGroup, Textarea } from "@headlessui/react";
 import { ArrowUp, CheckCircleIcon } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useState, useTransition } from "react";
 import {
   Description,
   Dialog,
   DialogPanel,
   DialogTitle,
 } from "@headlessui/react";
-import { Show } from "@clerk/nextjs";
 
 const sampleRepos: { id: string; repoName: string }[] = [
   { id: "abc", repoName: "RepositoryABC" },
@@ -23,6 +22,10 @@ export default function Home() {
   const [repoSelectionDialog, setRepoSelectionDialog] = useState(false);
   const [repoSelected, setRepoSelected] = useState(sampleRepos[0].id);
   const [repos, setRepos] = useState<string[]>([]);
+  const [repoRetrievalError, setRepoRetrievalError] = useState<
+    string | undefined
+  >(undefined);
+  const [isPending, startTransition] = useTransition();
 
   const onSubmitRepo = useCallback(async () => {
     try {
@@ -71,19 +74,23 @@ export default function Home() {
     }
   }, [repoSelected, prompt]);
 
-  const getRepositories = async () => {
-    try {
-      const response = await fetch("/api/repositories", {
-        method: "GET",
-      });
-      if (!response.ok) throw new Error("Error");
+  const openDialog = async () => {
+    setRepoSelectionDialog(true);
+    startTransition(async () => {
+      try {
+        const response = await await fetch("/api/repositories", {
+          method: "GET",
+        });
 
-      const result = await response.json();
-      console.log("Result: ", result);
-      setRepos(result);
-    } catch (error) {
-      console.error("error: ", error);
-    }
+        if (!response.ok) throw new Error("Failed to get repos");
+        const result = await response.json();
+
+        setRepos(result);
+      } catch (error) {
+        console.log("Error: ", error);
+        setRepoRetrievalError("Failed to retrieve repositories");
+      }
+    });
   };
 
   return (
@@ -104,9 +111,7 @@ export default function Home() {
               onChange={(e) => setPrompt(e.target.value)}
             />
             <div className="flex w-full justify-between">
-              <Button onClick={() => setRepoSelectionDialog(true)}>
-                Select Repo
-              </Button>
+              <Button onClick={openDialog}>Select Repo</Button>
               <Dialog
                 open={repoSelectionDialog}
                 onClose={() => setRepoSelectionDialog(false)}
@@ -125,6 +130,8 @@ export default function Home() {
                       onChange={setRepoSelected}
                       className="flex flex-col gap-3"
                     >
+                      {repoRetrievalError && <div>{repoRetrievalError}</div>}
+                      {isPending && <div>Loading...</div>}
                       {repos.map((repo) => (
                         <Radio
                           key={repo}
@@ -153,9 +160,6 @@ export default function Home() {
                         Process
                       </Button>
                     </div>
-                    <Show when="signed-in">
-                      <Button onClick={getRepositories}>Get repos</Button>
-                    </Show>
                   </DialogPanel>
                 </div>
               </Dialog>
