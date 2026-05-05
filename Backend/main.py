@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     gh_app_secret: str
     gh_app_private_key: str
     backend_api_key: str
+    encryption_key: str
     model_config = SettingsConfigDict(env_file=".env")
 
 class User(SQLModel, table=True):
@@ -68,7 +69,7 @@ class GithubConnections(SQLModel, table=True):
 class _GithubConnectBody(BaseModel):
     code: str
     userId: str
-    installationId: str
+    installationId: int
 
 settings = Settings()
 engine = create_engine(settings.database_url)
@@ -200,7 +201,7 @@ async def add_github_connection(payload: _GithubConnectBody, request: Request, s
         raise HTTPException(status_code=502, detail="Github error")
 
     if expires_in is None or refresh_token is None or refresh_expires_in is None:
-        raise HTTPException(status_code=502, detail="Github returned a non expiring token. Expected an expirign user to server token")
+        raise HTTPException(status_code=502, detail="Github returned a non expiring token. Expected an expiring user to server token")
 
     
 
@@ -231,7 +232,7 @@ async def add_github_connection(payload: _GithubConnectBody, request: Request, s
         raise HTTPException(status_code=500, detail="Database error")
 
 
-@app.get("/api/respositories/{userId}")
+@app.get("/api/repositories/{userId}")
 async def list_respositories(userId: str, request: Request, session: SessionDep) -> list[str]:
     headers = request.headers
     authorization = headers.get("authorization")
@@ -242,6 +243,8 @@ async def list_respositories(userId: str, request: Request, session: SessionDep)
         statement = select(GithubConnections).where(GithubConnections.userId == userId)
         result = session.exec(statement)
         gh_connection = result.one()
+    except exc.NoResultFound:
+        raise HTTPException(status_code=404, detail="Gtibhub connection not found for user")
     except exc.OperationalError:
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")

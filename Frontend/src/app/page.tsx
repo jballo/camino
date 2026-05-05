@@ -76,9 +76,10 @@ export default function Home() {
 
   const openDialog = async () => {
     setRepoSelectionDialog(true);
+    setRepoRetrievalError(undefined);
     startTransition(async () => {
       try {
-        const response = await await fetch("/api/repositories", {
+        const response = await fetch("/api/repositories", {
           method: "GET",
         });
 
