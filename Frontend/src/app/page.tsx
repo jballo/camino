@@ -20,38 +20,22 @@ const sampleRepos: { id: string; repoName: string }[] = [
 export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [repoSelectionDialog, setRepoSelectionDialog] = useState(false);
-  const [repoSelected, setRepoSelected] = useState(sampleRepos[0].id);
+  const [repoSelected, setRepoSelected] = useState<undefined | string>(
+    undefined,
+  );
   const [repos, setRepos] = useState<string[]>([]);
   const [repoRetrievalError, setRepoRetrievalError] = useState<
     string | undefined
   >(undefined);
   const [isPending, startTransition] = useTransition();
 
-  const onSubmitRepo = useCallback(async () => {
-    try {
-      if (repoSelected.length == 0) throw new Error("Invalid");
-      const response = await fetch("/api/repositories", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          url: repoSelected,
-        }),
-      });
-
-      if (!response.ok) throw new Error("Error");
-
-      const result = await response.text();
-      console.log("Result: ", result);
-    } catch (error) {
-      console.log("error: ", error);
-    }
-  }, [repoSelected]);
-
   const onSubmitPrompt = useCallback(async () => {
     try {
-      if (prompt.length <= 0 || repoSelected.length <= 0)
+      if (
+        prompt.length <= 0 ||
+        repoSelected == undefined ||
+        repoSelected.length <= 0
+      )
         throw new Error(`Invalid input`);
 
       const response = await fetch("/api/journeys", {
@@ -94,6 +78,31 @@ export default function Home() {
     });
   };
 
+  const processRepo = useCallback(async () => {
+    console.log("repo selected: ", repoSelected);
+    if (repoSelected == undefined) return;
+
+    try {
+      const response = await fetch("/api/repositories/ingest", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          repoName: repoSelected,
+        }),
+      });
+
+      if (!response.ok) throw new Error("Failed to process repo");
+
+      const result = await response.text();
+      console.log("Result: ", result);
+      setRepoSelectionDialog(false);
+    } catch (error) {
+      console.log("Error: ", error);
+    }
+  }, [repoSelected, repoSelectionDialog]);
+
   return (
     <div className="flex flex-col w-full h-screen">
       <div className="flex w-full h-1/12">
@@ -127,7 +136,7 @@ export default function Home() {
                       This will be the repository the journeys will be based on.
                     </Description>
                     <RadioGroup
-                      value={repoSelected}
+                      value={repoSelected || ""}
                       onChange={setRepoSelected}
                       className="flex flex-col gap-3"
                     >
@@ -154,8 +163,7 @@ export default function Home() {
                       <Button
                         className="bg-primary text-white w-20 h-6 rounded-sm"
                         onClick={() => {
-                          setRepoSelectionDialog(false);
-                          onSubmitRepo();
+                          processRepo();
                         }}
                       >
                         Process

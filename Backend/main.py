@@ -71,6 +71,10 @@ class _GithubConnectBody(BaseModel):
     userId: str
     installationId: int
 
+class _RepoIngestBody(BaseModel):
+    repoName: str
+    userId: str
+
 settings = Settings()
 engine = create_engine(settings.database_url)
 
@@ -263,3 +267,52 @@ async def list_respositories(userId: str, request: Request, session: SessionDep)
         
     except GithubException:
         raise HTTPException(status_code=500, detail="Github error")
+
+
+
+@app.post("/api/repositories/ingest")
+async def process_repository(payload: _RepoIngestBody, request: Request, session: SessionDep):
+
+    headers = request.headers
+    authorization = headers.get("authorization")
+    if authorization is None or authorization != f"Bearer {settings.backend_api_key}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+    try:
+        statement = select(GithubConnections).where(GithubConnections.userId == payload.userId)
+        result = session.exec(statement)
+        gh_connection = result.one()
+    except exc.NoResultFound:
+        raise HTTPException(status_code=404, detail="Gtibhub connection not found for user")
+    except exc.OperationalError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+
+    try:
+        app_auth = Auth.AppAuth(app_id=settings.gh_app_id, private_key=settings.gh_app_private_key)
+        gi = GithubIntegration(auth=app_auth)
+
+        installation = gi.get_app_installation(gh_connection.installationId)
+        repos = installation.get_repos()
+        repoSelected = None
+        for repo in repos:
+            if repo.full_name == payload.repoName:
+                repoSelected = repo
+        
+        contents = repoSelected.get_contents("")
+        while contents:
+            file_content = contents.pop(0)
+            if file_content.type == "dir":
+                contents.extend(repo.get_contents(file_content.path))
+            else:
+                print(file_content.decoded_content)
+                content = file_content.decoded_content
+                content.split
+
+        return []
+        
+    except GithubException:
+        raise HTTPException(status_code=500, detail="Github error")
+
+    
