@@ -311,6 +311,9 @@ async def process_repository(payload: _RepoIngestBody, request: Request, session
         for repo in repos:
             if repo.full_name == payload.repoName:
                 repoSelected = repo
+
+        if repoSelected == None:
+            raise HTTPException(status_code=404, detail="Repo not found")
         
         contents = repoSelected.get_contents("")
         while contents:
