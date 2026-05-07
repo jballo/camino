@@ -215,7 +215,7 @@ async def add_github_connection(payload: _GithubConnectBody, request: Request, s
         raise HTTPException(status_code=502, detail="Github returned a non expiring token. Expected an expiring user to server token")
 
     encrypted_access_token = encrypt_token(access_token)
-    encrypted_refresh_token = encrypt_token(access_token)
+    encrypted_refresh_token = encrypt_token(refresh_token)
 
     try:
         installation_id = payload.installationId
