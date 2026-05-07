@@ -14,20 +14,19 @@ export async function POST(req: NextRequest) {
 
     if (!repoName) throw new Error(`Invalid body`);
 
-    const response = await fetch(
-      "http://127.0.0.1:8000/api/repositories/ingest",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${backend_api_key}`,
-        },
-        body: JSON.stringify({
-          repoName,
-          userId,
-        }),
+    const backend_url = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
+
+    const response = await fetch(`${backend_url}/api/repositories/ingest`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${backend_api_key}`,
       },
-    );
+      body: JSON.stringify({
+        repoName,
+        userId,
+      }),
+    });
 
     if (!response.ok) throw new Error("Failed to process repo");
 

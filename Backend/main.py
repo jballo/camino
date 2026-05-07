@@ -257,7 +257,7 @@ async def list_respositories(userId: str, request: Request, session: SessionDep)
         result = session.exec(statement)
         gh_connection = result.one()
     except exc.NoResultFound:
-        raise HTTPException(status_code=404, detail="Gtibhub connection not found for user")
+        raise HTTPException(status_code=404, detail="Github connection not found for user")
     except exc.OperationalError:
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
@@ -293,7 +293,7 @@ async def process_repository(payload: _RepoIngestBody, request: Request, session
         result = session.exec(statement)
         gh_connection = result.one()
     except exc.NoResultFound:
-        raise HTTPException(status_code=404, detail="Gtibhub connection not found for user")
+        raise HTTPException(status_code=404, detail="Github connection not found for user")
     except exc.OperationalError:
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
