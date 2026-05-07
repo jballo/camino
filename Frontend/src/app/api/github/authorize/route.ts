@@ -33,8 +33,8 @@ export async function GET(req: NextRequest) {
 
     const result = await response.text();
     console.log("result: ", result);
-
-    return NextResponse.redirect(new URL("http://localhost:3000/"));
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+    return NextResponse.redirect(new URL("/", appUrl));
   } catch (error) {
     console.log("Error: ", error);
     return NextResponse.json(
