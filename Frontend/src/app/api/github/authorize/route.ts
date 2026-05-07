@@ -16,7 +16,9 @@ export async function GET(req: NextRequest) {
     if (code === null || installationId === null)
       throw new Error(`Invalid request`);
 
-    const response = await fetch("http://127.0.0.1:8000/api/github/connect", {
+    const backend_url = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
+
+    const response = await fetch(`${backend_url}/api/github/connect`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
