@@ -196,7 +196,7 @@ async def add_github_connection(payload: _GithubConnectBody, request: Request, s
         accessToken: AccessToken = app.get_access_token(payload.code)
         g = Github(auth=Auth.AppUserAuth(client_id=settings.gh_app_client_id, client_secret=settings.gh_app_secret,token=accessToken.token))
         user = g.get_user()
-        username = user.name if user.name else ""
+        username = user.login
         access_token: str = accessToken.token
         expires_in: int | None = accessToken.expires_in
         refresh_token: str | None = accessToken.refresh_token
