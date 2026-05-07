@@ -1,16 +1,13 @@
 import datetime as dt
-from time import timezone
 from typing import Annotated, Optional
 from fastapi import FastAPI, Depends, HTTPException, Request, Response
-from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 from sqlalchemy import exc, Column, DateTime, func
 from contextlib import asynccontextmanager
 from svix.webhooks import Webhook, WebhookVerificationError
-from pprint import pprint
-from github import AccessToken, BadCredentialsException, Github, GithubException, Auth, GithubIntegration, RateLimitExceededException, Installation
+from github import AccessToken, BadCredentialsException, Github, GithubException, Auth, GithubIntegration, RateLimitExceededException
 from cryptography.fernet import Fernet
 
 
