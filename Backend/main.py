@@ -1,5 +1,4 @@
 import datetime as dt
-from re import split
 from time import timezone
 from typing import Annotated, Optional
 from fastapi import FastAPI, Depends, HTTPException, Request, Response
@@ -12,6 +11,8 @@ from contextlib import asynccontextmanager
 from svix.webhooks import Webhook, WebhookVerificationError
 from pprint import pprint
 from github import AccessToken, BadCredentialsException, Github, GithubException, Auth, GithubIntegration, RateLimitExceededException, Installation
+from cryptography.fernet import Fernet
+
 
 
 class Settings(BaseSettings):
@@ -41,8 +42,8 @@ class GithubConnections(SQLModel, table=True):
     userId: str = Field(unique=True)
     githubUsername: str
     installationId: int
-    accessToken: str
-    refreshToken: str
+    encryptedAccessToken: str
+    encryptedRefreshToken: str
     tokenExpiresAt: dt.datetime = Field(
         sa_column=Column(DateTime(timezone=True), nullable=False)
     )
@@ -90,6 +91,15 @@ async def lifespan(app: FastAPI):
 SessionDep = Annotated[Session, Depends(get_session)]
 
 app = FastAPI(lifespan=lifespan)
+def get_fernet() -> Fernet:
+    key = settings.encryption_key.encode()
+    return Fernet(key)
+
+def encrypt_token(token: str) -> str:
+    return get_fernet().encrypt(token.encode()).decode()
+
+def decrypt_token(token: str) -> str:
+    return get_fernet().decrypt(token.encode()).decode()
 
 
 @app.post("/users")
@@ -207,19 +217,21 @@ async def add_github_connection(payload: _GithubConnectBody, request: Request, s
     if expires_in is None or refresh_token is None or refresh_expires_in is None:
         raise HTTPException(status_code=502, detail="Github returned a non expiring token. Expected an expiring user to server token")
 
-    
+    encrypted_access_token = encrypt_token(access_token)
+    encrypted_refresh_token = encrypt_token(access_token)
 
     try:
         installation_id = payload.installationId
         token_expires_at = created_at + dt.timedelta(seconds=expires_in)
         refresh_token_expires_at = created_at + dt.timedelta(seconds=refresh_expires_in)
 
+
         connection = GithubConnections(
             userId=payload.userId,
             githubUsername=username,
             installationId=installation_id,
-            accessToken=access_token,
-            refreshToken=accessToken.refresh_token,
+            encryptedAccessToken=encrypted_access_token,
+            encryptedRefreshToken=encrypted_refresh_token,
             tokenExpiresAt=token_expires_at,
             refreshTokenExpiresAt=refresh_token_expires_at
 
@@ -304,11 +316,9 @@ async def process_repository(payload: _RepoIngestBody, request: Request, session
         while contents:
             file_content = contents.pop(0)
             if file_content.type == "dir":
-                contents.extend(repo.get_contents(file_content.path))
+                contents.extend(repoSelected.get_contents(file_content.path))
             else:
                 print(file_content.decoded_content)
-                content = file_content.decoded_content
-                content.split
 
         return []
         
