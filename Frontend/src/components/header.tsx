@@ -34,9 +34,9 @@ export default function Header() {
               <Link href="/settings">Settings</Link>
             </div>
             <div>
-              <Link href="https://github.com/apps/camino-onboarder/installations/new">
+              <a href="/api/github/install">
                 <GitHub />
-              </Link>
+              </a>
             </div>
           </PopoverPanel>
         </Popover>

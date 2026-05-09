@@ -1,5 +1,6 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextResponse, type NextRequest } from "next/server";
+import crypto from "crypto";
 
 export async function GET(req: NextRequest) {
   try {
@@ -9,6 +10,11 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const code = searchParams.get("code");
     const installationId = searchParams.get("installation_id");
+    const state = searchParams.get("state");
+    const storedState = req.cookies.get("gh_oauth_state")?.value;
+
+    if (!state || !storedState || state !== storedState)
+      throw new Error(`Ivalid state - possible CSRF`);
 
     if (!isAuthenticated || user === null || backend_api_key === undefined)
       throw new Error(`Not authenticated`);
@@ -36,7 +42,9 @@ export async function GET(req: NextRequest) {
     const result = await response.text();
     console.log("result: ", result);
     const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
-    return NextResponse.redirect(new URL("/", appUrl));
+    const redirectResponse = NextResponse.redirect(new URL("/", appUrl));
+    redirectResponse.cookies.delete("gh_oauth_state");
+    return redirectResponse;
   } catch (error) {
     console.log("Error: ", error);
     return NextResponse.json(
