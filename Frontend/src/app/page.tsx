@@ -3,7 +3,7 @@
 import Header from "@/components/header";
 import { Button, Label, Radio, RadioGroup, Textarea } from "@headlessui/react";
 import { ArrowUp, CheckCircleIcon } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useState, useTransition } from "react";
 import {
   Description,
   Dialog,
@@ -20,33 +20,22 @@ const sampleRepos: { id: string; repoName: string }[] = [
 export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [repoSelectionDialog, setRepoSelectionDialog] = useState(false);
-  const [repoSelected, setRepoSelected] = useState(sampleRepos[0].id);
-
-  const onSubmitRepo = useCallback(async () => {
-    try {
-      if (repoSelected.length == 0) throw new Error("Invalid");
-      const response = await fetch("/api/repositories", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          url: repoSelected,
-        }),
-      });
-
-      if (!response.ok) throw new Error("Error");
-
-      const result = await response.text();
-      console.log("Result: ", result);
-    } catch (error) {
-      console.log("error: ", error);
-    }
-  }, [repoSelected]);
+  const [repoSelected, setRepoSelected] = useState<undefined | string>(
+    undefined,
+  );
+  const [repos, setRepos] = useState<string[]>([]);
+  const [repoRetrievalError, setRepoRetrievalError] = useState<
+    string | undefined
+  >(undefined);
+  const [isPending, startTransition] = useTransition();
 
   const onSubmitPrompt = useCallback(async () => {
     try {
-      if (prompt.length <= 0 || repoSelected.length <= 0)
+      if (
+        prompt.length <= 0 ||
+        repoSelected == undefined ||
+        repoSelected.length <= 0
+      )
         throw new Error(`Invalid input`);
 
       const response = await fetch("/api/journeys", {
@@ -69,6 +58,51 @@ export default function Home() {
     }
   }, [repoSelected, prompt]);
 
+  const openDialog = async () => {
+    setRepoSelectionDialog(true);
+    setRepoRetrievalError(undefined);
+    startTransition(async () => {
+      try {
+        const response = await fetch("/api/repositories", {
+          method: "GET",
+        });
+
+        if (!response.ok) throw new Error("Failed to get repos");
+        const result = await response.json();
+
+        setRepos(result);
+      } catch (error) {
+        console.log("Error: ", error);
+        setRepoRetrievalError("Failed to retrieve repositories");
+      }
+    });
+  };
+
+  const processRepo = useCallback(async () => {
+    console.log("repo selected: ", repoSelected);
+    if (repoSelected == undefined) return;
+
+    try {
+      const response = await fetch("/api/repositories/ingest", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          repoName: repoSelected,
+        }),
+      });
+
+      if (!response.ok) throw new Error("Failed to process repo");
+
+      const result = await response.text();
+      console.log("Result: ", result);
+      setRepoSelectionDialog(false);
+    } catch (error) {
+      console.log("Error: ", error);
+    }
+  }, [repoSelected, repoSelectionDialog]);
+
   return (
     <div className="flex flex-col w-full h-screen">
       <div className="flex w-full h-1/12">
@@ -87,9 +121,7 @@ export default function Home() {
               onChange={(e) => setPrompt(e.target.value)}
             />
             <div className="flex w-full justify-between">
-              <Button onClick={() => setRepoSelectionDialog(true)}>
-                Select Repo
-              </Button>
+              <Button onClick={openDialog}>Select Repo</Button>
               <Dialog
                 open={repoSelectionDialog}
                 onClose={() => setRepoSelectionDialog(false)}
@@ -104,17 +136,19 @@ export default function Home() {
                       This will be the repository the journeys will be based on.
                     </Description>
                     <RadioGroup
-                      value={repoSelected}
+                      value={repoSelected || ""}
                       onChange={setRepoSelected}
                       className="flex flex-col gap-3"
                     >
-                      {sampleRepos.map((repo) => (
+                      {repoRetrievalError && <div>{repoRetrievalError}</div>}
+                      {isPending && <div>Loading...</div>}
+                      {repos.map((repo) => (
                         <Radio
-                          key={repo.id}
-                          value={repo.id}
+                          key={repo}
+                          value={repo}
                           className="group flex flex-row items-center justify-between relative data-checked:bg-secondary h-10 p-3 rounded-sm"
                         >
-                          <Label>{repo.repoName}</Label>
+                          <Label>{repo}</Label>
                           <CheckCircleIcon className="size-5 fill-white opacity-0 transition group-data-checked:opacity-100" />
                         </Radio>
                       ))}
@@ -129,8 +163,7 @@ export default function Home() {
                       <Button
                         className="bg-primary text-white w-20 h-6 rounded-sm"
                         onClick={() => {
-                          setRepoSelectionDialog(false);
-                          onSubmitRepo();
+                          processRepo();
                         }}
                       >
                         Process
