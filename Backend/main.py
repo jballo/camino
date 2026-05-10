@@ -9,7 +9,10 @@ from contextlib import asynccontextmanager
 from svix.webhooks import Webhook, WebhookVerificationError
 from github import AccessToken, BadCredentialsException, Github, GithubException, Auth, GithubIntegration, RateLimitExceededException
 from cryptography.fernet import Fernet
-
+import hmac
+import hashlib
+import pprint
+import json
 
 
 class Settings(BaseSettings):
@@ -21,6 +24,7 @@ class Settings(BaseSettings):
     gh_app_private_key: str
     backend_api_key: str
     encryption_key: str
+    gh_webhook_secret: str
     model_config = SettingsConfigDict(env_file=".env")
 
 class User(SQLModel, table=True):
@@ -180,6 +184,61 @@ async def webhook_handler(request: Request, response: Response, session: Session
     except WebhookVerificationError as err:
         raise HTTPException(status_code=400, detail="Bad request")
 
+@app.post("/webhook/github")
+async def gh_webhook_handler(request: Request, session: SessionDep):
+    headers = request.headers
+    ghEvent = headers.get("x-github-event", "")
+    payload = await request.body()
+
+    signature_header = request.headers.get("x-hub-signature-256", "")
+    expected = "sha256=" + hmac.new(
+        settings.gh_webhook_secret.encode(),
+        payload,
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected, signature_header):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+
+    try:
+        parsedPayload = json.loads(payload)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    installation = parsedPayload.get("installation")
+    if installation is None:
+        raise HTTPException(status_code=400, detail="Invalid request")
+    installationId = installation.get("id")
+    if installationId is None:
+        raise HTTPException(status_code=400, detail="Invalid request")
+    installationEvent = parsedPayload.get("action")
+    print("Github event: ", ghEvent)
+    print("Installation event: ", installationEvent)
+    if ghEvent == "installation" and installationEvent == "deleted":
+        try:
+            statement = select(GithubConnections).where(GithubConnections.installationId == installationId)
+            results = session.exec(statement)
+            connection = results.one()
+            session.delete(connection)
+            session.commit()
+            return "github connection deleted"
+        except exc.NoResultFound:
+            session.rollback()
+            raise HTTPException(status_code=404, detail="User not found")
+        except exc.MultipleResultsFound:
+            session.rollback()
+            raise HTTPException(status_code=500, detail="Duplicate installation")
+        except exc.IntegrityError:
+            session.rollback()
+            raise HTTPException(status_code=500, detail="Failed to delete user")
+        except exc.OperationalError:
+            session.rollback()
+            raise HTTPException(status_code=500, detail="Database error")
+
+
+    return "Unknown event"
+
+    
 
 @app.post("/api/github/connect")
 async def add_github_connection(payload: _GithubConnectBody, request: Request, session: SessionDep) -> str:

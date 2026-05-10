@@ -1,6 +1,5 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextResponse, type NextRequest } from "next/server";
-import crypto from "crypto";
 
 export async function GET(req: NextRequest) {
   try {
@@ -14,7 +13,7 @@ export async function GET(req: NextRequest) {
     const storedState = req.cookies.get("gh_oauth_state")?.value;
 
     if (!state || !storedState || state !== storedState)
-      throw new Error(`Ivalid state - possible CSRF`);
+      throw new Error(`Invalid state - possible CSRF`);
 
     if (!isAuthenticated || user === null || backend_api_key === undefined)
       throw new Error(`Not authenticated`);
