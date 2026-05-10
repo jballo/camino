@@ -221,6 +221,9 @@ async def gh_webhook_handler(request: Request, session: SessionDep):
         except exc.NoResultFound:
             session.rollback()
             raise HTTPException(status_code=404, detail="User not found")
+        except exc.MultipleResultsFound:
+            session.rollback()
+            raise HTTPException(status_code=500, detail="Duplicate installation")
         except exc.IntegrityError:
             session.rollback()
             raise HTTPException(status_code=500, detail="Failed to delete user")
