@@ -200,7 +200,11 @@ async def gh_webhook_handler(request: Request, session: SessionDep):
         raise HTTPException(status_code=401, detail="Invalid signature")
 
 
-    parsedPayload = json.loads(payload)
+    try:
+        parsedPayload = json.loads(payload)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
     installation = parsedPayload.get("installation")
     if installation is None:
         raise HTTPException(status_code=400, detail="Invalid request")
