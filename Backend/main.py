@@ -202,10 +202,10 @@ async def gh_webhook_handler(request: Request, session: SessionDep):
 
     parsedPayload = json.loads(payload)
     installation = parsedPayload.get("installation")
-    if installation == None:
+    if installation is None:
         raise HTTPException(status_code=400, detail="Invalid request")
     installationId = installation.get("id")
-    if installationId == None:
+    if installationId is None:
         raise HTTPException(status_code=400, detail="Invalid request")
     installationEvent = parsedPayload.get("action")
     print("Github event: ", ghEvent)
