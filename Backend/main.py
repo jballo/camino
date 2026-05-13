@@ -11,8 +11,8 @@ from github import AccessToken, BadCredentialsException, Github, GithubException
 from cryptography.fernet import Fernet
 import hmac
 import hashlib
-import pprint
 import json
+from parser import parse_file
 
 
 class Settings(BaseSettings):
@@ -372,14 +372,29 @@ async def process_repository(payload: _RepoIngestBody, request: Request, session
             raise HTTPException(status_code=404, detail="Repo not found")
         
         contents = repoSelected.get_contents("")
+        all_chunks = []
+
         while contents:
             file_content = contents.pop(0)
             if file_content.type == "dir":
                 contents.extend(repoSelected.get_contents(file_content.path))
             else:
-                print(file_content.decoded_content)
+                source_bytes = file_content.decoded_content
+                if source_bytes:
+                    chunks = parse_file(file_content.path, source_bytes)
+                    all_chunks.extend(chunks)
 
-        return []
+        return [
+            {
+                "symbol_name": c.symbol_name,
+                "symbol_type": c.symbol_type,
+                "file_path": c.file_path,
+                "start_line": c.start_line,
+                "end_line": c.end_line,
+                "language": c.language,
+            }
+            for c in all_chunks
+        ]
         
     except GithubException:
         raise HTTPException(status_code=500, detail="Github error")
