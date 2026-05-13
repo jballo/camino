@@ -14,9 +14,9 @@ LANGUAGES = {
 
 TARGET_NODES = {
     ".py":  {"function_definition", "class_definition"},
-    ".js":  {"function_declaration", "class_declaration", "method_definition"},
-    ".ts":  {"function_declaration", "class_declaration", "method_definition"},
-    ".tsx": {"function_declaration", "class_declaration", "method_definition"},
+    ".js":  {"function_declaration", "class_declaration", "method_definition", "lexical_declaration"},
+    ".ts":  {"function_declaration", "class_declaration", "method_definition", "lexical_declaration"},
+    ".tsx": {"function_declaration", "class_declaration", "method_definition", "lexical_declaration"},
 }
 
 SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "dist", "build", ".next"}
@@ -119,16 +119,51 @@ def extract_chunks(source_bytes: bytes, file_path: str) -> list[CodeChunk]:
     parser = Parser(language)
     tree = parser.parse(source_bytes)
     target_types = TARGET_NODES[ext]
-    def collect_nodes(node: Node) -> list[Node]:
+    def collect_nodes(root: Node) -> list[Node]:
         results = []
-        if node.type in target_types:
-            results.append(node)
-        for child in node.children:
-            results.extend(collect_nodes(child))
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            if node.type in target_types:
+                results.append(node)
+            stack.extend(reversed(node.children))
         return results
     nodes = collect_nodes(tree.root_node)
     chunks = []
     for node in nodes:
+        # Arrow functions: lexical_declaration → variable_declarator → arrow_function
+        if node.type == "lexical_declaration":
+            for declarator in node.children:
+                if declarator.type != "variable_declarator":
+                    continue
+                value = declarator.child_by_field_name("value")
+                if not value or value.type != "arrow_function":
+                    continue
+                name_node = declarator.child_by_field_name("name")
+                if not name_node:
+                    continue
+                arrow_body = value.child_by_field_name("body")
+                sig = source_bytes[node.start_byte:arrow_body.start_byte].decode("utf-8").rstrip() if arrow_body else source_bytes[node.start_byte:node.end_byte].decode("utf-8").split("\n")[0]
+                docstring = None
+                prev = node.prev_sibling
+                if prev and prev.type == "comment":
+                    text = prev.text.decode("utf-8")
+                    if text.startswith("/**"):
+                        docstring = text
+                chunks.append(CodeChunk(
+                    file_path=file_path,
+                    symbol_name=name_node.text.decode("utf-8"),
+                    symbol_type="function",
+                    language=ext.lstrip("."),
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    source_code=source_bytes[node.start_byte:node.end_byte].decode("utf-8"),
+                    signature=sig,
+                    docstring=docstring,
+                    parent_class=get_parent_class(node),
+                ))
+            continue
+
         name_node = node.child_by_field_name("name")
         if not name_node:
             continue
@@ -159,11 +194,3 @@ def parse_file(file_path: str, source: bytes) -> list[CodeChunk]:
     except Exception as e:
         print(f"Failed to parse {file_path}: {e}")
         return []
-
-
-
-
-def print_tree(node: Node, indent: int = 0):
-    print("  " * indent + f"{node.type} [{node.start_point[0]}:{node.start_point[1]}]")
-    for child in node.children:
-        print_tree(child, indent + 1)
