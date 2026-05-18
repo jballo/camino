@@ -1,21 +1,6 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
-export async function POST(req: Request) {
-  try {
-    const body = await req.json();
-    const { url } = body;
-
-    if (!url || url.length === 0) throw new Error(`Failure processing`);
-
-    console.log("Repo url: ", url);
-    return new NextResponse(`Success processing ${url}`, { status: 200 });
-  } catch (error) {
-    console.error("[/api/repositories]: ", error);
-    return new NextResponse(`System failed`, { status: 500 });
-  }
-}
-
 export async function GET() {
   try {
     const { isAuthenticated, userId } = await auth();
@@ -26,7 +11,7 @@ export async function GET() {
       throw new Error(`Not authenticated`);
 
     const backend_url = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
-    const newUrl = `${backend_url}/api/repositories/${userId}`;
+    const newUrl = `${backend_url}/api/v1/repositories/${userId}`;
     console.log("New url: ", newUrl);
     const response = await fetch(newUrl, {
       method: "GET",
