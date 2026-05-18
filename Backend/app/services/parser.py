@@ -1,9 +1,10 @@
 import os
 from dataclasses import dataclass
-from tree_sitter import Language, Parser, Node
-import tree_sitter_python as tspython
+
 import tree_sitter_javascript as tsjavascript
+import tree_sitter_python as tspython
 import tree_sitter_typescript as tstypescript
+from tree_sitter import Language, Node, Parser
 
 LANGUAGES = {
     ".py": Language(tspython.language()),
@@ -22,6 +23,7 @@ TARGET_NODES = {
 SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "dist", "build", ".next"}
 MAX_FILE_BYTES = 500_000
 
+
 @dataclass
 class CodeChunk:
     file_path: str
@@ -34,7 +36,6 @@ class CodeChunk:
     signature: str              # def/class lines before the body
     docstring: str | None
     parent_class: str | None    # for methods
-
 
 
 def get_symbol_type(node: Node) -> str:
@@ -55,7 +56,6 @@ def get_symbol_type(node: Node) -> str:
 
     return "function"
 
-    
 
 def get_parent_class(node: Node) -> str | None:
     current = node.parent
@@ -67,6 +67,7 @@ def get_parent_class(node: Node) -> str | None:
             return None
         current = current.parent
     return None
+
 
 def extract_signature(node: Node, source_bytes: bytes) -> str:
     body_node = node.child_by_field_name("body")
@@ -119,6 +120,7 @@ def extract_chunks(source_bytes: bytes, file_path: str) -> list[CodeChunk]:
     parser = Parser(language)
     tree = parser.parse(source_bytes)
     target_types = TARGET_NODES[ext]
+
     def collect_nodes(root: Node) -> list[Node]:
         results = []
         stack = [root]
@@ -128,6 +130,7 @@ def extract_chunks(source_bytes: bytes, file_path: str) -> list[CodeChunk]:
                 results.append(node)
             stack.extend(reversed(node.children))
         return results
+
     nodes = collect_nodes(tree.root_node)
     chunks = []
     for node in nodes:
@@ -143,7 +146,11 @@ def extract_chunks(source_bytes: bytes, file_path: str) -> list[CodeChunk]:
                 if not name_node:
                     continue
                 arrow_body = value.child_by_field_name("body")
-                sig = source_bytes[node.start_byte:arrow_body.start_byte].decode("utf-8").rstrip() if arrow_body else source_bytes[node.start_byte:node.end_byte].decode("utf-8").split("\n")[0]
+                sig = (
+                    source_bytes[node.start_byte:arrow_body.start_byte].decode("utf-8").rstrip()
+                    if arrow_body
+                    else source_bytes[node.start_byte:node.end_byte].decode("utf-8").split("\n")[0]
+                )
                 docstring = None
                 prev = node.prev_sibling
                 if prev and prev.type == "comment":
@@ -185,7 +192,6 @@ def extract_chunks(source_bytes: bytes, file_path: str) -> list[CodeChunk]:
         )
         chunks.append(chunk)
     return chunks
-
 
 
 def parse_file(file_path: str, source: bytes) -> list[CodeChunk]:

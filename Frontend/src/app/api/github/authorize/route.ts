@@ -23,7 +23,7 @@ export async function GET(req: NextRequest) {
 
     const backend_url = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
 
-    const response = await fetch(`${backend_url}/api/github/connect`, {
+    const response = await fetch(`${backend_url}/api/v1/github/connect`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

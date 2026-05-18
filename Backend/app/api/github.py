@@ -1,0 +1,97 @@
+import datetime as dt
+
+from fastapi import APIRouter, Depends, HTTPException
+from github import (
+    AccessToken,
+    Auth,
+    BadCredentialsException,
+    Github,
+    GithubException,
+    RateLimitExceededException,
+)
+from pydantic import BaseModel
+from sqlalchemy import exc
+
+from app.config import settings
+from app.db import SessionDep
+from app.models.github_connection import GithubConnections
+from app.security import encrypt_token, verify_api_key
+
+
+router = APIRouter()
+
+
+class GithubConnectBody(BaseModel):
+    code: str
+    userId: str
+    installationId: int
+
+
+@router.post("/connect", dependencies=[Depends(verify_api_key)])
+async def add_github_connection(payload: GithubConnectBody, session: SessionDep) -> str:
+    try:
+        g = Github()
+        oauth_app = g.get_oauth_application(
+            settings.gh_app_client_id, settings.gh_app_secret
+        )
+        access_token_obj: AccessToken = oauth_app.get_access_token(payload.code)
+        g = Github(
+            auth=Auth.AppUserAuth(
+                client_id=settings.gh_app_client_id,
+                client_secret=settings.gh_app_secret,
+                token=access_token_obj.token,
+            )
+        )
+        username = g.get_user().login
+        access_token: str = access_token_obj.token
+        expires_in: int | None = access_token_obj.expires_in
+        refresh_token: str | None = access_token_obj.refresh_token
+        refresh_expires_in: int | None = access_token_obj.refresh_expires_in
+        created_at: dt.datetime = access_token_obj.created
+    except BadCredentialsException:
+        raise HTTPException(status_code=400, detail="Invalid Github code")
+    except RateLimitExceededException:
+        raise HTTPException(status_code=429, detail="GitHub rate limit exceeded")
+    except GithubException as e:
+        if e.status in (400, 401, 403):
+            raise HTTPException(status_code=400, detail="Invalid Github code")
+        raise HTTPException(status_code=502, detail="Github error")
+
+    if (
+        refresh_token is None
+        or expires_in is None
+        or refresh_expires_in is None
+        or expires_in <= 0
+        or refresh_expires_in <= 0
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail="Github returned a non-expiring or already-expired token. Expected an expiring user-to-server token",
+        )
+
+    encrypted_access_token = encrypt_token(access_token)
+    encrypted_refresh_token = encrypt_token(refresh_token)
+
+    try:
+        token_expires_at = created_at + dt.timedelta(seconds=expires_in)
+        refresh_token_expires_at = created_at + dt.timedelta(seconds=refresh_expires_in)
+
+        connection = GithubConnections(
+            userId=payload.userId,
+            githubUsername=username,
+            installationId=payload.installationId,
+            encryptedAccessToken=encrypted_access_token,
+            encryptedRefreshToken=encrypted_refresh_token,
+            tokenExpiresAt=token_expires_at,
+            refreshTokenExpiresAt=refresh_token_expires_at,
+        )
+        session.add(connection)
+        session.commit()
+        session.refresh(connection)
+        return "Successfully added github connection"
+    except exc.IntegrityError:
+        session.rollback()
+        raise HTTPException(status_code=409, detail="Already connected")
+    except exc.OperationalError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")

@@ -1,5 +1,4 @@
-import pytest
-from parser import parse_file, CodeChunk
+from app.services.parser import parse_file
 
 PY_SOURCE = b'''\
 class Greeter:

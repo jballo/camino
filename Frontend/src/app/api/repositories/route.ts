@@ -26,7 +26,7 @@ export async function GET() {
       throw new Error(`Not authenticated`);
 
     const backend_url = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
-    const newUrl = `${backend_url}/api/repositories/${userId}`;
+    const newUrl = `${backend_url}/api/v1/repositories/${userId}`;
     console.log("New url: ", newUrl);
     const response = await fetch(newUrl, {
       method: "GET",
