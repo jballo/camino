@@ -5,7 +5,7 @@ from sqlmodel import SQLModel
 
 from app.db import engine
 
-from app.api import github, repositories, users
+from app.api import github, repositories
 from app.webhooks import clerk, github as github_webhook
 
 
