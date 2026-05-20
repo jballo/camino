@@ -165,11 +165,13 @@ async def process_repository(payload: RepoIngestBody, session: SessionDep):
                 "embeddings_created": len(embedding_models)    
             }
         except exc.IntegrityError as e:
-            print("Error: ", e)
             session.rollback()
             raise HTTPException(
                 status_code=409,
-                detail=f"Database integrity error during ingestion: {str(e)}"
+                detail=f"Database integrity error during ingestion: {str(e)}",
             )
+        except exc.SQLAlchemyError:
+            session.rollback()
+            raise HTTPException(status_code=500, detail="Database error")
     except GithubException:
         raise HTTPException(status_code=500, detail="Github error")
