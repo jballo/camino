@@ -2,17 +2,34 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from sqlmodel import SQLModel
+from sqlalchemy import text
 
 from app.db import engine
 
 from app.api import github, repositories
 from app.webhooks import clerk, github as github_webhook
+from app.models.code import CodeChunkModel, CodeChunkEmbedding
 
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    with engine.connect() as conn:
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        conn.commit()
     SQLModel.metadata.create_all(engine)
+
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_embeddings_hnsw
+            ON code_chunk_embeddings USING hnsw (embedding vector_cosine_ops)
+            WITH (m = 16, ef_construction = 64)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_chunks_search
+            ON code_chunks USING gin (search_vector)
+        """))
+        conn.commit()
     yield
 
 

@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     backend_api_key: str
     encryption_key: str
     gh_webhook_secret: str
+    openai_api_key: str
     model_config = SettingsConfigDict(env_file=".env")
 
 
