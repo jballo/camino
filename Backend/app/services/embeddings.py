@@ -1,10 +1,10 @@
 
+import asyncio
 import logging
 import random
-import time
 
 from openai import (
-    OpenAI,
+    AsyncOpenAI,
     OpenAIError,
     APIConnectionError,
     APITimeoutError,
@@ -27,7 +27,7 @@ MAX_BACKOFF = 30.0
 
 logger = logging.getLogger(__name__)
 
-client = OpenAI(api_key=settings.openai_api_key)
+client = AsyncOpenAI(api_key=settings.openai_api_key)
 
 _RETRYABLE_ERRORS: tuple[type[BaseException], ...] = (
     RateLimitError,
@@ -46,7 +46,7 @@ class EmbeddingError(OpenAIError):
     """
 
 
-def embed_batch(texts: list[str]) -> list[list[float]]:
+async def embed_batch(texts: list[str]) -> list[list[float]]:
     """Embed a batch of texts with retry, timeout, and contextual errors.
 
     Retries transient OpenAI failures (rate-limit/429, request timeouts,
@@ -59,7 +59,7 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            response = client.embeddings.create(
+            response = await client.embeddings.create(
                 input=texts,
                 model=EMBED_MODEL,
                 timeout=REQUEST_TIMEOUT,
@@ -84,7 +84,7 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
                 exc,
                 sleep_for,
             )
-            time.sleep(sleep_for)
+            await asyncio.sleep(sleep_for)
         except OpenAIError as exc:
             logger.error(
                 "embed_batch non-retryable OpenAI error "
@@ -111,11 +111,11 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
     ) from last_exc
 
 
-def embed_all(texts: list[str]) -> list[list[float]]:
+async def embed_all(texts: list[str]) -> list[list[float]]:
     all_embeddings = []
     for i in range(0, len(texts), BATCH_SIZE):
         batch = texts[i : i + BATCH_SIZE]
-        all_embeddings.extend(embed_batch(batch))
+        all_embeddings.extend(await embed_batch(batch))
     return all_embeddings
 
 

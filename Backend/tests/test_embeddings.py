@@ -1,4 +1,5 @@
-from unittest.mock import patch, MagicMock
+import pytest
+from unittest.mock import patch, AsyncMock, MagicMock
 
 from app.services.parser import CodeChunk
 from app.services.embeddings import build_embedding_text, embed_batch, embed_all
@@ -116,36 +117,43 @@ def _make_mock_response(texts: list[str], dim: int = 1536):
     return mock_response
 
 
+@pytest.mark.asyncio
 @patch("app.services.embeddings.client")
-def test_embed_batch_returns_correct_count(mock_client):
+async def test_embed_batch_returns_correct_count(mock_client):
     texts = ["hello", "world"]
-    mock_client.embeddings.create.return_value = _make_mock_response(texts)
-    result = embed_batch(texts)
+    mock_client.embeddings.create = AsyncMock(return_value=_make_mock_response(texts))
+    result = await embed_batch(texts)
     assert len(result) == 2
     assert len(result[0]) == 1536
 
 
+@pytest.mark.asyncio
 @patch("app.services.embeddings.client")
-def test_embed_batch_passes_texts_to_api(mock_client):
+async def test_embed_batch_passes_texts_to_api(mock_client):
     texts = ["hello", "world"]
-    mock_client.embeddings.create.return_value = _make_mock_response(texts)
-    embed_batch(texts)
+    mock_client.embeddings.create = AsyncMock(return_value=_make_mock_response(texts))
+    await embed_batch(texts)
     mock_client.embeddings.create.assert_called_once()
     call_kwargs = mock_client.embeddings.create.call_args
     assert call_kwargs.kwargs["input"] == texts
 
 
+@pytest.mark.asyncio
 @patch("app.services.embeddings.client")
-def test_embed_all_batches_correctly(mock_client):
+async def test_embed_all_batches_correctly(mock_client):
     texts = [f"text_{i}" for i in range(300)]
-    mock_client.embeddings.create.side_effect = lambda **kwargs: _make_mock_response(kwargs["input"])
-    result = embed_all(texts)
+    mock_client.embeddings.create = AsyncMock(
+        side_effect=lambda **kwargs: _make_mock_response(kwargs["input"])
+    )
+    result = await embed_all(texts)
     assert len(result) == 300
     assert mock_client.embeddings.create.call_count == 2
 
 
+@pytest.mark.asyncio
 @patch("app.services.embeddings.client")
-def test_embed_all_empty_list(mock_client):
-    result = embed_all([])
+async def test_embed_all_empty_list(mock_client):
+    mock_client.embeddings.create = AsyncMock()
+    result = await embed_all([])
     assert result == []
     mock_client.embeddings.create.assert_not_called()

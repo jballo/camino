@@ -120,7 +120,7 @@ async def process_repository(payload: RepoIngestBody, session: SessionDep):
 
         try:
             texts = [build_embedding_text(c) for c in all_chunks]
-            vectors = embed_all(texts)
+            vectors = await embed_all(texts)
         except EmbeddingError as e:
             raise HTTPException(
                 status_code=503,
