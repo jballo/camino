@@ -16,6 +16,7 @@ class CodeChunkModel(SQLModel, table=True):
 
     id: int | None = Field(default=None, primary_key=True)
 
+    installation_id: int = Field(index=True)
     repo_name: str = Field(index=True)
 
     file_path: str
@@ -35,8 +36,9 @@ class CodeChunkModel(SQLModel, table=True):
     )
 
     @classmethod
-    def from_parsed(cls, chunk: CodeChunk, repo_name: str) -> "CodeChunkModel":
+    def from_parsed(cls, chunk: CodeChunk, *, repo_name: str, installation_id: int) -> "CodeChunkModel":
         return cls(
+            installation_id=installation_id,
             repo_name=repo_name,
             file_path=chunk.file_path,
             symbol_name=chunk.symbol_name,

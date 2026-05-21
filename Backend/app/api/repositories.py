@@ -31,6 +31,7 @@ router = APIRouter()
 class SearchBody(BaseModel):
     query: str
     repoName: str
+    userId: str
     limit: int = Field(default=10, ge=1, le=100)
 
 
@@ -155,11 +156,18 @@ async def process_repository(payload: RepoIngestBody, session: SessionDep):
 
         try:
             session.exec(
-                delete(CodeChunkModel).where(CodeChunkModel.repo_name == payload.repoName)
+                delete(CodeChunkModel).where(
+                    CodeChunkModel.repo_name == payload.repoName,
+                    CodeChunkModel.installation_id == gh_connection.installationId,
+                )
             )
 
             chunk_models = [
-                CodeChunkModel.from_parsed(c, repo_name=payload.repoName)
+                CodeChunkModel.from_parsed(
+                    c,
+                    repo_name=payload.repoName,
+                    installation_id=gh_connection.installationId,
+                )
                 for c in all_chunks
             ]
             session.add_all(chunk_models)
@@ -208,8 +216,24 @@ async def search_repository(
     payload: SearchBody, session: SessionDep
 ) -> list[SearchResultResponse]:
     try:
+        statement = select(GithubConnections).where(
+            GithubConnections.userId == payload.userId
+        )
+        result = session.exec(statement)
+        gh_connection = result.one()
+    except exc.NoResultFound:
+        raise HTTPException(status_code=404, detail="Github connection not found for user")
+    except exc.OperationalError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+
+    try:
         results = await hybrid_search(
-            session, payload.query, payload.repoName, limit=payload.limit
+            session,
+            payload.query,
+            payload.repoName,
+            installation_id=gh_connection.installationId,
+            limit=payload.limit,
         )
     except EmbeddingError as e:
         logger.error(

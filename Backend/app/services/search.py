@@ -32,6 +32,7 @@ def _vector_search(
     session: Session,
     query_embedding: list[float],
     repo_name: str,
+    installation_id: int,
     top_n: int,
 ) -> list[tuple[int, int]]:
     """Returns list of (chunk_id, rank) ordered by cosine similarity."""
@@ -41,12 +42,18 @@ def _vector_search(
         FROM   code_chunk_embeddings e
         JOIN   code_chunks c ON c.id = e.chunk_id
         WHERE  c.repo_name = :repo_name
+          AND  c.installation_id = :installation_id
         ORDER  BY e.embedding <=> CAST(:embedding AS vector)
         LIMIT  :top_n
     """)
     rows = session.execute(
         sql,
-        {"embedding": str(query_embedding), "repo_name": repo_name, "top_n": top_n},
+        {
+            "embedding": str(query_embedding),
+            "repo_name": repo_name,
+            "installation_id": installation_id,
+            "top_n": top_n,
+        },
     ).all()
     return [(r.chunk_id, r.rank) for r in rows]
 
@@ -54,6 +61,7 @@ def _fts_search(
     session: Session,
     query: str,
     repo_name: str,
+    installation_id: int,
     top_n: int,
 ) -> list[tuple[int, int]]:
     """Returns list of (chunk_id, rank) ordered by ts_rank."""
@@ -65,12 +73,13 @@ def _fts_search(
                ) AS rank
         FROM   code_chunks c
         WHERE  c.repo_name = :repo_name
+          AND  c.installation_id = :installation_id
           AND  c.search_vector @@ plainto_tsquery('english', :query)
         ORDER  BY rank
         LIMIT  :top_n
     """)
     rows = session.execute(
-        sql, {"query": query, "repo_name": repo_name, "top_n": top_n}
+        sql, {"query": query, "repo_name": repo_name, "installation_id": installation_id, "top_n": top_n}
     ).all()
     return [(r.chunk_id, r.rank) for r in rows]
 
@@ -135,6 +144,7 @@ async def hybrid_search(
     query: str,
     repo_name: str,
     *,
+    installation_id: int,
     top_n: int = DEFAULT_TOP_N,
     rrf_k: int = DEFAULT_K,
     limit: int = DEFAULT_FINAL_LIMIT,
@@ -146,8 +156,8 @@ async def hybrid_search(
     """
     query_embedding = (await embed_batch([query]))[0]
 
-    vector_ranked = _vector_search(session, query_embedding, repo_name, top_n)
-    fts_ranked = _fts_search(session, query, repo_name, top_n)
+    vector_ranked = _vector_search(session, query_embedding, repo_name, installation_id, top_n)
+    fts_ranked = _fts_search(session, query, repo_name, installation_id, top_n)
     fused = _rrf_fuse(vector_ranked, fts_ranked, k=rrf_k)
 
     return _load_chunks(session, fused, limit)
