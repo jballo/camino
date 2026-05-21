@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from sqlalchemy import text
 from sqlmodel import Session
 
-from app.services.embeddings import embed_batch
+from app.services.embeddings import EMBED_MODEL, embed_batch
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,7 @@ def _vector_search(
     repo_name: str,
     installation_id: int,
     top_n: int,
+    model_name: str = EMBED_MODEL,
 ) -> list[tuple[int, int]]:
     """Returns list of (chunk_id, rank) ordered by cosine similarity."""
     sql = text("""
@@ -43,6 +44,7 @@ def _vector_search(
         JOIN   code_chunks c ON c.id = e.chunk_id
         WHERE  c.repo_name = :repo_name
           AND  c.installation_id = :installation_id
+          AND  e.model_name = :model_name
         ORDER  BY e.embedding <=> CAST(:embedding AS vector)
         LIMIT  :top_n
     """)
@@ -52,6 +54,7 @@ def _vector_search(
             "embedding": str(query_embedding),
             "repo_name": repo_name,
             "installation_id": installation_id,
+            "model_name": model_name,
             "top_n": top_n,
         },
     ).all()
