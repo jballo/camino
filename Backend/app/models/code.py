@@ -10,12 +10,13 @@ from app.services.embeddings import EMBED_DIMENSIONS
 class CodeChunkModel(SQLModel, table=True):
     __tablename__ = "code_chunks"
     __table_args__ = (
-        UniqueConstraint("repo_name", "file_path", "symbol_name", "start_line",
+        UniqueConstraint("installation_id", "repo_name", "file_path", "symbol_name", "start_line",
                         name="uq_chunk_identity"),
     )
 
     id: int | None = Field(default=None, primary_key=True)
 
+    installation_id: int = Field(index=True)
     repo_name: str = Field(index=True)
 
     file_path: str
@@ -35,8 +36,9 @@ class CodeChunkModel(SQLModel, table=True):
     )
 
     @classmethod
-    def from_parsed(cls, chunk: CodeChunk, repo_name: str) -> "CodeChunkModel":
+    def from_parsed(cls, chunk: CodeChunk, *, repo_name: str, installation_id: int) -> "CodeChunkModel":
         return cls(
+            installation_id=installation_id,
             repo_name=repo_name,
             file_path=chunk.file_path,
             symbol_name=chunk.symbol_name,

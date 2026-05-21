@@ -1,10 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
 from github import Auth, GithubException, GithubIntegration
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import exc, text
 from sqlmodel import delete, select
 
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 from app.services.embeddings import (
     EMBED_DIMENSIONS,
@@ -20,8 +23,32 @@ from app.models.github_connection import GithubConnections
 from app.security import verify_api_key
 from app.services.parser import LANGUAGES, MAX_FILE_BYTES, SKIP_DIRS, parse_file
 
+from app.services.search import hybrid_search
+
 
 router = APIRouter()
+
+class SearchBody(BaseModel):
+    query: str
+    repoName: str
+    userId: str
+    limit: int = Field(default=10, ge=1, le=100)
+
+
+class SearchResultResponse(BaseModel):
+    chunk_id: int
+    repo_name: str
+    file_path: str
+    symbol_name: str
+    symbol_type: str
+    language: str
+    start_line: int
+    end_line: int
+    source_code: str
+    signature: str
+    docstring: str | None
+    score: float
+
 
 
 class RepoIngestBody(BaseModel):
@@ -129,11 +156,18 @@ async def process_repository(payload: RepoIngestBody, session: SessionDep):
 
         try:
             session.exec(
-                delete(CodeChunkModel).where(CodeChunkModel.repo_name == payload.repoName)
+                delete(CodeChunkModel).where(
+                    CodeChunkModel.repo_name == payload.repoName,
+                    CodeChunkModel.installation_id == gh_connection.installationId,
+                )
             )
 
             chunk_models = [
-                CodeChunkModel.from_parsed(c, repo_name=payload.repoName)
+                CodeChunkModel.from_parsed(
+                    c,
+                    repo_name=payload.repoName,
+                    installation_id=gh_connection.installationId,
+                )
                 for c in all_chunks
             ]
             session.add_all(chunk_models)
@@ -175,3 +209,68 @@ async def process_repository(payload: RepoIngestBody, session: SessionDep):
             raise HTTPException(status_code=500, detail="Database error")
     except GithubException:
         raise HTTPException(status_code=500, detail="Github error")
+
+
+@router.post("/search", dependencies=[Depends(verify_api_key)])
+async def search_repository(
+    payload: SearchBody, session: SessionDep
+) -> list[SearchResultResponse]:
+    try:
+        statement = select(GithubConnections).where(
+            GithubConnections.userId == payload.userId
+        )
+        result = session.exec(statement)
+        gh_connection = result.one()
+    except exc.NoResultFound:
+        raise HTTPException(status_code=404, detail="Github connection not found for user")
+    except exc.OperationalError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+
+    try:
+        results = await hybrid_search(
+            session,
+            payload.query,
+            payload.repoName,
+            installation_id=gh_connection.installationId,
+            limit=payload.limit,
+        )
+    except EmbeddingError as e:
+        logger.error(
+            "Embedding service failed during search: %s | query=%r repo=%r",
+            e, payload.query, payload.repoName,
+        )
+        raise HTTPException(status_code=502, detail="Embedding service unavailable")
+    except exc.SQLAlchemyError as e:
+        session.rollback()
+        logger.error(
+            "Database error during search: %s | query=%r repo=%r",
+            e, payload.query, payload.repoName,
+        )
+        raise HTTPException(status_code=502, detail="Database service error")
+    except Exception as e:
+        logger.exception(
+            "Unexpected error during search | query=%r repo=%r",
+            payload.query, payload.repoName,
+        )
+        raise HTTPException(status_code=500, detail="Internal search error")
+
+    if not results:
+        return []
+    return [
+        SearchResultResponse(
+            chunk_id=r.chunk_id,
+            repo_name=r.repo_name,
+            file_path=r.file_path,
+            symbol_name=r.symbol_name,
+            symbol_type=r.symbol_type,
+            language=r.language,
+            start_line=r.start_line,
+            end_line=r.end_line,
+            source_code=r.source_code,
+            signature=r.signature,
+            docstring=r.docstring,
+            score=r.score,
+        )
+        for r in results
+    ]
