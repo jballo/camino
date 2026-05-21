@@ -1,0 +1,136 @@
+import pytest
+from unittest.mock import AsyncMock, patch
+
+from fastapi.testclient import TestClient
+
+from app.main import app
+from app.db import get_session
+from app.security import verify_api_key
+from app.services.search import SearchResult
+
+
+def _noop_verify():
+    pass
+
+
+def _fake_session():
+    yield None
+
+
+app.dependency_overrides[verify_api_key] = _noop_verify
+app.dependency_overrides[get_session] = _fake_session
+
+client = TestClient(app)
+
+SEARCH_URL = "/api/v1/repositories/search"
+
+SAMPLE_RESULT = SearchResult(
+    chunk_id=10,
+    repo_name="org/repo",
+    file_path="src/auth.py",
+    symbol_name="login",
+    symbol_type="function",
+    language="py",
+    start_line=1,
+    end_line=10,
+    source_code="def login(): ...",
+    signature="def login():",
+    docstring="Handles login.",
+    score=0.033,
+)
+
+
+@patch(
+    "app.api.repositories.hybrid_search",
+    new_callable=AsyncMock,
+    return_value=[SAMPLE_RESULT],
+)
+def test_search_returns_results(mock_search):
+    resp = client.post(SEARCH_URL, json={
+        "query": "login",
+        "repoName": "org/repo",
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["chunk_id"] == 10
+    assert data[0]["file_path"] == "src/auth.py"
+    assert data[0]["score"] == 0.033
+
+
+@patch(
+    "app.api.repositories.hybrid_search",
+    new_callable=AsyncMock,
+    return_value=[SAMPLE_RESULT],
+)
+def test_search_passes_limit(mock_search):
+    resp = client.post(SEARCH_URL, json={
+        "query": "login",
+        "repoName": "org/repo",
+        "limit": 5,
+    })
+    assert resp.status_code == 200
+    _, kwargs = mock_search.call_args
+    assert kwargs["limit"] == 5
+
+
+@patch(
+    "app.api.repositories.hybrid_search",
+    new_callable=AsyncMock,
+    return_value=[],
+)
+def test_search_empty_results(mock_search):
+    resp = client.post(SEARCH_URL, json={
+        "query": "nonexistent",
+        "repoName": "org/repo",
+    })
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_search_missing_query_returns_422():
+    resp = client.post(SEARCH_URL, json={
+        "repoName": "org/repo",
+    })
+    assert resp.status_code == 422
+
+
+def test_search_missing_repo_returns_422():
+    resp = client.post(SEARCH_URL, json={
+        "query": "login",
+    })
+    assert resp.status_code == 422
+
+
+@patch(
+    "app.api.repositories.hybrid_search",
+    new_callable=AsyncMock,
+    return_value=[SAMPLE_RESULT],
+)
+def test_search_default_limit_is_10(mock_search):
+    resp = client.post(SEARCH_URL, json={
+        "query": "login",
+        "repoName": "org/repo",
+    })
+    assert resp.status_code == 200
+    _, kwargs = mock_search.call_args
+    assert kwargs["limit"] == 10
+
+
+@patch(
+    "app.api.repositories.hybrid_search",
+    new_callable=AsyncMock,
+    return_value=[SAMPLE_RESULT],
+)
+def test_search_response_has_all_fields(mock_search):
+    resp = client.post(SEARCH_URL, json={
+        "query": "login",
+        "repoName": "org/repo",
+    })
+    data = resp.json()[0]
+    expected_fields = {
+        "chunk_id", "repo_name", "file_path", "symbol_name", "symbol_type",
+        "language", "start_line", "end_line", "source_code", "signature",
+        "docstring", "score",
+    }
+    assert set(data.keys()) == expected_fields
