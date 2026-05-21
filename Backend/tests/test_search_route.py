@@ -17,8 +17,13 @@ def _fake_session():
     yield None
 
 
-app.dependency_overrides[verify_api_key] = _noop_verify
-app.dependency_overrides[get_session] = _fake_session
+@pytest.fixture(autouse=True)
+def _override_deps():
+    app.dependency_overrides[verify_api_key] = _noop_verify
+    app.dependency_overrides[get_session] = _fake_session
+    yield
+    app.dependency_overrides.clear()
+
 
 client = TestClient(app)
 

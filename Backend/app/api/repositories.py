@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from github import Auth, GithubException, GithubIntegration
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import exc, text
 from sqlmodel import delete, select
 
@@ -23,7 +23,7 @@ from app.models.github_connection import GithubConnections
 from app.security import verify_api_key
 from app.services.parser import LANGUAGES, MAX_FILE_BYTES, SKIP_DIRS, parse_file
 
-from app.services.search import hybrid_search, SearchResult
+from app.services.search import hybrid_search
 
 
 router = APIRouter()
@@ -31,7 +31,7 @@ router = APIRouter()
 class SearchBody(BaseModel):
     query: str
     repoName: str
-    limit: int = 10
+    limit: int = Field(default=10, ge=1, le=100)
 
 
 class SearchResultResponse(BaseModel):
