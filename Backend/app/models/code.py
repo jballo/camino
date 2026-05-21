@@ -10,7 +10,7 @@ from app.services.embeddings import EMBED_DIMENSIONS
 class CodeChunkModel(SQLModel, table=True):
     __tablename__ = "code_chunks"
     __table_args__ = (
-        UniqueConstraint("repo_name", "file_path", "symbol_name", "start_line",
+        UniqueConstraint("installation_id", "repo_name", "file_path", "symbol_name", "start_line",
                         name="uq_chunk_identity"),
     )
 
