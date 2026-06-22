@@ -20,7 +20,7 @@ from app.models.code import CodeChunkEmbedding, CodeChunkModel
 from app.config import settings
 from app.db import SessionDep
 from app.models.github_connection import GithubConnections
-from app.security import verify_api_key
+from app.security import get_authenticated_user_id
 from app.services.parser import LANGUAGES, MAX_FILE_BYTES, SKIP_DIRS, parse_file
 
 from app.services.search import hybrid_search
@@ -56,8 +56,14 @@ class RepoIngestBody(BaseModel):
     userId: str
 
 
-@router.get("/{userId}", dependencies=[Depends(verify_api_key)])
-async def list_repositories(userId: str, session: SessionDep) -> list[str]:
+@router.get("/{userId}")
+async def list_repositories(
+    userId: str,
+    session: SessionDep,
+    auth_user_id: str = Depends(get_authenticated_user_id),
+) -> list[str]:
+    if auth_user_id != userId:
+        raise HTTPException(status_code=403, detail="Forbidden")
     try:
         statement = select(GithubConnections).where(GithubConnections.userId == userId)
         result = session.exec(statement)
@@ -80,8 +86,14 @@ async def list_repositories(userId: str, session: SessionDep) -> list[str]:
         raise HTTPException(status_code=500, detail="Github error")
 
 
-@router.post("/ingest", dependencies=[Depends(verify_api_key)])
-async def process_repository(payload: RepoIngestBody, session: SessionDep):
+@router.post("/ingest")
+async def process_repository(
+    payload: RepoIngestBody,
+    session: SessionDep,
+    auth_user_id: str = Depends(get_authenticated_user_id),
+):
+    if auth_user_id != payload.userId:
+        raise HTTPException(status_code=403, detail="Forbidden")
     try:
         statement = select(GithubConnections).where(
             GithubConnections.userId == payload.userId
@@ -211,10 +223,14 @@ async def process_repository(payload: RepoIngestBody, session: SessionDep):
         raise HTTPException(status_code=500, detail="Github error")
 
 
-@router.post("/search", dependencies=[Depends(verify_api_key)])
+@router.post("/search")
 async def search_repository(
-    payload: SearchBody, session: SessionDep
+    payload: SearchBody,
+    session: SessionDep,
+    auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> list[SearchResultResponse]:
+    if auth_user_id != payload.userId:
+        raise HTTPException(status_code=403, detail="Forbidden")
     try:
         statement = select(GithubConnections).where(
             GithubConnections.userId == payload.userId

@@ -3,12 +3,13 @@ import { NextResponse } from "next/server";
 
 export async function GET() {
   try {
-    const { isAuthenticated, userId } = await auth();
+    const { isAuthenticated, userId, getToken } = await auth();
     const user = await currentUser();
-    const backend_api_key = process.env.BACKEND_API_KEY;
 
-    if (!isAuthenticated || user === null || backend_api_key === undefined)
-      throw new Error(`Not authenticated`);
+    if (!isAuthenticated || user === null) throw new Error(`Not authenticated`);
+
+    const token = await getToken();
+    if (token === null) throw new Error(`Not authenticated`);
 
     const backend_url = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
     const newUrl = `${backend_url}/api/v1/repositories/${userId}`;
@@ -16,7 +17,7 @@ export async function GET() {
     const response = await fetch(newUrl, {
       method: "GET",
       headers: {
-        Authorization: `Bearer ${backend_api_key}`,
+        Authorization: `Bearer ${token}`,
       },
     });
 
