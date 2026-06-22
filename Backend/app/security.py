@@ -26,13 +26,16 @@ async def get_authenticated_user_id(request: Request) -> str:
     locally against that public key; otherwise the SDK fetches Clerk's JWKS using the
     secret key.
     """
-    request_state = await authenticate_request_async(
-        request,
-        AuthenticateRequestOptions(
-            secret_key=settings.clerk_secret_key,
-            jwt_key=settings.clerk_jwt_key,
-        ),
-    )
+    try:
+        request_state = await authenticate_request_async(
+            request,
+            AuthenticateRequestOptions(
+                secret_key=settings.clerk_secret_key,
+                jwt_key=settings.clerk_jwt_key,
+            ),
+        )
+    except Exception:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
     if not request_state.is_signed_in or request_state.payload is None:
         raise HTTPException(status_code=401, detail="Unauthorized")
