@@ -5,12 +5,12 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.db import get_session
-from app.security import verify_api_key
+from app.security import get_authenticated_user_id
 from app.services.search import SearchResult
 
 
 def _noop_verify():
-    pass
+    return "user_123"
 
 
 FAKE_INSTALLATION_ID = 12345
@@ -26,7 +26,7 @@ def _fake_session():
 
 @pytest.fixture(autouse=True)
 def _override_deps():
-    app.dependency_overrides[verify_api_key] = _noop_verify
+    app.dependency_overrides[get_authenticated_user_id] = _noop_verify
     app.dependency_overrides[get_session] = _fake_session
     yield
     app.dependency_overrides.clear()

@@ -15,7 +15,7 @@ from sqlalchemy import exc
 from app.config import settings
 from app.db import SessionDep
 from app.models.github_connection import GithubConnections
-from app.security import encrypt_token, verify_api_key
+from app.security import encrypt_token, get_authenticated_user_id
 
 
 router = APIRouter()
@@ -27,8 +27,14 @@ class GithubConnectBody(BaseModel):
     installationId: int
 
 
-@router.post("/connect", dependencies=[Depends(verify_api_key)])
-async def add_github_connection(payload: GithubConnectBody, session: SessionDep) -> str:
+@router.post("/connect")
+async def add_github_connection(
+    payload: GithubConnectBody,
+    session: SessionDep,
+    auth_user_id: str = Depends(get_authenticated_user_id),
+) -> str:
+    if auth_user_id != payload.userId:
+        raise HTTPException(status_code=403, detail="Forbidden")
     try:
         g = Github()
         oauth_app = g.get_oauth_application(

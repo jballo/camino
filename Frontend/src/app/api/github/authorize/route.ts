@@ -3,9 +3,8 @@ import { NextResponse, type NextRequest } from "next/server";
 
 export async function GET(req: NextRequest) {
   try {
-    const { isAuthenticated, userId } = await auth();
+    const { isAuthenticated, userId, getToken } = await auth();
     const user = await currentUser();
-    const backend_api_key = process.env.BACKEND_API_KEY;
     const { searchParams } = new URL(req.url);
     const code = searchParams.get("code");
     const installationId = searchParams.get("installation_id");
@@ -15,8 +14,10 @@ export async function GET(req: NextRequest) {
     if (!state || !storedState || state !== storedState)
       throw new Error(`Invalid state - possible CSRF`);
 
-    if (!isAuthenticated || user === null || backend_api_key === undefined)
-      throw new Error(`Not authenticated`);
+    if (!isAuthenticated || user === null) throw new Error(`Not authenticated`);
+
+    const token = await getToken();
+    if (token === null) throw new Error(`Not authenticated`);
 
     if (code === null || installationId === null)
       throw new Error(`Invalid request`);
@@ -27,7 +28,7 @@ export async function GET(req: NextRequest) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${backend_api_key}`,
+        Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({
         code,
