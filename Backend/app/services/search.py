@@ -144,6 +144,10 @@ def _rrf_fuse(
     """
     if weights is None:
         weights = [1.0] * len(ranked_lists)
+    if len(weights) != len(ranked_lists):
+        raise ValueError(
+            f"weights length {len(weights)} != ranked_lists length {len(ranked_lists)}"
+        )
     scores: dict[int, float] = {}
     for ranked, weight in zip(ranked_lists, weights):
         for chunk_id, rank in ranked:

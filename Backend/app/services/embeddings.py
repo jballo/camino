@@ -152,7 +152,7 @@ def build_embedding_text(chunk: CodeChunk, max_body_lines: int = 15) -> str:
     parts: list[str] = []
 
     location = _humanize_path(chunk.file_path)
-    header = f"{chunk.symbol_type} {_humanize(chunk.symbol_name)}"
+    header = f"{chunk.symbol_type} {_humanize(chunk.symbol_name or '')}"
     if chunk.parent_class:
         header += f" in {_humanize(chunk.parent_class)}"
     if location:
