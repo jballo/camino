@@ -1,0 +1,153 @@
+{
+  "repo_name": "tiangolo/fastapi",
+  "repo_version": "0.115.6",
+  "installation_id": 999999999,
+  "description": "Hand-labeled golden retrieval set for FastAPI. Each question lists the code chunks (file_path + symbol_name) a good retriever should surface. Relevance is judged by matching (file_path, symbol_name) pairs against the retrieved chunks.",
+  "questions": [
+    {
+      "id": "q01",
+      "question": "How does FastAPI handle dependency injection?",
+      "relevant": [
+        {"file": "fastapi/dependencies/utils.py", "symbol": "solve_dependencies"},
+        {"file": "fastapi/dependencies/utils.py", "symbol": "get_dependant"},
+        {"file": "fastapi/param_functions.py", "symbol": "Depends"}
+      ]
+    },
+    {
+      "id": "q02",
+      "question": "Where is the OpenAPI schema generated?",
+      "relevant": [
+        {"file": "fastapi/openapi/utils.py", "symbol": "get_openapi"}
+      ]
+    },
+    {
+      "id": "q03",
+      "question": "How does path parameter validation work when a request hits a route?",
+      "relevant": [
+        {"file": "fastapi/routing.py", "symbol": "APIRoute"},
+        {"file": "fastapi/routing.py", "symbol": "get_request_handler"}
+      ]
+    },
+    {
+      "id": "q04",
+      "question": "How does FastAPI convert objects into JSON-serializable data?",
+      "relevant": [
+        {"file": "fastapi/encoders.py", "symbol": "jsonable_encoder"}
+      ]
+    },
+    {
+      "id": "q05",
+      "question": "Where is the Depends function defined?",
+      "relevant": [
+        {"file": "fastapi/param_functions.py", "symbol": "Depends"},
+        {"file": "fastapi/params.py", "symbol": "Depends"}
+      ]
+    },
+    {
+      "id": "q06",
+      "question": "How does OAuth2 password bearer authentication work?",
+      "relevant": [
+        {"file": "fastapi/security/oauth2.py", "symbol": "OAuth2PasswordBearer"}
+      ]
+    },
+    {
+      "id": "q07",
+      "question": "How are request validation errors handled and turned into an HTTP response?",
+      "relevant": [
+        {"file": "fastapi/exception_handlers.py", "symbol": "request_validation_exception_handler"}
+      ]
+    },
+    {
+      "id": "q08",
+      "question": "Where is the main FastAPI application class defined?",
+      "relevant": [
+        {"file": "fastapi/applications.py", "symbol": "FastAPI"}
+      ]
+    },
+    {
+      "id": "q09",
+      "question": "How are uploaded files represented?",
+      "relevant": [
+        {"file": "fastapi/datastructures.py", "symbol": "UploadFile"}
+      ]
+    },
+    {
+      "id": "q10",
+      "question": "How does FastAPI serialize and validate the response against the response model?",
+      "relevant": [
+        {"file": "fastapi/routing.py", "symbol": "serialize_response"}
+      ]
+    },
+    {
+      "id": "q11",
+      "question": "Where is the Swagger UI HTML page generated?",
+      "relevant": [
+        {"file": "fastapi/openapi/docs.py", "symbol": "get_swagger_ui_html"}
+      ]
+    },
+    {
+      "id": "q12",
+      "question": "How is the OAuth2 password request form defined?",
+      "relevant": [
+        {"file": "fastapi/security/oauth2.py", "symbol": "OAuth2PasswordRequestForm"}
+      ]
+    },
+    {
+      "id": "q13",
+      "question": "How does API key authentication via a request header work?",
+      "relevant": [
+        {"file": "fastapi/security/api_key.py", "symbol": "APIKeyHeader"}
+      ]
+    },
+    {
+      "id": "q14",
+      "question": "How are HTTP exceptions raised and handled?",
+      "relevant": [
+        {"file": "fastapi/exceptions.py", "symbol": "HTTPException"},
+        {"file": "fastapi/exception_handlers.py", "symbol": "http_exception_handler"}
+      ]
+    },
+    {
+      "id": "q15",
+      "question": "How do I declare a form field parameter in an endpoint?",
+      "relevant": [
+        {"file": "fastapi/param_functions.py", "symbol": "Form"}
+      ]
+    },
+    {
+      "id": "q16",
+      "question": "How does APIRouter group routes and include sub-routers?",
+      "relevant": [
+        {"file": "fastapi/routing.py", "symbol": "APIRouter"}
+      ]
+    },
+    {
+      "id": "q17",
+      "question": "How are websocket routes handled?",
+      "relevant": [
+        {"file": "fastapi/routing.py", "symbol": "APIWebSocketRoute"}
+      ]
+    },
+    {
+      "id": "q18",
+      "question": "How is each path operation entry in the OpenAPI schema built?",
+      "relevant": [
+        {"file": "fastapi/openapi/utils.py", "symbol": "get_openapi_path"}
+      ]
+    },
+    {
+      "id": "q19",
+      "question": "How does HTTP bearer token authentication work?",
+      "relevant": [
+        {"file": "fastapi/security/http.py", "symbol": "HTTPBearer"}
+      ]
+    },
+    {
+      "id": "q20",
+      "question": "How are background tasks supported?",
+      "relevant": [
+        {"file": "fastapi/background.py", "symbol": "BackgroundTasks"}
+      ]
+    }
+  ]
+}

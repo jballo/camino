@@ -54,7 +54,41 @@ STUB_CHUNK = CodeChunk(
 
 def test_embedding_text_includes_signature():
     text = build_embedding_text(FUNC_CHUNK)
-    assert text.startswith("def authenticate_user")
+    assert "def authenticate_user(username: str, password: str) -> bool:" in text
+
+
+def test_embedding_text_starts_with_nl_header():
+    text = build_embedding_text(FUNC_CHUNK)
+    # Humanized "function authenticate user (...)" precedes the raw signature so
+    # natural-language queries have something to match (Exp 4).
+    assert text.startswith("function authenticate user")
+    assert text.index("authenticate user") < text.index("def authenticate_user")
+
+
+def test_embedding_text_header_includes_humanized_path():
+    text = build_embedding_text(FUNC_CHUNK)
+    assert "src auth handler" in text
+
+
+def test_embedding_text_class_lists_methods():
+    chunk = CodeChunk(
+        file_path="fastapi/routing.py",
+        symbol_name="APIRoute",
+        symbol_type="class",
+        language="py",
+        start_line=1,
+        end_line=10,
+        source_code=(
+            "class APIRoute(Route):\n"
+            "    def __init__(self): ...\n"
+            "    async def handle(self, scope): ...\n"
+        ),
+        signature="class APIRoute(Route):",
+        docstring=None,
+        parent_class=None,
+    )
+    text = build_embedding_text(chunk)
+    assert "methods: __init__, handle" in text
 
 
 def test_embedding_text_includes_docstring():
@@ -80,7 +114,7 @@ def test_embedding_text_no_duplicate_docstring():
 
 def test_embedding_text_without_docstring():
     text = build_embedding_text(NO_DOC_CHUNK)
-    assert text.startswith("def add")
+    assert "def add" in text
     assert "return a + b" in text
 
 
@@ -105,8 +139,8 @@ def test_body_preview_respects_max_lines():
         parent_class=None,
     )
     text = build_embedding_text(chunk, max_body_lines=5)
-    body_section = text.split("\n", 1)[1]
-    assert body_section.count("\n") <= 4
+    body_lines = [ln for ln in text.splitlines() if ln.strip().startswith("line_")]
+    assert len(body_lines) <= 5
 
 
 def _make_mock_response(texts: list[str], dim: int = 1536):

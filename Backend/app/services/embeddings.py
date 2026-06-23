@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import random
+import re
 
 from openai import (
     AsyncOpenAI,
@@ -120,12 +121,53 @@ async def embed_all(texts: list[str]) -> list[list[float]]:
 
 
 
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+_METHOD_DEF = re.compile(r"\n[ \t]+(?:async[ \t]+)?def[ \t]+([A-Za-z_]\w*)")
+
+
+def _humanize(identifier: str) -> str:
+    """``get_openapi`` -> ``get openapi``; ``APIRoute`` -> ``API Route``."""
+    spaced = _CAMEL_BOUNDARY.sub(" ", identifier).replace("_", " ")
+    return " ".join(spaced.split())
+
+
+def _humanize_path(file_path: str) -> str:
+    """``fastapi/openapi/utils.py`` -> ``fastapi openapi utils``."""
+    base = file_path.rsplit(".", 1)[0]
+    parts = [_humanize(p) for p in re.split(r"[/_]", base) if p]
+    return " ".join(" ".join(parts).split())
+
+
 def build_embedding_text(chunk: CodeChunk, max_body_lines: int = 15) -> str:
-    parts = []
+    """Build the text embedded for a chunk.
+
+    Many code symbols have no docstring and a body dominated by parameter
+    plumbing, so the raw signature/body embeds poorly against natural-language
+    questions (see eval/EXPERIMENTS.md, Exp 4). We prepend a short NL header
+    derived from the symbol name and module path (so "How is the OpenAPI schema
+    generated?" can reach ``get_openapi`` in ``openapi/utils.py``), and for
+    classes we list the method surface instead of relying on the first lines of
+    ``__init__``.
+    """
+    parts: list[str] = []
+
+    location = _humanize_path(chunk.file_path)
+    header = f"{chunk.symbol_type} {_humanize(chunk.symbol_name or '')}"
+    if chunk.parent_class:
+        header += f" in {_humanize(chunk.parent_class)}"
+    if location:
+        header += f" ({location})"
+    parts.append(header)
+
     parts.append(chunk.signature)
 
     if chunk.docstring:
         parts.append(chunk.docstring)
+
+    if chunk.symbol_type == "class":
+        methods = list(dict.fromkeys(_METHOD_DEF.findall(chunk.source_code)))
+        if methods:
+            parts.append("methods: " + ", ".join(methods))
 
     body_lines = chunk.source_code.split("\n")
     sig_line_count = chunk.signature.count("\n") + 1

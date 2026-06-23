@@ -1,0 +1,373 @@
+{
+  "aggregate": {
+    "questions": 20,
+    "k": 5,
+    "limit": 10,
+    "hit_rate@5": 0.8,
+    "recall@5": 0.7666666666666667,
+    "precision@5": 0.17,
+    "mrr": 0.6491666666666667
+  },
+  "per_question": [
+    {
+      "id": "q01",
+      "question": "How does FastAPI handle dependency injection?",
+      "hit": 1.0,
+      "recall": 0.3333333333333333,
+      "precision": 0.2,
+      "rr": 1.0,
+      "first_rank": 1,
+      "n_relevant": 3,
+      "n_found_at_k": 1,
+      "top_k_preview": [
+        "param_functions.py:Depends",
+        "test_ws_router.py:make_app",
+        "param_functions.py:Security",
+        "oauth2.py:__init__",
+        "applications.py:FastAPI"
+      ]
+    },
+    {
+      "id": "q02",
+      "question": "Where is the OpenAPI schema generated?",
+      "hit": 0.0,
+      "recall": 0.0,
+      "precision": 0.0,
+      "rr": 0.0,
+      "first_rank": null,
+      "n_relevant": 1,
+      "n_found_at_k": 0,
+      "top_k_preview": [
+        "applications.py:openapi",
+        "tutorial001.py:custom_openapi",
+        "test_tutorial001_03_an.py:test_openapi_schema",
+        "test_tutorial001_03.py:test_openapi_schema",
+        "test_tutorial003.py:test_openapi_schema"
+      ]
+    },
+    {
+      "id": "q03",
+      "question": "How does path parameter validation work when a request hits a route?",
+      "hit": 0.0,
+      "recall": 0.0,
+      "precision": 0.0,
+      "rr": 0.0,
+      "first_rank": null,
+      "n_relevant": 2,
+      "n_found_at_k": 0,
+      "top_k_preview": [
+        "test_exception_handlers.py:route_with_request_validation_exception",
+        "test_tutorial006.py:test_query_params_str_validations",
+        "test_starlette_urlconvertors.py:test_route_converters_path",
+        "test_application.py:test_get_path",
+        "test_starlette_urlconvertors.py:path_convertor"
+      ]
+    },
+    {
+      "id": "q04",
+      "question": "How does FastAPI convert objects into JSON-serializable data?",
+      "hit": 1.0,
+      "recall": 1.0,
+      "precision": 0.2,
+      "rr": 1.0,
+      "first_rank": 1,
+      "n_relevant": 1,
+      "n_found_at_k": 1,
+      "top_k_preview": [
+        "encoders.py:jsonable_encoder",
+        "test_schema_extra_examples.py:create_app",
+        "responses.py:ORJSONResponse",
+        "responses.py:UJSONResponse",
+        "_compat.py:serialize"
+      ]
+    },
+    {
+      "id": "q05",
+      "question": "Where is the Depends function defined?",
+      "hit": 0.0,
+      "recall": 0.0,
+      "precision": 0.0,
+      "rr": 0.0,
+      "first_rank": null,
+      "n_relevant": 2,
+      "n_found_at_k": 0,
+      "top_k_preview": [
+        "test_params_repr.py:test_depends_repr",
+        "datastructures.py:UploadFile",
+        "test_ambiguous_params.py:dep",
+        "test_response_change_status_code.py:parent_dep",
+        "test_dependency_cache.py:super_dep"
+      ]
+    },
+    {
+      "id": "q06",
+      "question": "How does OAuth2 password bearer authentication work?",
+      "hit": 1.0,
+      "recall": 1.0,
+      "precision": 0.2,
+      "rr": 1.0,
+      "first_rank": 1,
+      "n_relevant": 1,
+      "n_found_at_k": 1,
+      "top_k_preview": [
+        "oauth2.py:OAuth2PasswordBearer",
+        "oauth2.py:OAuth2AuthorizationCodeBearer",
+        "test_security_openid_connect.py:test_security_oauth2_password_bearer_no_header",
+        "test_security_openid_connect_description.py:test_security_oauth2_password_bearer_no_header",
+        "test_security_oauth2.py:test_security_oauth2_password_bearer_no_header"
+      ]
+    },
+    {
+      "id": "q07",
+      "question": "How are request validation errors handled and turned into an HTTP response?",
+      "hit": 1.0,
+      "recall": 1.0,
+      "precision": 0.2,
+      "rr": 1.0,
+      "first_rank": 1,
+      "n_relevant": 1,
+      "n_found_at_k": 1,
+      "top_k_preview": [
+        "exception_handlers.py:request_validation_exception_handler",
+        "tutorial005.py:validation_exception_handler",
+        "test_exception_handlers.py:request_validation_exception_handler",
+        "tutorial004.py:validation_exception_handler",
+        "test_exception_handlers.py:test_override_request_validation_exception"
+      ]
+    },
+    {
+      "id": "q08",
+      "question": "Where is the main FastAPI application class defined?",
+      "hit": 1.0,
+      "recall": 1.0,
+      "precision": 0.2,
+      "rr": 1.0,
+      "first_rank": 1,
+      "n_relevant": 1,
+      "n_found_at_k": 1,
+      "top_k_preview": [
+        "applications.py:FastAPI",
+        "test_ws_router.py:make_app",
+        "applications.py:__init__",
+        "test_tutorial002_an_py310.py:test_main",
+        "test_tutorial002_an_py39.py:test_main"
+      ]
+    },
+    {
+      "id": "q09",
+      "question": "How are uploaded files represented?",
+      "hit": 1.0,
+      "recall": 1.0,
+      "precision": 0.2,
+      "rr": 0.25,
+      "first_rank": 4,
+      "n_relevant": 1,
+      "n_found_at_k": 1,
+      "top_k_preview": [
+        "tutorial001_03_an_py39.py:create_upload_file",
+        "tutorial001_03_an.py:create_upload_file",
+        "tutorial003_an.py:create_upload_files",
+        "datastructures.py:UploadFile",
+        "tutorial003_an_py39.py:create_upload_files"
+      ]
+    },
+    {
+      "id": "q10",
+      "question": "How does FastAPI serialize and validate the response against the response model?",
+      "hit": 0.0,
+      "recall": 0.0,
+      "precision": 0.0,
+      "rr": 0.0,
+      "first_rank": null,
+      "n_relevant": 1,
+      "n_found_at_k": 0,
+      "top_k_preview": [
+        "test_tutorial005.py:test_openapi_schema",
+        "test_tutorial006b.py:test_openapi_schema",
+        "test_tutorial001.py:test_openapi_schema",
+        "test_tuples.py:test_openapi_schema",
+        "test_additional_responses_default_validationerror.py:test_openapi_schema"
+      ]
+    },
+    {
+      "id": "q11",
+      "question": "Where is the Swagger UI HTML page generated?",
+      "hit": 1.0,
+      "recall": 1.0,
+      "precision": 0.2,
+      "rr": 0.2,
+      "first_rank": 5,
+      "n_relevant": 1,
+      "n_found_at_k": 1,
+      "top_k_preview": [
+        "applications.py:swagger_ui_html",
+        "tutorial002.py:custom_swagger_ui_html",
+        "tutorial001.py:custom_swagger_ui_html",
+        "test_local_docs.py:test_strings_in_generated_swagger",
+        "docs.py:get_swagger_ui_html"
+      ]
+    },
+    {
+      "id": "q12",
+      "question": "How is the OAuth2 password request form defined?",
+      "hit": 1.0,
+      "recall": 1.0,
+      "precision": 0.2,
+      "rr": 1.0,
+      "first_rank": 1,
+      "n_relevant": 1,
+      "n_found_at_k": 1,
+      "top_k_preview": [
+        "oauth2.py:OAuth2PasswordRequestForm",
+        "oauth2.py:OAuth2PasswordBearer",
+        "oauth2.py:__init__",
+        "test_security_oauth2_optional.py:login",
+        "test_security_oauth2_optional_description.py:login"
+      ]
+    },
+    {
+      "id": "q13",
+      "question": "How does API key authentication via a request header work?",
+      "hit": 1.0,
+      "recall": 1.0,
+      "precision": 0.2,
+      "rr": 1.0,
+      "first_rank": 1,
+      "n_relevant": 1,
+      "n_found_at_k": 1,
+      "top_k_preview": [
+        "api_key.py:APIKeyHeader",
+        "api_key.py:__call__",
+        "api_key.py:__call__",
+        "api_key.py:__call__",
+        "tutorial006.py:verify_key"
+      ]
+    },
+    {
+      "id": "q14",
+      "question": "How are HTTP exceptions raised and handled?",
+      "hit": 1.0,
+      "recall": 1.0,
+      "precision": 0.4,
+      "rr": 1.0,
+      "first_rank": 1,
+      "n_relevant": 2,
+      "n_found_at_k": 2,
+      "top_k_preview": [
+        "exceptions.py:HTTPException",
+        "test_exception_handlers.py:http_exception_handler",
+        "exception_handlers.py:http_exception_handler",
+        "tutorial006.py:custom_http_exception_handler",
+        "tutorial004.py:http_exception_handler"
+      ]
+    },
+    {
+      "id": "q15",
+      "question": "How do I declare a form field parameter in an endpoint?",
+      "hit": 1.0,
+      "recall": 1.0,
+      "precision": 0.2,
+      "rr": 1.0,
+      "first_rank": 1,
+      "n_relevant": 1,
+      "n_found_at_k": 1,
+      "top_k_preview": [
+        "param_functions.py:Form",
+        "utils.py:add_param_to_fields",
+        "test_forms_from_non_typing_sequences.py:post_form_param_set",
+        "test_forms_from_non_typing_sequences.py:post_form_param_list",
+        "utils.py:ParamDetails"
+      ]
+    },
+    {
+      "id": "q16",
+      "question": "How does APIRouter group routes and include sub-routers?",
+      "hit": 1.0,
+      "recall": 1.0,
+      "precision": 0.2,
+      "rr": 1.0,
+      "first_rank": 1,
+      "n_relevant": 1,
+      "n_found_at_k": 1,
+      "top_k_preview": [
+        "routing.py:APIRouter",
+        "applications.py:include_router",
+        "routing.py:include_router",
+        "test_generate_unique_id_function.py:test_subrouter_top_level_include_overrides_generate_unique_id",
+        "test_annotated.py:test_nested_router"
+      ]
+    },
+    {
+      "id": "q17",
+      "question": "How are websocket routes handled?",
+      "hit": 1.0,
+      "recall": 1.0,
+      "precision": 0.2,
+      "rr": 0.2,
+      "first_rank": 5,
+      "n_relevant": 1,
+      "n_found_at_k": 1,
+      "top_k_preview": [
+        "applications.py:websocket_route",
+        "routing.py:websocket_route",
+        "routing.py:add_api_websocket_route",
+        "test_route_scope.py:websocket_item",
+        "routing.py:APIWebSocketRoute"
+      ]
+    },
+    {
+      "id": "q18",
+      "question": "How is each path operation entry in the OpenAPI schema built?",
+      "hit": 1.0,
+      "recall": 1.0,
+      "precision": 0.2,
+      "rr": 1.0,
+      "first_rank": 1,
+      "n_relevant": 1,
+      "n_found_at_k": 1,
+      "top_k_preview": [
+        "utils.py:get_openapi_path",
+        "test_dependency_duplicates.py:test_openapi_schema",
+        "test_tutorial003_01_py310.py:test_openapi_schema",
+        "test_tutorial003_py310.py:test_openapi_schema",
+        "models.py:OpenAPI"
+      ]
+    },
+    {
+      "id": "q19",
+      "question": "How does HTTP bearer token authentication work?",
+      "hit": 1.0,
+      "recall": 1.0,
+      "precision": 0.2,
+      "rr": 1.0,
+      "first_rank": 1,
+      "n_relevant": 1,
+      "n_found_at_k": 1,
+      "top_k_preview": [
+        "http.py:HTTPBearer",
+        "models.py:HTTPBearer",
+        "test_security_http_bearer_description.py:test_security_http_bearer",
+        "test_security_http_bearer_optional.py:test_security_http_bearer",
+        "test_security_http_bearer.py:test_security_http_bearer"
+      ]
+    },
+    {
+      "id": "q20",
+      "question": "How are background tasks supported?",
+      "hit": 1.0,
+      "recall": 1.0,
+      "precision": 0.2,
+      "rr": 0.3333333333333333,
+      "first_rank": 3,
+      "n_relevant": 1,
+      "n_found_at_k": 1,
+      "top_k_preview": [
+        "test_dependency_contextmanager.py:get_context_b_bg",
+        "test_dependency_contextmanager.py:get_sync_context_b_bg",
+        "background.py:BackgroundTasks",
+        "tutorial001.py:send_notification",
+        "test_dependency_contextmanager.py:test_background_tasks"
+      ]
+    }
+  ]
+}
