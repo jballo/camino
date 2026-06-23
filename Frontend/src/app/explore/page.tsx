@@ -13,6 +13,7 @@ import {
   Search,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import ReactMarkdown from "react-markdown";
 
 type Source = {
   chunk_id: number;
@@ -340,8 +341,8 @@ export default function Explore() {
                   Answer for{" "}
                   <span className="text-foreground">{selectedRepo}</span>
                 </div>
-                <div className="whitespace-pre-wrap text-sm leading-relaxed">
-                  {answer.answer}
+                <div className="text-sm leading-relaxed [&_p:not(:last-child)]:mb-3 [&_ul]:mb-3 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:mb-3 [&_ol]:list-decimal [&_ol]:pl-5 [&_li:not(:last-child)]:mb-1 [&_code]:rounded [&_code]:bg-accent [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-xs [&_pre]:mb-3 [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:border [&_pre]:border-border [&_pre]:bg-muted [&_pre]:p-3 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_strong]:font-semibold">
+                  <ReactMarkdown>{answer.answer}</ReactMarkdown>
                 </div>
               </div>
 
