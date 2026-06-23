@@ -25,6 +25,9 @@ export default function Header() {
               <Link href="/">Home</Link>
             </div>
             <div>
+              <Link href="/explore">Explore</Link>
+            </div>
+            <div>
               <Link href="/tours">Tours</Link>
             </div>
             <div>

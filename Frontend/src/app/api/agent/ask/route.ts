@@ -7,33 +7,33 @@ export async function POST(req: NextRequest) {
     const user = await currentUser();
 
     const body = await req.json();
-    const { repoName } = body;
+    const { question, repoName } = body;
     if (!isAuthenticated || user === null) throw new Error(`Not authenticated`);
 
     const token = await getToken();
     if (token === null) throw new Error(`Not authenticated`);
 
-    if (!repoName) throw new Error(`Invalid body`);
+    if (!question || !repoName) throw new Error(`Invalid body`);
 
     const backend_url = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
 
-    const response = await fetch(`${backend_url}/api/v1/repositories/ingest`, {
+    const response = await fetch(`${backend_url}/api/v1/agent/ask`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({
+        question,
         repoName,
         userId,
       }),
     });
 
-    if (!response.ok) throw new Error("Failed to process repo");
+    if (!response.ok) throw new Error("Failed to ask agent");
 
     const result = await response.json();
-    console.log("Result: ", result);
-    return NextResponse.json({ repoName, ...result });
+    return NextResponse.json(result);
   } catch (error) {
     console.log("Error: ", error);
     return NextResponse.json(
