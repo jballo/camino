@@ -109,8 +109,11 @@ def _fts_search(
     path_filter = _demo_path_exclusion_sql("c") if filter_demo_paths else ""
     sql = text(f"""
         WITH q AS (
-            SELECT replace(
-                       plainto_tsquery('english', :query)::text, ' & ', ' | '
+            SELECT NULLIF(
+                       replace(
+                           plainto_tsquery('english', :query)::text, ' & ', ' | '
+                       ),
+                       ''
                    )::tsquery AS query
         )
         SELECT c.id AS chunk_id,
@@ -120,6 +123,7 @@ def _fts_search(
         FROM   code_chunks c, q
         WHERE  c.repo_name = :repo_name
           AND  c.installation_id = :installation_id
+          AND  q.query IS NOT NULL
           AND  c.search_vector @@ q.query
           {path_filter}
         ORDER  BY rank
