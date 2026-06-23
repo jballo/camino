@@ -32,6 +32,10 @@ from app.services.embeddings import (
     embed_all,
 )
 from app.services.parser import LANGUAGES, MAX_FILE_BYTES, SKIP_DIRS, parse_file
+from app.services.search_index import (
+    populate_search_vector_sql,
+    rebuild_search_vector,
+)
 
 # A sentinel installation id reserved for eval fixtures so it never collides
 # with real GitHub installation ids.
@@ -144,18 +148,9 @@ async def ingest(
         session.add_all(embedding_models)
 
         session.exec(
-            text(
-                """
-                UPDATE code_chunks
-                SET search_vector =
-                    setweight(to_tsvector('simple', coalesce(symbol_name, '')), 'A') ||
-                    setweight(to_tsvector('simple', replace(replace(file_path, '/', ' '), '.', ' ')), 'B') ||
-                    setweight(to_tsvector('english', coalesce(docstring, '')), 'C')
-                WHERE repo_name = :repo_name
-                  AND installation_id = :installation_id
-                  AND search_vector IS NULL
-                """
-            ).bindparams(repo_name=repo_name, installation_id=installation_id)
+            text(populate_search_vector_sql(only_null=True)).bindparams(
+                repo_name=repo_name, installation_id=installation_id
+            )
         )
 
         session.commit()
@@ -192,7 +187,23 @@ def main() -> None:
         action="store_true",
         help="Do not auto-clone the pinned fixture if the path is missing.",
     )
+    parser.add_argument(
+        "--rebuild-fts",
+        action="store_true",
+        help="Recompute search_vector for already-ingested chunks and exit "
+        "(no parsing, no embedding). Use after changing the FTS tokenization.",
+    )
     args = parser.parse_args()
+
+    if args.rebuild_fts:
+        engine = create_engine(settings.database_url)
+        with Session(engine) as session:
+            rebuild_search_vector(session, args.repo, args.installation_id)
+        print(
+            f"rebuilt search_vector: repo={args.repo!r} "
+            f"installation_id={args.installation_id}"
+        )
+        return
 
     root = Path(args.path)
     if not args.no_clone:

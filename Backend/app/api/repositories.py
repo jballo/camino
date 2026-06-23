@@ -27,6 +27,7 @@ from app.security import get_authenticated_user_id
 from app.services.parser import LANGUAGES, MAX_FILE_BYTES, SKIP_DIRS, parse_file
 
 from app.services.search import hybrid_search
+from app.services.search_index import populate_search_vector_sql
 
 
 router = APIRouter()
@@ -270,14 +271,12 @@ async def process_repository(
             ]
             session.add_all(embedding_models)
 
-            session.exec(text("""
-                UPDATE code_chunks
-                SET search_vector = 
-                    setweight(to_tsvector('simple', coalesce(symbol_name, '')), 'A') ||
-                    setweight(to_tsvector('simple', replace(replace(file_path, '/', ' '), '.', ' ')), 'B') ||
-                    setweight(to_tsvector('english', coalesce(docstring, '')), 'C')
-                WHERE repo_name = :repo_name AND search_vector IS NULL
-            """).bindparams(repo_name=payload.repoName))
+            session.exec(
+                text(populate_search_vector_sql(only_null=True)).bindparams(
+                    repo_name=payload.repoName,
+                    installation_id=gh_connection.installationId,
+                )
+            )
 
             session.commit()
             logger.info(
