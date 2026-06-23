@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     encryption_key: str
     gh_webhook_secret: str
     openai_api_key: str
+    agent_model: str = "gpt-4o-mini"
     model_config = SettingsConfigDict(env_file=".env")
 
 
