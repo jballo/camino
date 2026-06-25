@@ -57,6 +57,10 @@ class RetrievalConfig:
     fts_weight: float = 1.0
     path_penalty: float = 1.0
     filter_demo_paths: bool = True
+    rerank: bool = False
+    rerank_top_n: int = 30
+    rerank_rrf_weight: float = 0.9
+    rerank_model: str | None = None
 
 
 def _relevant_ranks(
@@ -182,6 +186,10 @@ async def run(session: Session, cfg: RetrievalConfig, questions: list[dict],
             mode=cfg.mode,
             path_penalty=cfg.path_penalty,
             filter_demo_paths=cfg.filter_demo_paths,
+            rerank=cfg.rerank,
+            rerank_top_n=cfg.rerank_top_n,
+            rerank_rrf_weight=cfg.rerank_rrf_weight,
+            rerank_model=cfg.rerank_model,
         )
         m = _metrics_for_question(results, q["relevant"], cfg.k)
         diagnosis = _diagnose(q["relevant"], relevant_ids, debug, results, cfg.k)
@@ -223,7 +231,9 @@ def _print_report(report: dict, label: str | None) -> None:
     print(
         f"knobs: top_n={cfg['top_n']} rrf_k={cfg['rrf_k']} "
         f"vec_w={cfg['vector_weight']} fts_w={cfg['fts_weight']} "
-        f"path_penalty={cfg['path_penalty']} filter_demo={cfg['filter_demo_paths']}"
+        f"path_penalty={cfg['path_penalty']} filter_demo={cfg['filter_demo_paths']} "
+        f"rerank={cfg['rerank']} rerank_top_n={cfg['rerank_top_n']} "
+        f"rerank_rrf_w={cfg['rerank_rrf_weight']}"
     )
     print("=" * 78)
     print(f"{'id':<5}{'hit':>4}{'rec':>6}{'prec':>6}{'rr':>6}  question")
@@ -345,6 +355,28 @@ def main() -> None:
         help="include tests/tutorials/docs_src in retriever candidate pools",
     )
     parser.add_argument(
+        "--rerank",
+        action="store_true",
+        help="cross-encoder rerank top fused candidates before final cut (Exp 6)",
+    )
+    parser.add_argument(
+        "--rerank-top-n",
+        type=int,
+        default=30,
+        help="fused candidates passed to the cross-encoder when --rerank is set",
+    )
+    parser.add_argument(
+        "--rerank-rrf-weight",
+        type=float,
+        default=0.9,
+        help="blend weight for RRF vs cross-encoder (1.0 = RRF only, 0.0 = CE only)",
+    )
+    parser.add_argument(
+        "--rerank-model",
+        default=None,
+        help="cross-encoder model id (default: BAAI/bge-reranker-base)",
+    )
+    parser.add_argument(
         "--mode",
         choices=(*ABLATION_MODES, "ablation"),
         default="hybrid",
@@ -387,6 +419,10 @@ def main() -> None:
                     fts_weight=args.fts_weight,
                     path_penalty=args.path_penalty,
                     filter_demo_paths=not args.no_filter_demo_paths,
+                    rerank=args.rerank,
+                    rerank_top_n=args.rerank_top_n,
+                    rerank_rrf_weight=args.rerank_rrf_weight,
+                    rerank_model=args.rerank_model,
                 )
                 reports[mode] = await run(
                     session, cfg, questions, repo_name, installation_id, relevant_ids
