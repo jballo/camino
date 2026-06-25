@@ -190,7 +190,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 ### Evaluation (the differentiator)
 - [x] Golden retrieval dataset (20 questions → expected files/symbols, FastAPI 0.115.6)
 - [x] Retrieval eval script (hit rate, recall@k, precision@k, MRR, ablation mode)
-- [ ] Structural evals (valid JSON, paths exist, line numbers in bounds, snippets match)
+- [~] Structural evals (schema + path/line/snippet validators, fixture CLI — no LLM)
 - [ ] LLM-as-judge (faithfulness, relevance, completeness, ordering)
 - [ ] Eval suite across 2–3 repos (~35–40 questions total)
 - [ ] Eval gates in CI (GitHub Actions, fail on regression)

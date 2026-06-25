@@ -1,15 +1,21 @@
-# Retrieval eval
+# Eval harnesses
 
-Measures the quality of the **non-agent retrieval path** (`app.services.search.hybrid_search`:
-pgvector + Postgres FTS fused with RRF) against a hand-labeled FastAPI golden set.
+Two eval tracks live here:
+
+1. **Retrieval eval** — does hybrid search surface the right chunks? (needs DB + OpenAI)
+2. **Structural eval** — does a tour artifact parse, reference real files, and quote matching source? (no LLM, no DB)
+
+Retrieval work is paused at a strong baseline; structural eval is the active track for Phase 2 tour generation.
 
 ## Files
 
 - `golden_dataset.json` — 20 questions, each with hand-labeled relevant `(file, symbol)` chunks. Pinned to FastAPI `0.115.6`.
 - `ingest_local.py` — ingests a local repo through the **real** production pipeline (same parser, embeddings, and `search_vector` SQL as `app/api/repositories.py`), reading from disk instead of GitHub.
 - `run_eval.py` — runs each question through `hybrid_search` and reports hit rate, recall@k, precision@k, MRR.
+- `run_structural_eval.py` — runs tour JSON fixtures through schema + repo-grounding validators.
+- `structural/` — tour schema validators (`validate.py`), hand-written pass/fail fixtures.
 - `baseline_results.json` — recorded baseline numbers.
-- `EXPERIMENTS.md` — **experiment log**: results, stacking notes, shipped config, next steps (start here when continuing in a new chat).
+- `EXPERIMENTS.md` — **retrieval experiment log** (paused; resume from handoff section).
 - `.data/` — the cloned fixture source. **Gitignored** (not committed); fetched on demand, see below.
 
 ## Reproduce from a fresh checkout
@@ -56,6 +62,35 @@ Diagnostics in the default report:
   per-question hit matrix so you can see where the two retrievers are complementary.
 
 `runs/` is gitignored; use `--out eval/runs/<label>.json` to keep a leaderboard.
+
+## Structural eval (validator-only, no LLM)
+
+Checks that a **structured tour artifact** is internally consistent and grounded in
+the fixture repo:
+
+| Check | What it catches |
+|---|---|
+| Schema | Malformed JSON, missing fields, invalid line ranges |
+| Path exists | Hallucinated `file_path` values |
+| Lines in bounds | `start_line` / `end_line` past EOF |
+| Snippet matches | Quoted text not present at those lines |
+
+Tour contract: `app/models/tour.py` (`TourArtifact`, `TourStep`).
+
+```bash
+cd Backend
+uv run python -m eval.run_structural_eval
+uv run python -m eval.run_structural_eval --fixture valid_minimal --json
+uv run pytest tests/test_structural_eval.py -q
+```
+
+Fixtures live in `structural/fixtures/` (`valid_minimal`, `bad_path`, `bad_lines`,
+`bad_snippet`, `bad_schema`). The CLI auto-clones FastAPI `0.115.6` into
+`.data/fastapi` when missing (same pin as the retrieval golden set). No database or
+OpenAI key required.
+
+When the tour generation pipeline exists, point the same `validate_tour()` helper at
+live agent output before persisting or returning tours.
 
 ## Baseline (FastAPI 0.115.6, k=5, retrieve 10)
 
