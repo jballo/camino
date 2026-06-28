@@ -43,6 +43,14 @@ def test_parse_citations_deduplicates():
     assert len(refs) == 1
 
 
+def test_parse_citations_keeps_plain_path_alongside_qualified_ref():
+    text = "`fastapi/routing.py:APIRoute` is defined in fastapi/routing.py."
+    refs = parse_citations(text)
+    keys = {ref.key for ref in refs}
+    assert ("fastapi/routing.py", None, None, "APIRoute") in keys
+    assert ("fastapi/routing.py", None, None, None) in keys
+
+
 def test_validate_citations_passes_for_existing_path(tmp_path: Path):
     _write_repo(tmp_path)
     refs = parse_citations("`fastapi/routing.py:APIRoute`")

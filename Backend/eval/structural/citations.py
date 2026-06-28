@@ -81,11 +81,8 @@ def parse_citations(text: str) -> list[CitationRef]:
             found[ref.key] = ref
 
     for match in _QUALIFIED.finditer(text):
-        raw = match.group(0)
-        if any(raw in existing.raw for existing in found.values()):
-            continue
-        ref = _parse_qualified(raw)
-        if ref is not None:
+        ref = _parse_qualified(match.group(0))
+        if ref is not None and ref.key not in found:
             found[ref.key] = ref
 
     return list(found.values())
