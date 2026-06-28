@@ -43,6 +43,7 @@ class FixtureRun:
     expect: str
     passed: bool
     expected_pass: bool
+    artifact_passed: bool
     failed_checks: list[str]
     expected_fail_checks: list[str]
     issues: list[dict]
@@ -69,6 +70,7 @@ def _error_run(spec: FixtureExpectation, message: str) -> FixtureRun:
         expect=spec.expect,
         passed=False,
         expected_pass=spec.expect == "pass",
+        artifact_passed=False,
         failed_checks=[],
         expected_fail_checks=spec.fail_checks,
         issues=[{"kind": "harness_error", "step_index": None, "message": message}],
@@ -98,6 +100,7 @@ def _run_fixture(
         expect=spec.expect,
         passed=passed,
         expected_pass=expected_pass,
+        artifact_passed=result.passed,
         failed_checks=[c.value for c in failed],
         expected_fail_checks=spec.fail_checks,
         issues=[
@@ -114,7 +117,7 @@ def _run_fixture(
 def _aggregate(runs: list[FixtureRun]) -> dict:
     n = len(runs)
     harness_pass = sum(1 for r in runs if r.passed)
-    artifact_pass = sum(1 for r in runs if r.expected_pass)
+    artifact_pass = sum(1 for r in runs if r.artifact_passed)
     return {
         "fixtures": n,
         "harness_pass_rate": harness_pass / n if n else 0.0,

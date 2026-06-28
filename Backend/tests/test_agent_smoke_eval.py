@@ -113,3 +113,48 @@ async def test_run_agent_smoke_eval_orchestration(tmp_path: Path, monkeypatch):
     assert len(runs) == 1
     assert runs[0].citation_count == 1
     assert runs[0].citations_valid
+
+
+def _question_run(smoke, *, citation_count: int, citations_valid: bool):
+    return smoke.QuestionRun(
+        id="q01",
+        question="q",
+        answer_preview="",
+        citations=[],
+        citation_count=citation_count,
+        citations_valid=citations_valid,
+        failed_checks=[],
+        issues=[],
+        source_count=0,
+        elapsed_s=0.0,
+    )
+
+
+def _strict_fails(aggregate) -> bool:
+    """Mirror of the --strict gate in main()."""
+    return (
+        aggregate["questions_all_citations_valid"] != aggregate["questions"]
+        or aggregate["questions_with_citations"] != aggregate["questions"]
+    )
+
+
+def test_strict_gate_fails_when_a_question_has_no_citations():
+    from eval import run_agent_smoke_eval as smoke
+
+    # Zero-citation answers vacuously pass validation but must still fail --strict,
+    # otherwise a regression that strips all citations goes undetected.
+    runs = [_question_run(smoke, citation_count=0, citations_valid=True)]
+    aggregate = smoke._aggregate(runs)
+
+    assert aggregate["questions_all_citations_valid"] == aggregate["questions"]
+    assert aggregate["questions_with_citations"] == 0
+    assert _strict_fails(aggregate)
+
+
+def test_strict_gate_passes_when_all_questions_cite_validly():
+    from eval import run_agent_smoke_eval as smoke
+
+    runs = [_question_run(smoke, citation_count=2, citations_valid=True)]
+    aggregate = smoke._aggregate(runs)
+
+    assert not _strict_fails(aggregate)

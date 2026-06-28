@@ -289,7 +289,10 @@ def main() -> None:
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="exit 1 unless every question's parsed citations are structurally valid",
+        help=(
+            "exit 1 unless every question produced at least one citation and "
+            "all parsed citations are structurally valid"
+        ),
     )
     args = parser.parse_args()
 
@@ -344,7 +347,10 @@ def main() -> None:
         out_path.write_text(json.dumps(output, indent=2))
         print(f"wrote {out_path}")
 
-    if args.strict and aggregate["questions_all_citations_valid"] != aggregate["questions"]:
+    if args.strict and (
+        aggregate["questions_all_citations_valid"] != aggregate["questions"]
+        or aggregate["questions_with_citations"] != aggregate["questions"]
+    ):
         sys.exit(1)
 
 
