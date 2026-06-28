@@ -5,6 +5,7 @@ from sqlalchemy import text
 from sqlmodel import Session
 
 from app.services.embeddings import EMBED_MODEL, embed_batch
+from app.services.rerank import DEFAULT_RERANK_TOP_N
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,6 @@ DEFAULT_PATH_PENALTY = 0.3
 # slots go to library internals (post-fusion demotion is too late for deep hits).
 DEFAULT_FILTER_DEMO_PATHS = True
 DEFAULT_RERANK = False
-DEFAULT_RERANK_TOP_N = 30
 
 
 def _demo_path_exclusion_sql(alias: str = "c") -> str:
@@ -308,7 +308,9 @@ async def hybrid_search_debug(
     )
     fused = _demote_paths(session, fused, path_penalty)
 
-    hydrate_limit = rerank_top_n if rerank else limit
+    # max(): a caller passing rerank_top_n < limit must still get `limit`
+    # candidates through to the final slice, not just rerank_top_n of them.
+    hydrate_limit = max(rerank_top_n, limit) if rerank else limit
     results = _load_chunks(session, fused, hydrate_limit)
     if rerank and results:
         from app.services.rerank import RERANK_MODEL, rerank_results

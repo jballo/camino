@@ -62,15 +62,36 @@ def _load_manifest() -> tuple[str, list[FixtureExpectation]]:
     return data.get("repo_version", FIXTURE_REPO_VERSION), fixtures
 
 
+def _error_run(spec: FixtureExpectation, message: str) -> FixtureRun:
+    """A fixture that couldn't be evaluated — reported as a failure, not a crash."""
+    return FixtureRun(
+        id=spec.id,
+        expect=spec.expect,
+        passed=False,
+        expected_pass=spec.expect == "pass",
+        failed_checks=[],
+        expected_fail_checks=spec.fail_checks,
+        issues=[{"kind": "harness_error", "step_index": None, "message": message}],
+    )
+
+
 def _run_fixture(
     spec: FixtureExpectation,
     repo_root: Path,
 ) -> FixtureRun:
-    payload = (FIXTURES_DIR / spec.file).read_text()
+    try:
+        expected_failed = sorted(CheckKind(c) for c in spec.fail_checks)
+    except ValueError as exc:
+        return _error_run(spec, f"invalid fail_check in manifest: {exc}")
+
+    try:
+        payload = (FIXTURES_DIR / spec.file).read_text()
+    except OSError as exc:
+        return _error_run(spec, f"cannot read fixture file {spec.file!r}: {exc}")
+
     result = validate_tour(payload, repo_root)
     expected_pass = spec.expect == "pass"
     failed = sorted(result.failed_checks)
-    expected_failed = sorted(CheckKind(c) for c in spec.fail_checks)
     passed = result.passed == expected_pass and failed == expected_failed
     return FixtureRun(
         id=spec.id,

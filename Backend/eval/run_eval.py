@@ -232,8 +232,9 @@ def _print_report(report: dict, label: str | None) -> None:
         f"knobs: top_n={cfg['top_n']} rrf_k={cfg['rrf_k']} "
         f"vec_w={cfg['vector_weight']} fts_w={cfg['fts_weight']} "
         f"path_penalty={cfg['path_penalty']} filter_demo={cfg['filter_demo_paths']} "
-        f"rerank={cfg['rerank']} rerank_top_n={cfg['rerank_top_n']} "
-        f"rerank_rrf_w={cfg['rerank_rrf_weight']}"
+        f"rerank={cfg.get('rerank', False)} rerank_top_n={cfg.get('rerank_top_n', 30)} "
+        f"rerank_rrf_w={cfg.get('rerank_rrf_weight', 0.9)} "
+        f"rerank_model={cfg.get('rerank_model') or 'default'}"
     )
     print("=" * 78)
     print(f"{'id':<5}{'hit':>4}{'rec':>6}{'prec':>6}{'rr':>6}  question")

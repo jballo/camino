@@ -38,12 +38,18 @@ class ValidationResult:
 
 
 def normalize_text(text: str) -> str:
-    """Collapse insignificant whitespace so snippet checks tolerate formatting."""
+    """Collapse insignificant whitespace so snippet checks tolerate formatting.
+
+    Trailing whitespace and blank edge lines are dropped, but leading
+    indentation on content lines is preserved — a bare ``.strip()`` would erase
+    the first line's indentation and corrupt snippet matching for indented code.
+    """
     lines = [line.rstrip() for line in text.replace("\r\n", "\n").split("\n")]
-    return "\n".join(lines).strip()
+    return "\n".join(lines).strip("\n")
 
 
-def _safe_repo_path(repo_root: Path, file_path: str) -> Path | None:
+def resolve_repo_file(repo_root: Path, file_path: str) -> Path | None:
+    """Resolve a repo-relative path, rejecting absolute paths and traversal."""
     if file_path.startswith(("/", "\\")):
         return None
     if ".." in Path(file_path).parts:
@@ -63,6 +69,12 @@ def _read_file_lines(path: Path) -> list[str] | None:
     except (OSError, UnicodeDecodeError):
         return None
     return text.splitlines()
+
+
+def count_repo_file_lines(path: Path) -> int | None:
+    """Line count of a file, or ``None`` when it can't be read."""
+    lines = _read_file_lines(path)
+    return None if lines is None else len(lines)
 
 
 def parse_tour_payload(payload: str | bytes | dict[str, Any]) -> tuple[TourArtifact | None, list[CheckIssue]]:
@@ -98,7 +110,7 @@ def validate_tour_artifact(artifact: TourArtifact, repo_root: Path) -> Validatio
     issues: list[CheckIssue] = []
 
     for step_index, step in enumerate(artifact.steps):
-        resolved = _safe_repo_path(repo_root, step.file_path)
+        resolved = resolve_repo_file(repo_root, step.file_path)
         if resolved is None:
             issues.append(
                 CheckIssue(
@@ -147,6 +159,18 @@ def validate_tour_artifact(artifact: TourArtifact, repo_root: Path) -> Validatio
         slice_text = "\n".join(lines[step.start_line - 1 : step.end_line])
         normalized_slice = normalize_text(slice_text)
         normalized_snippet = normalize_text(step.snippet)
+        if not normalized_snippet:
+            issues.append(
+                CheckIssue(
+                    kind=CheckKind.SNIPPET_MATCHES,
+                    step_index=step_index,
+                    message=(
+                        f"snippet is empty after normalization for "
+                        f"{step.file_path!r}:{step.start_line}-{step.end_line}"
+                    ),
+                )
+            )
+            continue
         if normalized_snippet not in normalized_slice:
             issues.append(
                 CheckIssue(
