@@ -1,0 +1,163 @@
+"""Parse free-text code citations from agent answers and validate them structurally."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+from pathlib import Path
+
+from eval.structural.validate import (
+    CheckIssue,
+    CheckKind,
+    ValidationResult,
+    count_repo_file_lines,
+    resolve_repo_file,
+)
+
+# Repo-relative paths like ``fastapi/routing.py`` or ``app/services/search.py``.
+_FILE_PATH = r"(?:[\w.-]+/)+[\w.-]+\.\w+"
+# ``path:42``, ``path:42-50``, or ``path:symbol_name``.
+_QUALIFIED = re.compile(
+    rf"(?P<path>{_FILE_PATH})(?::(?P<suffix>[\w.-]+))?"
+)
+# Backtick-wrapped citations are preferred in agent answers.
+_BACKTICK = re.compile(rf"`({_FILE_PATH}(?::[\w.-]+)?)`")
+
+
+@dataclass(frozen=True)
+class CitationRef:
+    """A code reference extracted from free text."""
+
+    file_path: str
+    start_line: int | None = None
+    end_line: int | None = None
+    symbol: str | None = None
+    raw: str = ""
+
+    @property
+    def key(self) -> tuple[str, int | None, int | None, str | None]:
+        return (self.file_path, self.start_line, self.end_line, self.symbol)
+
+
+def _parse_suffix(suffix: str | None) -> tuple[int | None, int | None, str | None]:
+    if not suffix:
+        return None, None, None
+
+    if re.fullmatch(r"\d+", suffix):
+        line = int(suffix)
+        return line, line, None
+
+    range_match = re.fullmatch(r"(\d+)-(\d+)", suffix)
+    if range_match:
+        start = int(range_match.group(1))
+        end = int(range_match.group(2))
+        return start, end, None
+
+    return None, None, suffix
+
+
+def _parse_qualified(raw: str) -> CitationRef | None:
+    match = _QUALIFIED.fullmatch(raw.strip())
+    if not match:
+        return None
+    start_line, end_line, symbol = _parse_suffix(match.group("suffix"))
+    return CitationRef(
+        file_path=match.group("path"),
+        start_line=start_line,
+        end_line=end_line,
+        symbol=symbol,
+        raw=raw,
+    )
+
+
+def parse_citations(text: str) -> list[CitationRef]:
+    """Extract de-duplicated code citations from agent answer text."""
+    found: dict[tuple[str, int | None, int | None, str | None], CitationRef] = {}
+
+    for match in _BACKTICK.finditer(text):
+        ref = _parse_qualified(match.group(1))
+        if ref is not None:
+            found[ref.key] = ref
+
+    for match in _QUALIFIED.finditer(text):
+        raw = match.group(0)
+        if any(raw in existing.raw for existing in found.values()):
+            continue
+        ref = _parse_qualified(raw)
+        if ref is not None:
+            found[ref.key] = ref
+
+    return list(found.values())
+
+
+def validate_citations(citations: list[CitationRef], repo_root: Path) -> ValidationResult:
+    """Check parsed citations against on-disk repo source (path + line bounds only)."""
+    issues: list[CheckIssue] = []
+
+    for index, citation in enumerate(citations):
+        resolved = resolve_repo_file(repo_root, citation.file_path)
+        if resolved is None:
+            issues.append(
+                CheckIssue(
+                    kind=CheckKind.PATH_EXISTS,
+                    step_index=index,
+                    message=f"unsafe or invalid file_path: {citation.file_path!r}",
+                )
+            )
+            continue
+
+        if not resolved.is_file():
+            issues.append(
+                CheckIssue(
+                    kind=CheckKind.PATH_EXISTS,
+                    step_index=index,
+                    message=f"file not found: {citation.file_path!r}",
+                )
+            )
+            continue
+
+        if citation.start_line is None and citation.end_line is None:
+            continue
+
+        line_count = count_repo_file_lines(resolved)
+        if line_count is None:
+            issues.append(
+                CheckIssue(
+                    kind=CheckKind.PATH_EXISTS,
+                    step_index=index,
+                    message=f"file not readable: {citation.file_path!r}",
+                )
+            )
+            continue
+
+        start = citation.start_line or citation.end_line
+        end = citation.end_line or citation.start_line
+        if start is None or end is None:
+            continue
+
+        if start > end:
+            issues.append(
+                CheckIssue(
+                    kind=CheckKind.LINES_IN_BOUNDS,
+                    step_index=index,
+                    message=(
+                        f"invalid line range {start}-{end} for {citation.file_path!r}"
+                    ),
+                )
+            )
+            continue
+
+        if start > line_count or end > line_count:
+            issues.append(
+                CheckIssue(
+                    kind=CheckKind.LINES_IN_BOUNDS,
+                    step_index=index,
+                    message=(
+                        f"lines {start}-{end} out of bounds for "
+                        f"{citation.file_path!r} ({line_count} lines)"
+                    ),
+                )
+            )
+
+    return ValidationResult(passed=not issues, issues=issues)
