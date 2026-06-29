@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -315,7 +316,10 @@ async def hybrid_search_debug(
     if rerank and results:
         from app.services.rerank import RERANK_MODEL, rerank_results
 
-        results = rerank_results(
+        # rerank_results runs synchronous CPU-bound neural inference; offload it
+        # to a thread so it doesn't block the event loop for other requests.
+        results = await asyncio.to_thread(
+            rerank_results,
             query,
             results,
             top_n=rerank_top_n,

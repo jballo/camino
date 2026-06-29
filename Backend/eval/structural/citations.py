@@ -128,8 +128,16 @@ def validate_citations(citations: list[CitationRef], repo_root: Path) -> Validat
             )
             continue
 
-        start = citation.start_line or citation.end_line
-        end = citation.end_line or citation.start_line
+        start = (
+            citation.start_line
+            if citation.start_line is not None
+            else citation.end_line
+        )
+        end = (
+            citation.end_line
+            if citation.end_line is not None
+            else citation.start_line
+        )
         if start is None or end is None:
             continue
 

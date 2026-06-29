@@ -117,11 +117,18 @@ def _run_fixture(
 def _aggregate(runs: list[FixtureRun]) -> dict:
     n = len(runs)
     harness_pass = sum(1 for r in runs if r.passed)
-    artifact_pass = sum(1 for r in runs if r.artifact_passed)
+    # Scope artifact_pass to fixtures we *expect* to validate: the "expect: fail"
+    # fixtures are intentionally invalid, so counting them against the raw
+    # validator outcome makes the metric always-low and meaningless. This now
+    # measures "of the valid fixtures, how many the validator accepted".
+    valid_runs = [r for r in runs if r.expected_pass]
+    valid_n = len(valid_runs)
+    artifact_pass = sum(1 for r in valid_runs if r.artifact_passed)
     return {
         "fixtures": n,
+        "valid_fixtures": valid_n,
         "harness_pass_rate": harness_pass / n if n else 0.0,
-        "artifact_pass_rate": artifact_pass / n if n else 0.0,
+        "artifact_pass_rate": artifact_pass / valid_n if valid_n else 0.0,
         "harness_pass": harness_pass,
         "artifact_pass": artifact_pass,
     }
@@ -145,7 +152,7 @@ def _print_report(
     print("AGGREGATE")
     print(f"  fixtures          : {aggregate['fixtures']}")
     print(f"  harness_pass      : {aggregate['harness_pass']}/{aggregate['fixtures']}")
-    print(f"  artifact_pass     : {aggregate['artifact_pass']}/{aggregate['fixtures']}")
+    print(f"  artifact_pass     : {aggregate['artifact_pass']}/{aggregate['valid_fixtures']} (valid fixtures)")
     print()
 
 

@@ -154,4 +154,7 @@ def test_build_rerank_text_body_preview_skips_multiline_signature_and_docstring(
 
     assert "user = db.query(User)" in text
     assert "Verify credentials against the database." in text
+    # docstring is included once (via parts); the body preview must not repeat it
+    assert text.count("Verify credentials against the database.") == 1
+    assert '"""' not in text
     assert "username: str" not in text.split("Verify credentials")[-1]

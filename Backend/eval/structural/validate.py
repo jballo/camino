@@ -187,13 +187,14 @@ def validate_tour_artifact(artifact: TourArtifact, repo_root: Path) -> Validatio
 
 
 def validate_tour(payload: str | bytes | dict[str, Any], repo_root: Path) -> ValidationResult:
-    """Parse ``payload`` and run all structural checks against ``repo_root``."""
+    """Parse ``payload`` and run all structural checks against ``repo_root``.
+
+    ``parse_tour_payload`` returns either ``(None, issues)`` or ``(artifact, [])``,
+    so a non-None artifact always carries no schema issues — there's nothing to
+    merge here.
+    """
     artifact, schema_issues = parse_tour_payload(payload)
     if artifact is None:
         return ValidationResult(passed=False, issues=schema_issues)
 
-    result = validate_tour_artifact(artifact, repo_root)
-    if schema_issues:
-        result.issues = schema_issues + result.issues
-        result.passed = False
-    return result
+    return validate_tour_artifact(artifact, repo_root)

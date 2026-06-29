@@ -31,6 +31,26 @@ def _get_cross_encoder(model_name: str = RERANK_MODEL):
     return CrossEncoder(model_name)
 
 
+def _skip_docstring_block(lines: list[str]) -> list[str]:
+    """Drop a leading docstring literal (incl. ``\"\"\"``/``'''`` delimiters)."""
+    idx = 0
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+    if idx >= len(lines):
+        return lines
+    stripped = lines[idx].lstrip()
+    for quote in ('"""', "'''"):
+        if stripped.startswith(quote):
+            rest = stripped[len(quote):]
+            if quote in rest:  # single-line docstring
+                return lines[idx + 1:]
+            for j in range(idx + 1, len(lines)):  # multi-line: find the close
+                if quote in lines[j]:
+                    return lines[j + 1:]
+            return []  # unterminated; nothing usable remains
+    return lines
+
+
 def _build_rerank_text(result: Any) -> str:
     """Text paired with the query for cross-encoder scoring."""
     parts: list[str] = []
@@ -60,8 +80,11 @@ def _build_rerank_text(result: Any) -> str:
             sig_source_lines = min_lines
     body_start = body_lines[sig_source_lines:]
     if result.docstring:
-        doc_lines = result.docstring.count("\n") + 1
-        body_start = body_start[doc_lines:]
+        # result.docstring is the stripped content (no quotes), so its line count
+        # doesn't match how many *source* lines the docstring block spans once
+        # the """/''' delimiters are included. Skip the literal block instead so
+        # its text isn't fed to the cross-encoder twice (once via parts above).
+        body_start = _skip_docstring_block(body_start)
     # Trim only blank edge lines — .strip() would drop the body's indentation.
     preview = "\n".join(body_start[:_MAX_BODY_LINES]).strip("\n")
     if preview.strip():
