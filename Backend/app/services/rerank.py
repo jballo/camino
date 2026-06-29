@@ -45,8 +45,20 @@ def _build_rerank_text(result: Any) -> str:
         parts.append(result.docstring)
 
     body_lines = (result.source_code or "").split("\n")
-    sig_lines = result.signature.count("\n") + 1 if result.signature else 0
-    body_start = body_lines[sig_lines:]
+    # result.signature is a normalized one-liner, so its newline count
+    # undercounts a multi-line source signature and leaks parameter lines into
+    # the body. Find where the signature actually ends in source (the def line
+    # terminating in ":") instead of trusting the stored one-liner.
+    sig_source_lines = 0
+    if result.signature and body_lines:
+        min_lines = result.signature.count("\n") + 1
+        for i, line in enumerate(body_lines):
+            if line.rstrip().endswith(":") and i + 1 >= min_lines:
+                sig_source_lines = i + 1
+                break
+        else:
+            sig_source_lines = min_lines
+    body_start = body_lines[sig_source_lines:]
     if result.docstring:
         doc_lines = result.docstring.count("\n") + 1
         body_start = body_start[doc_lines:]

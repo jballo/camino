@@ -115,6 +115,34 @@ async def test_run_agent_smoke_eval_orchestration(tmp_path: Path, monkeypatch):
     assert runs[0].citations_valid
 
 
+@pytest.mark.asyncio
+async def test_run_question_isolates_answer_question_failure(tmp_path: Path, monkeypatch):
+    from eval import run_agent_smoke_eval as smoke
+
+    _write_repo(tmp_path)
+
+    async def boom(session, **kwargs):
+        raise RuntimeError("rate limit exceeded")
+
+    monkeypatch.setattr(smoke, "answer_question", boom)
+
+    run = await smoke._run_question(
+        object(),
+        question={"id": "q01", "question": "Where is OpenAPI built?"},
+        repo_name="tiangolo/fastapi",
+        installation_id=999999999,
+        repo_root=tmp_path,
+        model=None,
+        search_limit=8,
+    )
+
+    assert run.id == "q01"
+    assert not run.citations_valid
+    assert run.failed_checks == ["harness_error"]
+    assert "rate limit exceeded" in run.answer_preview
+    assert run.issues[0]["kind"] == "harness_error"
+
+
 def _question_run(smoke, *, citation_count: int, citations_valid: bool):
     return smoke.QuestionRun(
         id="q01",

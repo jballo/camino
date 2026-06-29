@@ -123,14 +123,30 @@ async def _run_question(
     search_limit: int,
 ) -> QuestionRun:
     started = time.monotonic()
-    agent_result = await answer_question(
-        session,
-        question=question["question"],
-        repo_name=repo_name,
-        installation_id=installation_id,
-        model=model,
-        search_limit=search_limit,
-    )
+    try:
+        agent_result = await answer_question(
+            session,
+            question=question["question"],
+            repo_name=repo_name,
+            installation_id=installation_id,
+            model=model,
+            search_limit=search_limit,
+        )
+    except Exception as exc:
+        # Isolate per-question failures (API timeout, rate limit, DB error) so a
+        # single flaky LLM call doesn't abort the whole run and discard the rest.
+        return QuestionRun(
+            id=question["id"],
+            question=question["question"],
+            answer_preview=f"[error: {exc}]",
+            citations=[],
+            citation_count=0,
+            citations_valid=False,
+            failed_checks=["harness_error"],
+            issues=[{"kind": "harness_error", "citation_index": None, "message": str(exc)}],
+            source_count=0,
+            elapsed_s=round(time.monotonic() - started, 2),
+        )
     citations = parse_citations(agent_result.answer)
     validation = validate_citations(citations, repo_root)
     preview = agent_result.answer.replace("\n", " ")
