@@ -88,7 +88,7 @@ Stored config: `mode=hybrid top_n=20 rrf_k=60 vector_weight=1.0 fts_weight=1.0`.
 | **exp4** | **NL header + class methods in embedding text** | ingest | **0.850** | **0.850** | 0.773 | **yes (shipped)** | `runs/exp4.json` |
 | **exp5** | **retrieval-time demo-path filter** | query | **0.900** | **0.858** | 0.766 | **yes (shipped)** | `runs/exp5.json` |
 | exp6 | cross-encoder rerank (MiniLM blend rrf_w=0.9) | query | 0.900 | **0.875** | **0.839** | partial | `runs/exp6.json` |
-| **exp6+bge** | **BGE reranker blend rrf_w=0.9** | query | **0.950** | **0.925** | 0.817 | **yes?** | |
+| **exp6+bge** | **BGE reranker blend rrf_w=0.9** | query | **0.950** | **0.925** | 0.817 | partial | |
 | exp4 (no filter) | exp4 config, filter off (A/B) | query | 0.850 | 0.850 | 0.748 | — | |
 
 **Shipped defaults**: `top_n=60`, `path_penalty=0.3`, `filter_demo_paths=True`,
@@ -112,6 +112,7 @@ Cumulative vs baseline: **hit 0.800→0.900, recall 0.767→0.858, MRR
 | `filter_demo_paths` | True | `search.py` `DEFAULT_FILTER_DEMO_PATHS` |
 | `rerank` | False | `search.py` `DEFAULT_RERANK` (exp6 optional) |
 | `rerank_top_n` / `rerank_rrf_weight` | 30 / 0.9 | `search.py`, `rerank.py` |
+| `rerank_model` | `BAAI/bge-reranker-base` | `rerank.py` `RERANK_MODEL` (exp6 optional) |
 | `limit` (final hydrate) | 10 | `search.py` `DEFAULT_FINAL_LIMIT` |
 | FTS index | split identifiers + OR query | `search_index.py`, `_fts_search` |
 | embedding text | NL header + class methods | `embeddings.py` `build_embedding_text` |
@@ -439,8 +440,9 @@ noted.
 
 ### Exp 6 — Cross-encoder reranker (DONE — see section above)
 
-**Status:** run; partial. Blend rrf_w=0.9 preserves hit@5, lifts recall/MRR; does
-not close q03/q17. Not default in prod.
+**Status:** run; partial. MiniLM blend rrf_w=0.9 preserves hit@5, lifts recall/MRR
+but does not close q03/q17; BGE blend rrf_w=0.9 fixes q17, leaving only q03. Not
+default in prod.
 
 ### Exp 7 — Raise final `limit` / agent context window
 
