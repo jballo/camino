@@ -135,6 +135,9 @@ async def _run_question(
     except Exception as exc:
         # Isolate per-question failures (API timeout, rate limit, DB error) so a
         # single flaky LLM call doesn't abort the whole run and discard the rest.
+        # The Session is shared across questions, so roll back any half-finished
+        # transaction to keep a DB error from poisoning the next question.
+        session.rollback()
         return QuestionRun(
             id=question["id"],
             question=question["question"],
@@ -361,7 +364,7 @@ def main() -> None:
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(output, indent=2))
-        print(f"wrote {out_path}")
+        print(f"wrote {out_path}", file=sys.stderr if args.json else sys.stdout)
 
     if args.strict and (
         aggregate["questions_all_citations_valid"] != aggregate["questions"]

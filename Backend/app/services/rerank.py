@@ -6,6 +6,7 @@ hybrid retrieval is unchanged.
 """
 
 import logging
+import threading
 from dataclasses import replace
 from functools import lru_cache
 from typing import Any
@@ -16,6 +17,10 @@ RERANK_MODEL = "BAAI/bge-reranker-base"
 DEFAULT_RERANK_TOP_N = 30
 _MAX_BODY_LINES = 12
 
+# Serializes model creation so concurrent cache misses don't each spin up a
+# CrossEncoder. lru_cache only guards its own dict, not the wrapped body.
+_cross_encoder_lock = threading.Lock()
+
 
 def validate_rrf_weight(rrf_weight: float) -> None:
     """Reject blend weights outside the inclusive [0.0, 1.0] range."""
@@ -24,11 +29,19 @@ def validate_rrf_weight(rrf_weight: float) -> None:
 
 
 @lru_cache(maxsize=2)
-def _get_cross_encoder(model_name: str = RERANK_MODEL):
+def _load_cross_encoder(model_name: str):
     from sentence_transformers import CrossEncoder
 
     logger.info("Loading cross-encoder model %s", model_name)
     return CrossEncoder(model_name)
+
+
+def _get_cross_encoder(model_name: str = RERANK_MODEL):
+    # Single-flight: the first thread loads under the lock and populates the
+    # lru_cache; threads that were waiting then hit the cache instead of
+    # creating their own CrossEncoder. Cache hits acquire/release immediately.
+    with _cross_encoder_lock:
+        return _load_cross_encoder(model_name)
 
 
 def _skip_docstring_block(lines: list[str]) -> list[str]:
@@ -112,6 +125,10 @@ def rerank_results(
     instead of crashing.
     """
     validate_rrf_weight(rrf_weight)
+    # A negative top_n must mean "no rerank", but results[:top_n] would instead
+    # slice off the last |top_n| rows, so reject it before any slicing.
+    if top_n < 0:
+        return results
     if len(results) <= 1:
         return results
 

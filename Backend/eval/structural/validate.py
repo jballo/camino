@@ -89,6 +89,13 @@ def parse_tour_payload(payload: str | bytes | dict[str, Any]) -> tuple[TourArtif
                     message=f"invalid JSON: {exc.msg} at line {exc.lineno} col {exc.colno}",
                 )
             ]
+        except UnicodeDecodeError as exc:
+            return None, [
+                CheckIssue(
+                    kind=CheckKind.SCHEMA,
+                    message=f"invalid JSON: could not decode {exc.encoding} bytes: {exc.reason}",
+                )
+            ]
     else:
         data = payload
 

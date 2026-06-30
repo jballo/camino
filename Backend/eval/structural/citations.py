@@ -15,14 +15,18 @@ from eval.structural.validate import (
     resolve_repo_file,
 )
 
-# Repo-relative paths like ``fastapi/routing.py`` or ``app/services/search.py``.
-_FILE_PATH = r"(?:[\w.-]+/)+[\w.-]+\.\w+"
+# Repo-relative paths like ``fastapi/routing.py``, ``app/services/search.py`` or a
+# repo-root file such as ``README.md``. Directory segments are optional.
+_FILE_PATH = r"(?:[\w.-]+/)*[\w.-]+\.\w+"
 # ``path:42``, ``path:42-50``, or ``path:symbol_name``.
 _QUALIFIED = re.compile(
     rf"(?P<path>{_FILE_PATH})(?::(?P<suffix>[\w.-]+))?"
 )
 # Backtick-wrapped citations are preferred in agent answers.
 _BACKTICK = re.compile(rf"`({_FILE_PATH}(?::[\w.-]+)?)`")
+# URLs whose path component would otherwise be mis-parsed as a file citation
+# (e.g. ``https://fastapi.tiangolo.com/tutorial/first-steps.md``).
+_URL = re.compile(r"https?://\S+")
 
 
 @dataclass(frozen=True)
@@ -46,12 +50,17 @@ def _parse_suffix(suffix: str | None) -> tuple[int | None, int | None, str | Non
 
     if re.fullmatch(r"\d+", suffix):
         line = int(suffix)
+        # Line numbers are 1-based; a 0 (or below) is not a real citation line.
+        if line < 1:
+            return None, None, None
         return line, line, None
 
     range_match = re.fullmatch(r"(\d+)-(\d+)", suffix)
     if range_match:
         start = int(range_match.group(1))
         end = int(range_match.group(2))
+        if start < 1 or end < 1:
+            return None, None, None
         return start, end, None
 
     return None, None, suffix
@@ -80,7 +89,11 @@ def parse_citations(text: str) -> list[CitationRef]:
         if ref is not None:
             found[ref.key] = ref
 
+    # Bare (non-backticked) paths inside a URL are not real code citations.
+    url_spans = [m.span() for m in _URL.finditer(text)]
     for match in _QUALIFIED.finditer(text):
+        if any(match.start() < end and start < match.end() for start, end in url_spans):
+            continue
         ref = _parse_qualified(match.group(0))
         if ref is not None and ref.key not in found:
             found[ref.key] = ref
@@ -139,6 +152,19 @@ def validate_citations(citations: list[CitationRef], repo_root: Path) -> Validat
             else citation.start_line
         )
         if start is None or end is None:
+            continue
+
+        if start < 1 or end < 1:
+            issues.append(
+                CheckIssue(
+                    kind=CheckKind.LINES_IN_BOUNDS,
+                    step_index=index,
+                    message=(
+                        f"line numbers must be 1-based, got {start}-{end} "
+                        f"for {citation.file_path!r}"
+                    ),
+                )
+            )
             continue
 
         if start > end:

@@ -51,6 +51,19 @@ def test_parse_citations_keeps_plain_path_alongside_qualified_ref():
     assert ("fastapi/routing.py", None, None, None) in keys
 
 
+def test_parse_citations_ignores_paths_inside_urls():
+    text = "See https://fastapi.tiangolo.com/tutorial/first-steps.md for the guide."
+    assert parse_citations(text) == []
+
+
+def test_parse_citations_keeps_real_citation_next_to_a_url():
+    text = "Docs at https://fastapi.tiangolo.com/x.md but code is `fastapi/routing.py:7`."
+    refs = parse_citations(text)
+    assert len(refs) == 1
+    assert refs[0].file_path == "fastapi/routing.py"
+    assert refs[0].start_line == 7
+
+
 def test_validate_citations_passes_for_existing_path(tmp_path: Path):
     _write_repo(tmp_path)
     refs = parse_citations("`fastapi/routing.py:APIRoute`")
@@ -126,8 +139,16 @@ async def test_run_question_isolates_answer_question_failure(tmp_path: Path, mon
 
     monkeypatch.setattr(smoke, "answer_question", boom)
 
+    class FakeSession:
+        def __init__(self):
+            self.rolled_back = False
+
+        def rollback(self):
+            self.rolled_back = True
+
+    session = FakeSession()
     run = await smoke._run_question(
-        object(),
+        session,
         question={"id": "q01", "question": "Where is OpenAPI built?"},
         repo_name="tiangolo/fastapi",
         installation_id=999999999,
@@ -141,6 +162,8 @@ async def test_run_question_isolates_answer_question_failure(tmp_path: Path, mon
     assert run.failed_checks == ["harness_error"]
     assert "rate limit exceeded" in run.answer_preview
     assert run.issues[0]["kind"] == "harness_error"
+    # a poisoned shared transaction must be rolled back before the next question
+    assert session.rolled_back
 
 
 def _question_run(smoke, *, citation_count: int, citations_valid: bool):

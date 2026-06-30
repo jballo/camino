@@ -51,7 +51,7 @@ class RetrievalConfig:
     mode: str = "hybrid"
     k: int = 5
     limit: int = 10
-    top_n: int = 20
+    top_n: int = 60  # matches --top-n CLI default so RetrievalConfig() is comparable
     rrf_k: int = 60
     vector_weight: float = 1.0
     fts_weight: float = 1.0
@@ -395,6 +395,11 @@ def main() -> None:
     args = parser.parse_args()
 
     k = min(args.k, args.limit)
+    if k < args.k:
+        print(
+            f"warning: --k {args.k} exceeds --limit {args.limit}; "
+            f"clamping k to {k} (metrics reported @{k})"
+        )
     data = json.loads(DATASET_PATH.read_text())
     repo_name = data["repo_name"]
     installation_id = data["installation_id"]
