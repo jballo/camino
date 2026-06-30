@@ -6,6 +6,7 @@ hybrid retrieval is unchanged.
 """
 
 import logging
+import re
 import threading
 from dataclasses import replace
 from functools import lru_cache
@@ -15,7 +16,9 @@ logger = logging.getLogger(__name__)
 
 RERANK_MODEL = "BAAI/bge-reranker-base"
 DEFAULT_RERANK_TOP_N = 30
+DEFAULT_RERANK_RRF_WEIGHT = 0.9
 _MAX_BODY_LINES = 12
+_SIGNATURE_START = re.compile(r"^\s*(?:async\s+def|def|class)\s+")
 
 # Serializes model creation so concurrent cache misses don't each spin up a
 # CrossEncoder. lru_cache only guards its own dict, not the wrapped body.
@@ -44,6 +47,22 @@ def _get_cross_encoder(model_name: str = RERANK_MODEL):
         return _load_cross_encoder(model_name)
 
 
+def _has_unescaped_delimiter(text: str, delimiter: str) -> bool:
+    start = 0
+    while True:
+        idx = text.find(delimiter, start)
+        if idx == -1:
+            return False
+        backslashes = 0
+        pos = idx - 1
+        while pos >= 0 and text[pos] == "\\":
+            backslashes += 1
+            pos -= 1
+        if backslashes % 2 == 0:
+            return True
+        start = idx + len(delimiter)
+
+
 def _skip_docstring_block(lines: list[str]) -> list[str]:
     """Drop a leading docstring literal (incl. ``\"\"\"``/``'''`` delimiters)."""
     idx = 0
@@ -55,13 +74,34 @@ def _skip_docstring_block(lines: list[str]) -> list[str]:
     for quote in ('"""', "'''"):
         if stripped.startswith(quote):
             rest = stripped[len(quote):]
-            if quote in rest:  # single-line docstring
+            if _has_unescaped_delimiter(rest, quote):  # single-line docstring
                 return lines[idx + 1:]
             for j in range(idx + 1, len(lines)):  # multi-line: find the close
-                if quote in lines[j]:
+                if _has_unescaped_delimiter(lines[j], quote):
                     return lines[j + 1:]
             return []  # unterminated; nothing usable remains
     return lines
+
+
+def _source_signature_line_count(lines: list[str]) -> int:
+    """Count the leading Python signature lines in a source chunk."""
+    if not lines or not _SIGNATURE_START.match(lines[0]):
+        return 0
+
+    base_indent = len(lines[0]) - len(lines[0].lstrip())
+    bracket_depth = 0
+    for i, line in enumerate(lines):
+        for char in line:
+            if char in "([{":
+                bracket_depth += 1
+            elif char in ")]}":
+                bracket_depth = max(0, bracket_depth - 1)
+        stripped = line.strip()
+        same_indent = len(line) - len(line.lstrip()) == base_indent
+        if stripped.endswith(":") and same_indent and bracket_depth == 0:
+            return i + 1
+
+    return 1
 
 
 def _build_rerank_text(result: Any) -> str:
@@ -78,19 +118,11 @@ def _build_rerank_text(result: Any) -> str:
         parts.append(result.docstring)
 
     body_lines = (result.source_code or "").split("\n")
-    # result.signature is a normalized one-liner, so its newline count
-    # undercounts a multi-line source signature and leaks parameter lines into
-    # the body. Find where the signature actually ends in source (the def line
-    # terminating in ":") instead of trusting the stored one-liner.
     sig_source_lines = 0
     if result.signature and body_lines:
-        min_lines = result.signature.count("\n") + 1
-        for i, line in enumerate(body_lines):
-            if line.rstrip().endswith(":") and i + 1 >= min_lines:
-                sig_source_lines = i + 1
-                break
-        else:
-            sig_source_lines = min_lines
+        # result.signature is a normalized one-liner, so count the real source
+        # signature and ignore nested/default-value lines that merely end in ":".
+        sig_source_lines = _source_signature_line_count(body_lines)
     body_start = body_lines[sig_source_lines:]
     if result.docstring:
         # result.docstring is the stripped content (no quotes), so its line count
@@ -111,7 +143,7 @@ def rerank_results(
     results: list[Any],
     *,
     top_n: int = DEFAULT_RERANK_TOP_N,
-    rrf_weight: float = 0.9,
+    rrf_weight: float = DEFAULT_RERANK_RRF_WEIGHT,
     model_name: str = RERANK_MODEL,
 ) -> list[Any]:
     """Re-score hydrated results with a cross-encoder blended with RRF scores.

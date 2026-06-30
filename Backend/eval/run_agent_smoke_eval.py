@@ -58,16 +58,46 @@ class QuestionRun:
     elapsed_s: float
 
 
+def _load_json_object(path: Path, label: str) -> dict:
+    try:
+        data = json.loads(path.read_text())
+    except OSError as exc:
+        raise SystemExit(f"could not read {label} at {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid JSON in {label} at {path}: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise SystemExit(f"{label} must be a JSON object: {path}")
+    return data
+
+
 def _load_smoke_ids() -> tuple[str, list[str]]:
-    data = json.loads(SMOKE_MANIFEST.read_text())
-    return data.get("repo_version", FIXTURE_REPO_VERSION), [
-        item["id"] for item in data["questions"]
-    ]
+    data = _load_json_object(SMOKE_MANIFEST, "smoke manifest")
+    questions = data.get("questions")
+    if not isinstance(questions, list) or any(
+        not isinstance(item, dict) or not isinstance(item.get("id"), str)
+        for item in questions
+    ):
+        raise SystemExit(
+            f"smoke manifest must contain questions with string ids: {SMOKE_MANIFEST}"
+        )
+    repo_version = data.get("repo_version", FIXTURE_REPO_VERSION)
+    if not isinstance(repo_version, str):
+        raise SystemExit(f"smoke manifest repo_version must be a string: {SMOKE_MANIFEST}")
+    return repo_version, [item["id"] for item in questions]
 
 
 def _resolve_questions(wanted_ids: list[str] | None) -> tuple[list[dict], str, dict]:
-    golden = json.loads(GOLDEN_DATASET.read_text())
-    by_id = {q["id"]: q for q in golden["questions"]}
+    golden = _load_json_object(GOLDEN_DATASET, "golden dataset")
+    golden_questions = golden.get("questions")
+    if not isinstance(golden_questions, list) or any(
+        not isinstance(q, dict) or not isinstance(q.get("id"), str)
+        for q in golden_questions
+    ):
+        raise SystemExit(
+            f"golden dataset must contain questions with string ids: {GOLDEN_DATASET}"
+        )
+    by_id = {q["id"]: q for q in golden_questions}
     smoke_version, smoke_ids = _load_smoke_ids()
     ids = wanted_ids or smoke_ids
     missing = [qid for qid in ids if qid not in by_id]

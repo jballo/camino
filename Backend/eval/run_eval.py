@@ -37,6 +37,7 @@ from sqlalchemy import text
 from sqlmodel import Session, create_engine
 
 from app.config import settings
+from app.services.rerank import DEFAULT_RERANK_RRF_WEIGHT, DEFAULT_RERANK_TOP_N
 from app.services.search import RetrievalDebug, SearchResult, hybrid_search_debug
 
 DATASET_PATH = Path(__file__).parent / "golden_dataset.json"
@@ -58,8 +59,8 @@ class RetrievalConfig:
     path_penalty: float = 1.0
     filter_demo_paths: bool = True
     rerank: bool = False
-    rerank_top_n: int = 30
-    rerank_rrf_weight: float = 0.9
+    rerank_top_n: int = DEFAULT_RERANK_TOP_N
+    rerank_rrf_weight: float = DEFAULT_RERANK_RRF_WEIGHT
     rerank_model: str | None = None
 
 
@@ -232,8 +233,9 @@ def _print_report(report: dict, label: str | None) -> None:
         f"knobs: top_n={cfg['top_n']} rrf_k={cfg['rrf_k']} "
         f"vec_w={cfg['vector_weight']} fts_w={cfg['fts_weight']} "
         f"path_penalty={cfg['path_penalty']} filter_demo={cfg['filter_demo_paths']} "
-        f"rerank={cfg.get('rerank', False)} rerank_top_n={cfg.get('rerank_top_n', 30)} "
-        f"rerank_rrf_w={cfg.get('rerank_rrf_weight', 0.9)} "
+        f"rerank={cfg.get('rerank', False)} "
+        f"rerank_top_n={cfg.get('rerank_top_n', DEFAULT_RERANK_TOP_N)} "
+        f"rerank_rrf_w={cfg.get('rerank_rrf_weight', DEFAULT_RERANK_RRF_WEIGHT)} "
         f"rerank_model={cfg.get('rerank_model') or 'default'}"
     )
     print("=" * 78)
@@ -363,13 +365,13 @@ def main() -> None:
     parser.add_argument(
         "--rerank-top-n",
         type=int,
-        default=30,
+        default=DEFAULT_RERANK_TOP_N,
         help="fused candidates passed to the cross-encoder when --rerank is set",
     )
     parser.add_argument(
         "--rerank-rrf-weight",
         type=float,
-        default=0.9,
+        default=DEFAULT_RERANK_RRF_WEIGHT,
         help="blend weight for RRF vs cross-encoder (1.0 = RRF only, 0.0 = CE only)",
     )
     parser.add_argument(

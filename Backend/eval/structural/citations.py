@@ -15,8 +15,9 @@ from eval.structural.validate import (
     resolve_repo_file,
 )
 
-# Repo-relative paths like ``fastapi/routing.py``, ``app/services/search.py`` or a
-# repo-root file such as ``README.md``. Directory segments are optional.
+# Repo-relative paths like ``fastapi/routing.py`` or ``app/services/search.py``.
+# Directory segments are optional at the regex level so backticked root files can
+# be parsed, but plain-text extraction applies stricter path-shape checks below.
 _FILE_PATH = r"(?:[\w.-]+/)*[\w.-]+\.\w+"
 # ``path:42``, ``path:42-50``, or ``path:symbol_name``.
 _QUALIFIED = re.compile(
@@ -27,6 +28,29 @@ _BACKTICK = re.compile(rf"`({_FILE_PATH}(?::[\w.-]+)?)`")
 # URLs whose path component would otherwise be mis-parsed as a file citation
 # (e.g. ``https://fastapi.tiangolo.com/tutorial/first-steps.md``).
 _URL = re.compile(r"https?://\S+")
+_COMMON_ROOT_FILES = frozenset(
+    {
+        ".env.example",
+        "Cargo.toml",
+        "CHANGELOG.md",
+        "CONTRIBUTING.md",
+        "LICENSE.md",
+        "README.md",
+        "README.rst",
+        "SECURITY.md",
+        "package.json",
+        "pnpm-lock.yaml",
+        "pyproject.toml",
+        "pytest.ini",
+        "requirements.txt",
+        "ruff.toml",
+        "setup.py",
+        "tox.ini",
+        "tsconfig.json",
+        "uv.lock",
+    }
+)
+_DOC_ROOT_FILE = re.compile(r"[A-Z][A-Z0-9_.-]*\.(?:md|rst|txt)")
 
 
 @dataclass(frozen=True)
@@ -80,13 +104,24 @@ def _parse_qualified(raw: str) -> CitationRef | None:
     )
 
 
+def _looks_like_repo_file(path: str, *, allow_root_file: bool) -> bool:
+    if "/" in path:
+        return True
+    if not allow_root_file:
+        return False
+    basename = path.rsplit("/", 1)[-1]
+    return basename in _COMMON_ROOT_FILES or bool(_DOC_ROOT_FILE.fullmatch(basename))
+
+
 def parse_citations(text: str) -> list[CitationRef]:
     """Extract de-duplicated code citations from agent answer text."""
     found: dict[tuple[str, int | None, int | None, str | None], CitationRef] = {}
 
     for match in _BACKTICK.finditer(text):
         ref = _parse_qualified(match.group(1))
-        if ref is not None:
+        if ref is not None and _looks_like_repo_file(
+            ref.file_path, allow_root_file=True
+        ):
             found[ref.key] = ref
 
     # Bare (non-backticked) paths inside a URL are not real code citations.
@@ -95,7 +130,11 @@ def parse_citations(text: str) -> list[CitationRef]:
         if any(match.start() < end and start < match.end() for start, end in url_spans):
             continue
         ref = _parse_qualified(match.group(0))
-        if ref is not None and ref.key not in found:
+        if (
+            ref is not None
+            and _looks_like_repo_file(ref.file_path, allow_root_file=False)
+            and ref.key not in found
+        ):
             found[ref.key] = ref
 
     return list(found.values())

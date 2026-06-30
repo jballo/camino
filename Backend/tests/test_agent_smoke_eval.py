@@ -64,6 +64,25 @@ def test_parse_citations_keeps_real_citation_next_to_a_url():
     assert refs[0].start_line == 7
 
 
+def test_parse_citations_ignores_dotted_python_identifiers():
+    text = (
+        "The flow calls session.exec, model.predict, response.json, and "
+        "`APIRouter.include_router`, then cites `fastapi/routing.py:7`."
+    )
+    refs = parse_citations(text)
+    assert len(refs) == 1
+    assert refs[0].file_path == "fastapi/routing.py"
+
+
+def test_parse_citations_keeps_backticked_root_files():
+    refs = parse_citations("See `README.md` and `pyproject.toml` for setup.")
+    assert {ref.file_path for ref in refs} == {"README.md", "pyproject.toml"}
+
+
+def test_parse_citations_ignores_bare_root_files():
+    assert parse_citations("README.md mentions response.json examples.") == []
+
+
 def test_validate_citations_passes_for_existing_path(tmp_path: Path):
     _write_repo(tmp_path)
     refs = parse_citations("`fastapi/routing.py:APIRoute`")
@@ -164,6 +183,31 @@ async def test_run_question_isolates_answer_question_failure(tmp_path: Path, mon
     assert run.issues[0]["kind"] == "harness_error"
     # a poisoned shared transaction must be rolled back before the next question
     assert session.rolled_back
+
+
+def test_resolve_questions_reports_unreadable_dataset(tmp_path: Path, monkeypatch):
+    from eval import run_agent_smoke_eval as smoke
+
+    monkeypatch.setattr(smoke, "GOLDEN_DATASET", tmp_path / "missing.json")
+
+    with pytest.raises(SystemExit, match="could not read golden dataset"):
+        smoke._resolve_questions(None)
+
+
+def test_resolve_questions_reports_invalid_smoke_manifest(tmp_path: Path, monkeypatch):
+    from eval import run_agent_smoke_eval as smoke
+
+    golden = tmp_path / "golden.json"
+    smoke_manifest = tmp_path / "smoke.json"
+    golden.write_text(
+        '{"repo_name": "tiangolo/fastapi", "questions": [{"id": "q01", "question": "Q"}]}'
+    )
+    smoke_manifest.write_text("{not json")
+    monkeypatch.setattr(smoke, "GOLDEN_DATASET", golden)
+    monkeypatch.setattr(smoke, "SMOKE_MANIFEST", smoke_manifest)
+
+    with pytest.raises(SystemExit, match="invalid JSON in smoke manifest"):
+        smoke._resolve_questions(None)
 
 
 def _question_run(smoke, *, citation_count: int, citations_valid: bool):

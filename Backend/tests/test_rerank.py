@@ -1,7 +1,12 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
-from app.services.rerank import _build_rerank_text, rerank_results, validate_rrf_weight
+from app.services.rerank import (
+    DEFAULT_RERANK_RRF_WEIGHT,
+    _build_rerank_text,
+    rerank_results,
+    validate_rrf_weight,
+)
 from app.services.search import SearchResult
 
 
@@ -26,6 +31,10 @@ def _result(chunk_id: int, score: float) -> SearchResult:
 def test_validate_rrf_weight_rejects_out_of_range(weight):
     with pytest.raises(ValueError, match="rrf_weight must be between 0.0 and 1.0"):
         validate_rrf_weight(weight)
+
+
+def test_rerank_results_uses_shared_default_rrf_weight():
+    assert DEFAULT_RERANK_RRF_WEIGHT == 0.9
 
 
 @patch("app.services.rerank._get_cross_encoder")
@@ -158,3 +167,63 @@ def test_build_rerank_text_body_preview_skips_multiline_signature_and_docstring(
     assert text.count("Verify credentials against the database.") == 1
     assert '"""' not in text
     assert "username: str" not in text.split("Verify credentials")[-1]
+
+
+def test_build_rerank_text_signature_skip_ignores_nested_colon_lines():
+    result = SearchResult(
+        chunk_id=1,
+        repo_name="org/repo",
+        file_path="src/routes.py",
+        symbol_name="configure",
+        symbol_type="function",
+        language="python",
+        start_line=1,
+        end_line=9,
+        source_code=(
+            "def configure(\n"
+            "    routes={\n"
+            '        "GET":\n'
+            '            "handler",\n'
+            "    },\n"
+            ") -> None:\n"
+            "    return routes\n"
+        ),
+        signature='def configure(routes={"GET": "handler"}) -> None:',
+        docstring=None,
+        score=0.5,
+    )
+
+    text = _build_rerank_text(result)
+
+    assert "return routes" in text
+    assert '\n            "handler",' not in text
+    assert "\n) -> None:" not in text
+
+
+def test_build_rerank_text_docstring_skip_ignores_escaped_delimiter():
+    result = SearchResult(
+        chunk_id=1,
+        repo_name="org/repo",
+        file_path="src/docs.py",
+        symbol_name="explain",
+        symbol_type="function",
+        language="python",
+        start_line=1,
+        end_line=6,
+        source_code=(
+            "def explain():\n"
+            '    """\n'
+            '    Mention \\""" inside docs.\n'
+            '    """\n'
+            "    return 1\n"
+        ),
+        signature="def explain():",
+        docstring='Mention \\""" inside docs.',
+        score=0.5,
+    )
+
+    text = _build_rerank_text(result)
+
+    assert "return 1" in text
+    assert text.count('Mention \\""" inside docs.') == 1
+    assert '    """' not in text

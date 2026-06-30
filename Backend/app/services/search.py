@@ -6,7 +6,7 @@ from sqlalchemy import text
 from sqlmodel import Session
 
 from app.services.embeddings import EMBED_MODEL, embed_batch
-from app.services.rerank import DEFAULT_RERANK_TOP_N
+from app.services.rerank import DEFAULT_RERANK_RRF_WEIGHT, DEFAULT_RERANK_TOP_N
 
 logger = logging.getLogger(__name__)
 
@@ -264,7 +264,7 @@ async def hybrid_search_debug(
     filter_demo_paths: bool = DEFAULT_FILTER_DEMO_PATHS,
     rerank: bool = DEFAULT_RERANK,
     rerank_top_n: int = DEFAULT_RERANK_TOP_N,
-    rerank_rrf_weight: float = 0.9,
+    rerank_rrf_weight: float = DEFAULT_RERANK_RRF_WEIGHT,
     rerank_model: str | None = None,
 ) -> tuple[list[SearchResult], RetrievalDebug]:
     """Retrieval core: hydrated results plus per-retriever diagnostics.
@@ -352,7 +352,7 @@ async def hybrid_search(
     filter_demo_paths: bool = DEFAULT_FILTER_DEMO_PATHS,
     rerank: bool = DEFAULT_RERANK,
     rerank_top_n: int = DEFAULT_RERANK_TOP_N,
-    rerank_rrf_weight: float = 0.9,
+    rerank_rrf_weight: float = DEFAULT_RERANK_RRF_WEIGHT,
     rerank_model: str | None = None,
 ) -> list[SearchResult]:
     """Run hybrid vector + FTS search with RRF fusion.
