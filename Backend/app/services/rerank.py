@@ -168,19 +168,19 @@ def rerank_results(
     original RRF order is returned so the search endpoint degrades gracefully
     instead of crashing.
     """
-    validate_rrf_weight(rrf_weight)
-    # A negative top_n must mean "no rerank", but results[:top_n] would instead
-    # slice off the last |top_n| rows, so reject it before any slicing.
-    if top_n < 0:
-        return results
-    if len(results) <= 1:
-        return results
-
-    candidates = results[:top_n]
-    if not candidates:
-        return results
-
     try:
+        validate_rrf_weight(rrf_weight)
+        # A negative top_n must mean "no rerank", but results[:top_n] would instead
+        # slice off the last |top_n| rows, so reject it before any slicing.
+        if top_n < 0:
+            return results
+        if len(results) <= 1:
+            return results
+
+        candidates = results[:top_n]
+        if not candidates:
+            return results
+
         model = _get_cross_encoder(model_name)
         pairs = [(query, _build_rerank_text(r)) for r in candidates]
         ce_scores = model.predict(pairs)

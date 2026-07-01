@@ -1,4 +1,6 @@
-from eval.run_eval import _print_report
+import pytest
+
+from eval.run_eval import _print_report, main
 
 
 def test_print_report_tolerates_legacy_config_without_rerank_keys(capsys):
@@ -38,3 +40,10 @@ def test_print_report_tolerates_legacy_config_without_rerank_keys(capsys):
 
     out = capsys.readouterr().out
     assert "rerank=False rerank_top_n=30 rerank_rrf_w=0.9" in out
+
+
+def test_main_rejects_out_of_range_rerank_rrf_weight(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["run_eval", "--rerank-rrf-weight", "1.5"])
+
+    with pytest.raises(SystemExit, match="--rerank-rrf-weight 1.5 is out of range"):
+        main()

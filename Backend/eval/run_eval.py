@@ -402,6 +402,11 @@ def main() -> None:
             f"warning: --k {args.k} exceeds --limit {args.limit}; "
             f"clamping k to {k} (metrics reported @{k})"
         )
+    if not 0.0 <= args.rerank_rrf_weight <= 1.0:
+        raise SystemExit(
+            f"error: --rerank-rrf-weight {args.rerank_rrf_weight} is out of range "
+            f"(must be between 0.0 and 1.0)"
+        )
     data = json.loads(DATASET_PATH.read_text())
     repo_name = data["repo_name"]
     installation_id = data["installation_id"]

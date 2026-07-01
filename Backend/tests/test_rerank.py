@@ -33,6 +33,16 @@ def test_validate_rrf_weight_rejects_out_of_range(weight):
         validate_rrf_weight(weight)
 
 
+@patch("app.services.rerank._get_cross_encoder")
+def test_rerank_results_falls_back_on_invalid_rrf_weight(mock_get_encoder):
+    results = [_result(1, 0.9), _result(2, 0.5)]
+
+    reranked = rerank_results("query", results, top_n=2, rrf_weight=1.5)
+
+    assert reranked == results
+    mock_get_encoder.assert_not_called()
+
+
 def test_rerank_results_uses_shared_default_rrf_weight():
     assert DEFAULT_RERANK_RRF_WEIGHT == 0.9
 
