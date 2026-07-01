@@ -239,6 +239,32 @@ def test_build_rerank_text_signature_skip_ignores_brackets_in_strings_and_commen
     assert "\n) -> None:" not in text
 
 
+def test_build_rerank_text_tolerates_indentation_errors_from_tokenizer():
+    result = SearchResult(
+        chunk_id=1,
+        repo_name="org/repo",
+        file_path="src/legacy.py",
+        symbol_name="legacy",
+        symbol_type="function",
+        language="python",
+        start_line=1,
+        end_line=4,
+        source_code=(
+            "def legacy():\n"
+            "\tvalue = 1\n"
+            "    return value\n"
+        ),
+        signature="def legacy():",
+        docstring=None,
+        score=0.5,
+    )
+
+    text = _build_rerank_text(result)
+
+    assert "\tvalue = 1" in text
+    assert "return value" in text
+
+
 def test_build_rerank_text_docstring_skip_ignores_escaped_delimiter():
     result = SearchResult(
         chunk_id=1,

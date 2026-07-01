@@ -110,7 +110,7 @@ def _source_signature_line_count(lines: list[str]) -> int:
                     return line_no
                 if col == base_indent:
                     return line_no
-    except tokenize.TokenError:
+    except (tokenize.TokenError, IndentationError, SyntaxError):
         return 1
 
     return 1
