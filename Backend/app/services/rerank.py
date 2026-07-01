@@ -184,25 +184,30 @@ def rerank_results(
         model = _get_cross_encoder(model_name)
         pairs = [(query, _build_rerank_text(r)) for r in candidates]
         ce_scores = model.predict(pairs)
+
+        rrf_scores = [r.score for r in candidates]
+        rrf_min, rrf_max = min(rrf_scores), max(rrf_scores)
+        rrf_span = rrf_max - rrf_min
+
+        ce_list = [float(s) for s in ce_scores]
+        if len(ce_list) != len(candidates):
+            raise ValueError(
+                f"cross-encoder returned {len(ce_list)} scores for "
+                f"{len(candidates)} candidates"
+            )
+        ce_min, ce_max = min(ce_list), max(ce_list)
+        ce_span = ce_max - ce_min
+
+        ce_weight = 1.0 - rrf_weight
+        reranked: list[Any] = []
+        for r, ce_score in zip(candidates, ce_list):
+            rrf_norm = (r.score - rrf_min) / rrf_span if rrf_span else 1.0
+            ce_norm = (ce_score - ce_min) / ce_span if ce_span else 1.0
+            blended = rrf_weight * rrf_norm + ce_weight * ce_norm
+            reranked.append(replace(r, score=blended))
+
+        reranked.sort(key=lambda r: r.score, reverse=True)
+        return reranked + results[top_n:]
     except Exception:
         logger.exception("cross-encoder rerank failed; falling back to RRF order")
         return results
-
-    rrf_scores = [r.score for r in candidates]
-    rrf_min, rrf_max = min(rrf_scores), max(rrf_scores)
-    rrf_span = rrf_max - rrf_min
-
-    ce_list = [float(s) for s in ce_scores]
-    ce_min, ce_max = min(ce_list), max(ce_list)
-    ce_span = ce_max - ce_min
-
-    ce_weight = 1.0 - rrf_weight
-    reranked: list[Any] = []
-    for r, ce_score in zip(candidates, ce_list):
-        rrf_norm = (r.score - rrf_min) / rrf_span if rrf_span else 1.0
-        ce_norm = (ce_score - ce_min) / ce_span if ce_span else 1.0
-        blended = rrf_weight * rrf_norm + ce_weight * ce_norm
-        reranked.append(replace(r, score=blended))
-
-    reranked.sort(key=lambda r: r.score, reverse=True)
-    return reranked + results[top_n:]

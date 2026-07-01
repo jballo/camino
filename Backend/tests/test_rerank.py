@@ -71,6 +71,31 @@ def test_rerank_results_falls_back_on_predict_failure(mock_get_encoder):
     assert [r.chunk_id for r in reranked] == original_order
 
 
+@pytest.mark.parametrize(
+    "ce_scores",
+    [
+        ["not-a-score", 0.8],
+        [0.2],
+        object(),
+    ],
+)
+@patch("app.services.rerank._get_cross_encoder")
+def test_rerank_results_falls_back_on_malformed_predict_scores(
+    mock_get_encoder, ce_scores
+):
+    results = [_result(1, 0.9), _result(2, 0.5)]
+    original_scores = [r.score for r in results]
+
+    model = MagicMock()
+    model.predict.return_value = ce_scores
+    mock_get_encoder.return_value = model
+
+    reranked = rerank_results("query", results, top_n=2)
+
+    assert reranked == results
+    assert [r.score for r in results] == original_scores
+
+
 @patch("app.services.rerank._get_cross_encoder")
 def test_rerank_results_preserves_original_rrf_scores(mock_get_encoder):
     results = [_result(1, 0.9), _result(2, 0.5), _result(3, 0.1)]

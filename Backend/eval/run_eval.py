@@ -56,7 +56,8 @@ class RetrievalConfig:
     rrf_k: int = 60
     vector_weight: float = 1.0
     fts_weight: float = 1.0
-    path_penalty: float = 1.0
+    # Matches --path-penalty CLI default so RetrievalConfig() is comparable.
+    path_penalty: float = 0.3
     filter_demo_paths: bool = True
     rerank: bool = False
     rerank_top_n: int = DEFAULT_RERANK_TOP_N

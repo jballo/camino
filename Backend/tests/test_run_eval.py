@@ -1,6 +1,13 @@
 import pytest
 
-from eval.run_eval import _print_report, main
+from eval.run_eval import RetrievalConfig, _print_report, main
+
+
+def test_retrieval_config_defaults_match_cli_experiment_defaults():
+    cfg = RetrievalConfig()
+
+    assert cfg.top_n == 60
+    assert cfg.path_penalty == 0.3
 
 
 def test_print_report_tolerates_legacy_config_without_rerank_keys(capsys):
