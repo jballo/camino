@@ -200,6 +200,35 @@ def test_build_rerank_text_signature_skip_ignores_nested_colon_lines():
     assert "\n) -> None:" not in text
 
 
+def test_build_rerank_text_signature_skip_ignores_brackets_in_strings_and_comments():
+    result = SearchResult(
+        chunk_id=1,
+        repo_name="org/repo",
+        file_path="src/routes.py",
+        symbol_name="make_route",
+        symbol_type="function",
+        language="python",
+        start_line=1,
+        end_line=7,
+        source_code=(
+            "def make_route(\n"
+            '    path: str = "open paren (",\n'
+            "    handler=None,  # (internal note\n"
+            ") -> None:\n"
+            "    return handler\n"
+        ),
+        signature='def make_route(path: str = "open paren (", handler=None) -> None:',
+        docstring=None,
+        score=0.5,
+    )
+
+    text = _build_rerank_text(result)
+
+    assert "return handler" in text
+    assert "\n    handler=None" not in text
+    assert "\n) -> None:" not in text
+
+
 def test_build_rerank_text_docstring_skip_ignores_escaped_delimiter():
     result = SearchResult(
         chunk_id=1,

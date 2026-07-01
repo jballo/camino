@@ -8,8 +8,10 @@ hybrid retrieval is unchanged.
 import logging
 import re
 import threading
+import tokenize
 from dataclasses import replace
 from functools import lru_cache
+from io import StringIO
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -90,16 +92,26 @@ def _source_signature_line_count(lines: list[str]) -> int:
 
     base_indent = len(lines[0]) - len(lines[0].lstrip())
     bracket_depth = 0
-    for i, line in enumerate(lines):
-        for char in line:
-            if char in "([{":
+    source = "\n".join(lines)
+    try:
+        tokens = tokenize.generate_tokens(StringIO(source).readline)
+        for token_info in tokens:
+            if token_info.type != tokenize.OP:
+                continue
+
+            token = token_info.string
+            if token in "([{":
                 bracket_depth += 1
-            elif char in ")]}":
+            elif token in ")]}":
                 bracket_depth = max(0, bracket_depth - 1)
-        stripped = line.strip()
-        same_indent = len(line) - len(line.lstrip()) == base_indent
-        if stripped.endswith(":") and same_indent and bracket_depth == 0:
-            return i + 1
+            elif token == ":" and bracket_depth == 0:
+                line_no, col = token_info.start
+                if len(lines[line_no - 1]) - len(lines[line_no - 1].lstrip()) == base_indent:
+                    return line_no
+                if col == base_indent:
+                    return line_no
+    except tokenize.TokenError:
+        return 1
 
     return 1
 
