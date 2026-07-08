@@ -25,12 +25,15 @@ What works today:
 | Repo ingest (clone → parse → embed → index) | ✅ Python, JS, TS/TSX |
 | Hybrid retrieval (pgvector + FTS + RRF) | ✅ shipped stack (exp1–5) |
 | Retrieval eval harness | ✅ 20-question FastAPI golden set |
+| Agent smoke eval | ✅ live agent + citation validity checks |
+| Structural tour eval | ✅ schema + path/line/snippet fixture checks |
 | ReAct Q&A agent | ✅ `/explore` + `/api/v1/agent/ask` |
 | Guided tour generation | ❌ not started (journeys endpoint is a stub) |
 | Production deploy | ❌ local dev only |
 
-**Eval hero repo:** [FastAPI 0.115.6](https://github.com/tiangolo/fastapi) — see
-[Backend/eval/EXPERIMENTS.md](Backend/eval/EXPERIMENTS.md) for the full experiment log.
+**Eval hero repo:** [FastAPI 0.115.6](https://github.com/tiangolo/fastapi). See
+[Backend/eval/README.md](Backend/eval/README.md) for current harnesses and
+[Backend/eval/EXPERIMENTS.md](Backend/eval/EXPERIMENTS.md) for the retrieval experiment log.
 
 ---
 
@@ -190,7 +193,8 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 ### Evaluation (the differentiator)
 - [x] Golden retrieval dataset (20 questions → expected files/symbols, FastAPI 0.115.6)
 - [x] Retrieval eval script (hit rate, recall@k, precision@k, MRR, ablation mode)
-- [~] Structural evals (schema + path/line/snippet validators, fixture CLI — no LLM)
+- [x] Agent smoke eval (live ReAct path + citation parser/validator)
+- [x] Structural evals (schema + path/line/snippet validators, fixture CLI — no LLM)
 - [ ] LLM-as-judge (faithfulness, relevance, completeness, ordering)
 - [ ] Eval suite across 2–3 repos (~35–40 questions total)
 - [ ] Eval gates in CI (GitHub Actions, fail on regression)
@@ -222,6 +226,11 @@ Retrieval on FastAPI 0.115.6 (20 questions, k=5) — full log in
 | MRR | 0.649 | **0.766** |
 
 Still missing: q03 (path param validation), q17 (websocket routes) — reranker territory.
+
+Additional harnesses now available:
+
+- Agent smoke eval: `uv run python -m eval.run_agent_smoke_eval --strict`
+- Structural tour eval: `uv run python -m eval.run_structural_eval`
 
 LLM-as-judge: _not run yet_
 

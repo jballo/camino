@@ -93,12 +93,14 @@ All routes require `Authorization: Bearer <clerk_session_jwt>`.
 
 ---
 
-## Retrieval eval
+## Eval Harnesses
 
 ```bash
 cd Backend
 uv run python -m eval.ingest_local          # clone FastAPI 0.115.6 + ingest
 uv run python -m eval.run_eval --k 5        # run against golden set
+uv run python -m eval.run_agent_smoke_eval  # live agent + citation smoke check
+uv run python -m eval.run_structural_eval   # tour artifact validator fixtures
 ```
 
 See [eval/README.md](eval/README.md) and [eval/EXPERIMENTS.md](eval/EXPERIMENTS.md).

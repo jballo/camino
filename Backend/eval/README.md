@@ -1,19 +1,21 @@
-# Eval harnesses
+# Eval Harnesses
 
-Two eval tracks live here:
+Three eval harnesses live here:
 
 1. **Retrieval eval** — does hybrid search surface the right chunks? (needs DB + OpenAI)
-2. **Structural eval** — does a tour artifact parse, reference real files, and quote matching source? (no LLM, no DB)
+2. **Agent smoke eval** — does the live agent answer with structurally valid code citations? (needs DB + OpenAI)
+3. **Structural eval** — does a tour artifact parse, reference real files, and quote matching source? (no LLM, no DB)
 
-Retrieval work is paused at a strong baseline; structural eval is the active track for Phase 2 tour generation.
+Retrieval work is paused at a strong baseline; structural eval is the active track for Phase 2 tour generation. Agent smoke eval is a lightweight end-to-end check over the current ReAct answer path.
 
 ## Files
 
 - `golden_dataset.json` — 20 questions, each with hand-labeled relevant `(file, symbol)` chunks. Pinned to FastAPI `0.115.6`.
 - `ingest_local.py` — ingests a local repo through the **real** production pipeline (same parser, embeddings, and `search_vector` SQL as `app/api/repositories.py`), reading from disk instead of GitHub.
 - `run_eval.py` — runs each question through `hybrid_search` and reports hit rate, recall@k, precision@k, MRR.
+- `run_agent_smoke_eval.py` — runs the live LangGraph agent on selected golden questions, parses answer citations, and validates citation paths/line ranges.
 - `run_structural_eval.py` — runs tour JSON fixtures through schema + repo-grounding validators.
-- `structural/` — tour schema validators (`validate.py`), hand-written pass/fail fixtures.
+- `structural/` — tour schema validators (`validate.py`), citation validators (`citations.py`), hand-written pass/fail fixtures, and the smoke question manifest.
 - `baseline_results.json` — recorded baseline numbers.
 - `EXPERIMENTS.md` — **retrieval experiment log** (paused; resume from handoff section).
 - `.data/` — the cloned fixture source. **Gitignored** (not committed); fetched on demand, see below.
@@ -49,7 +51,8 @@ uv run python -m eval.run_eval --label exp1 --out eval/runs/exp1.json
 
 Flags: `--mode {hybrid,vector,fts,ablation}`, `--k`, `--limit`, `--top-n`,
 `--rrf-k`, `--vector-weight`, `--fts-weight`, `--path-penalty` (default 0.3),
-`--no-filter-demo-paths`, `--label`, `--out`, `--json`.
+`--no-filter-demo-paths`, `--rerank`, `--rerank-top-n`, `--rerank-rrf-weight`,
+`--rerank-model`, `--label`, `--out`, `--json`.
 
 Diagnostics in the default report:
 
@@ -62,6 +65,29 @@ Diagnostics in the default report:
   per-question hit matrix so you can see where the two retrievers are complementary.
 
 `runs/` is gitignored; use `--out eval/runs/<label>.json` to keep a leaderboard.
+
+## Agent Smoke Eval
+
+Runs the live ReAct agent against a small manifest of golden questions, then parses
+free-text citations from the final answer and validates that the referenced files
+and line ranges exist in the pinned FastAPI fixture repo.
+
+This is intentionally lighter than retrieval eval: it checks end-to-end wiring,
+source retrieval count, citation presence, and citation structure. It does not judge
+whether the answer is semantically complete.
+
+```bash
+cd Backend
+uv run python -m eval.ingest_local              # required once: DB + embeddings
+uv run python -m eval.run_agent_smoke_eval
+uv run python -m eval.run_agent_smoke_eval --question q02 --json
+uv run python -m eval.run_agent_smoke_eval --strict
+uv run pytest tests/test_agent_smoke_eval.py -q
+```
+
+The CLI auto-clones FastAPI `0.115.6` into `.data/fastapi` when missing, but it
+still needs the fixture chunks indexed in Postgres. `OPENAI_API_KEY` is required
+because the live agent uses the configured chat model.
 
 ## Structural eval (validator-only, no LLM)
 
