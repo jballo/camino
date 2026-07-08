@@ -4,8 +4,9 @@ Next.js web app for Camino. Clerk handles auth; API routes proxy to the FastAPI 
 
 **What works:** sign-in, GitHub App install, repo ingest, ask-the-codebase on `/explore`.
 
-**What's stubbed:** home-page tour request (`/api/journeys`), `/tours` and `/generate` pages
-(linked in nav but not built yet).
+**Current gap:** the backend now has real `/api/v1/journeys` job endpoints, but the
+Next.js `/api/journeys` route is still a local stub. The home-page tour request,
+`/generate`, and `/tours` need to be wired before guided tours are usable in the UI.
 
 ---
 
@@ -35,7 +36,7 @@ The backend must be running on port 8000 (see [Backend/README.md](../Backend/REA
 
 | Route | Status | Description |
 |---|---|---|
-| `/` | stub | Tour request form — posts to stub `/api/journeys` |
+| `/` | partial | Tour request form — selects/ingests repos, then posts to stub `/api/journeys` |
 | `/explore` | **live** | Select repo → ingest → ask questions with cited sources |
 | `/sign-in` | live | Clerk sign-in |
 | `/tours` | planned | Tour reader (Phase 2) |
@@ -46,7 +47,8 @@ The backend must be running on port 8000 (see [Backend/README.md](../Backend/REA
 
 ## API routes (Next.js → Backend proxy)
 
-All authenticated routes forward the Clerk session JWT as `Authorization: Bearer …`.
+Live authenticated proxy routes forward the Clerk session JWT as
+`Authorization: Bearer …`; `/api/journeys` still needs that wiring.
 
 | Route | Backend |
 |---|---|
@@ -56,4 +58,8 @@ All authenticated routes forward the Clerk session JWT as `Authorization: Bearer
 | `/api/agent/ask` | `POST /api/v1/agent/ask` |
 | `/api/github/install` | GitHub App install redirect |
 | `/api/github/authorize` | OAuth callback |
-| `/api/journeys` | **stub** — returns success, no tour generated |
+| `/api/journeys` | **stub** — should proxy to backend `POST /api/v1/journeys` next |
+
+Next frontend work: make `/api/journeys` forward the Clerk JWT to FastAPI, add
+`GET /api/journeys/{id}` polling for `/generate`, then render completed artifacts in
+`/tours/{id}`.

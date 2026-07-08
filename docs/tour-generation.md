@@ -1,11 +1,13 @@
 # Guided Tour Generation — Design & Plan (Phase 2)
 
-Status: **proposal / not started.** This is the plan for turning the `/api/journeys`
-stub into a real Plan → Retrieve → Draft → Review pipeline that emits a validated
-`TourArtifact`, plus the persistence, API, and reader UI around it.
+Status: **backend implemented / frontend pending.** The Plan → Retrieve → Draft →
+Review generator, `TourJob` persistence, and FastAPI journeys endpoints now exist.
+The remaining product work is the Next.js journeys proxy, `/generate` polling page,
+and `/tours/{id}` reader.
 
-The goal of this doc is to nail the architecture and the sharp design decisions
-*before* writing code, so the implementation is mostly mechanical.
+This doc is now both the Phase 2 design record and the current implementation tracker.
+Earlier sections preserve the decisions; the milestones at the bottom show what has
+landed and what is still open.
 
 ---
 
@@ -16,10 +18,11 @@ given topic ("authentication flow", "request lifecycle"). Each step points at re
 code — file, line range, exact snippet — and explains *what* it does and *why* it
 exists that way.
 
-Today the app can only *answer questions* (`/explore` + ReAct agent). It cannot
-*produce a tour*. The contract (`TourArtifact`/`TourStep`) and a no-LLM structural
-validator (`validate_tour()`) already exist; the generator, persistence, endpoints,
-and reader UI do not.
+Today the app can *answer questions* (`/explore` + ReAct agent), and the backend can
+generate and persist grounded tours for already-ingested repos through
+`/api/v1/journeys`. The frontend still cannot display or poll those tours: the
+Next.js `/api/journeys` route remains a stub, and `/generate` / `/tours/{id}` are not
+built yet.
 
 ### Where it fits
 
@@ -32,10 +35,13 @@ flowchart LR
     Validate["validate_tour()<br/>eval/structural/validate.py"]
   end
 
-  subgraph build["This plan (Phase 2)"]
+  subgraph built["Built in backend"]
     Pipeline[Tour generation pipeline]
-    Persist[(tours table)]
-    API[journeys API + polling]
+    Persist[(tour_jobs table)]
+    API[FastAPI journeys API + polling]
+  end
+
+  subgraph remaining["Still pending"]
     Reader["/tours reader UI"]
   end
 
@@ -46,7 +52,8 @@ flowchart LR
   Persist --> API
   API --> Reader
 
-  style build fill:#e0e7ff,stroke:#4f46e5
+  style built fill:#f0fdf4,stroke:#16a34a
+  style remaining fill:#fef3c7,stroke:#d97706
   style have fill:#f0fdf4,stroke:#16a34a
 ```
 
@@ -195,14 +202,14 @@ to validate against files that were never chunked.
 
 ## 6. Persistence
 
-New table, following existing SQLModel conventions (`app/models/github_connection.py`).
-Store the artifact as JSON so the schema can evolve without migrations.
+Implemented in `app/models/tour_job.py`, following existing SQLModel conventions and
+storing the artifact as JSONB so the schema can evolve without migrations.
 
 ```python
-# app/models/tour_job.py (sketch)
+# app/models/tour_job.py
 class TourJob(SQLModel, table=True):
     __tablename__ = "tour_jobs"
-    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     userId: str = Field(index=True)
     installation_id: int
     repo_name: str = Field(index=True)
@@ -225,8 +232,8 @@ stateDiagram-v2
   complete --> [*]
 ```
 
-For v1, "worker" can be a FastAPI `BackgroundTasks` job in-process. The README already
-plots SQS + a separate worker for Phase 3 — the status column and polling API are
+For v1, "worker" is a FastAPI `BackgroundTasks` job in-process. The README already
+plots SQS + a separate worker for Phase 3; the status column and polling API are
 designed so that swap is invisible to the frontend.
 
 ---
@@ -357,7 +364,7 @@ export async function POST(req: Request) {
       `tests/test_journeys_route.py` (11, passing).
 - [ ] **M4 — Frontend.** Real `/api/journeys` proxy; `/generate` polling page;
       `/tours/{id}` reader with syntax highlighting + TOC.
-- [ ] **M5 — Eval + docs.** LLM-as-judge harness; README/tracker updates; failure
+- [ ] **M5 — Eval + docs.** LLM-as-judge harness; known limitations and failure
       modes.
 
 Milestones are independently shippable: M1–M2 make the pipeline runnable from a

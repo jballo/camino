@@ -1,12 +1,14 @@
 # Camino — Backend
 
-FastAPI service: GitHub repo ingest, hybrid code search, and a LangGraph agent that
-answers questions grounded in retrieved chunks.
+FastAPI service: GitHub repo ingest, hybrid code search, ask-the-codebase Q&A, and
+backend guided-tour generation.
 
 **Retrieval loop:** paused at a tuned stack — exp1–5 shipped (hit@5 0.900), plus an
 optional exp6 cross-encoder reranker (BGE blend → 0.950). See
 [eval/EXPERIMENTS.md](eval/EXPERIMENTS.md).
-**Next up:** the guided-tour generation pipeline (Phase 2).
+**Phase 2 status:** the guided-tour backend is in progress. The Plan → Retrieve →
+Draft → Review graph, `TourJob` persistence, and `/api/v1/journeys` create/poll/list
+routes exist; the frontend proxy, polling page, and reader UI are still pending.
 
 ---
 
@@ -15,7 +17,7 @@ optional exp6 cross-encoder reranker (BGE blend → 0.950). See
 - **FastAPI** + SQLModel + Postgres with **pgvector**
 - **tree-sitter** — Python, JavaScript, TypeScript/TSX symbol extraction
 - **OpenAI** — embeddings (`text-embedding-3-small`) + chat (`gpt-4o-mini` default)
-- **LangGraph** — ReAct agent with a `hybrid_search` tool
+- **LangGraph** — ReAct Q&A agent plus structured tour generation graph
 - **Clerk** — JWT auth on API routes
 - **PyGithub** — GitHub App installation tokens for repo access
 
@@ -60,11 +62,17 @@ app/
 ├── api/
 │   ├── repositories.py  # list repos, ingest, hybrid search
 │   ├── agent.py         # POST /ask — LangGraph Q&A
+│   ├── journeys.py      # create/poll/list tour generation jobs
 │   └── github.py        # GitHub App OAuth / installation
 ├── agent/
 │   ├── graph.py         # ReAct StateGraph (agent ↔ tools loop)
 │   ├── runner.py        # answer_question() entry point
 │   └── tools.py         # hybrid_search tool bound per request
+├── tour/
+│   ├── graph.py         # Plan → Retrieve → Draft → Review graph
+│   ├── runner.py        # generate_tour() entry point
+│   ├── extract.py       # deterministic snippet/path/line grounding
+│   └── review.py        # structural + coverage checks
 ├── services/
 │   ├── parser.py        # tree-sitter chunk extraction
 │   ├── embeddings.py    # build_embedding_text + OpenAI embed
@@ -76,6 +84,9 @@ app/
 eval/
 ├── golden_dataset.json  # 20 hand-labeled FastAPI questions
 ├── run_eval.py          # retrieval metrics harness
+├── run_agent_smoke_eval.py
+├── run_structural_eval.py
+├── run_tour_smoke_eval.py
 ├── ingest_local.py      # eval ingest from local clone
 └── EXPERIMENTS.md       # experiment log + next steps
 ```
@@ -90,6 +101,9 @@ eval/
 | `POST` | `/api/v1/repositories/ingest` | Clone + parse + embed a repo |
 | `POST` | `/api/v1/repositories/search` | Direct hybrid search (no agent) |
 | `POST` | `/api/v1/agent/ask` | Ask the codebase (ReAct agent) |
+| `POST` | `/api/v1/journeys` | Queue a guided-tour job for an ingested repo |
+| `GET` | `/api/v1/journeys/{id}` | Poll a journey job; returns artifact/error when available |
+| `GET` | `/api/v1/journeys?repo=` | List the authenticated user's journey jobs |
 
 All routes require `Authorization: Bearer <clerk_session_jwt>`.
 
@@ -117,3 +131,6 @@ See [eval/README.md](eval/README.md) and [eval/EXPERIMENTS.md](eval/EXPERIMENTS.
 ```bash
 uv run pytest
 ```
+
+Current focused coverage includes retrieval/search tests, agent smoke helpers,
+structural tour validation, tour generation helpers, and journeys route tests.
