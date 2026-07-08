@@ -1,19 +1,41 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextResponse, type NextRequest } from "next/server";
 
+async function forwardBackendResponse(response: Response) {
+  // Preserve the backend's status (esp. 4xx) instead of collapsing to 500, so
+  // the client can react to auth/not-found/validation errors distinctly.
+  const result = await response.json().catch(() => null);
+  if (!response.ok) {
+    return NextResponse.json(
+      result ?? { error: "Backend request failed" },
+      { status: response.status },
+    );
+  }
+  return NextResponse.json(result);
+}
+
 export async function POST(req: NextRequest) {
   try {
     const { isAuthenticated, userId, getToken } = await auth();
     const user = await currentUser();
 
-    if (!isAuthenticated || user === null) throw new Error(`Not authenticated`);
+    if (!isAuthenticated || user === null) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
     const token = await getToken();
-    if (token === null) throw new Error(`Not authenticated`);
+    if (token === null) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-    const body = await req.json();
-    const { repoName, topic } = body;
-    if (!repoName || !topic) throw new Error(`Invalid body`);
+    const body = await req.json().catch(() => null);
+    const { repoName, topic } = body ?? {};
+    if (!repoName || !topic) {
+      return NextResponse.json(
+        { error: "repoName and topic are required" },
+        { status: 400 },
+      );
+    }
 
     const backend_url = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
 
@@ -30,12 +52,9 @@ export async function POST(req: NextRequest) {
       }),
     });
 
-    if (!response.ok) throw new Error("Failed to create journey");
-
-    const result = await response.json();
-    return NextResponse.json(result);
+    return forwardBackendResponse(response);
   } catch (error) {
-    console.log("Error: ", error);
+    console.error("POST /api/journeys failed:", error);
     return NextResponse.json(
       { error: "Internal Server Error" },
       { status: 500 },
@@ -48,10 +67,14 @@ export async function GET(req: NextRequest) {
     const { isAuthenticated, getToken } = await auth();
     const user = await currentUser();
 
-    if (!isAuthenticated || user === null) throw new Error(`Not authenticated`);
+    if (!isAuthenticated || user === null) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
     const token = await getToken();
-    if (token === null) throw new Error(`Not authenticated`);
+    if (token === null) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
     const backend_url = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
     const repo = req.nextUrl.searchParams.get("repo");
@@ -64,12 +87,9 @@ export async function GET(req: NextRequest) {
       },
     });
 
-    if (!response.ok) throw new Error("Failed to list journeys");
-
-    const result = await response.json();
-    return NextResponse.json(result);
+    return forwardBackendResponse(response);
   } catch (error) {
-    console.log("Error: ", error);
+    console.error("GET /api/journeys failed:", error);
     return NextResponse.json(
       { error: "Internal Server Error" },
       { status: 500 },

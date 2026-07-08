@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from app.models.tour import TourArtifact
 from app.services.search import SearchResult
-from eval.structural.validate import (
+from app.tour.checks import (
     CheckIssue,
     CheckKind,
     ValidationResult,

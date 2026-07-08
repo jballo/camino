@@ -30,10 +30,10 @@ from app.tour.prompts import (
     PLAN_HUMAN,
     PLAN_SYSTEM,
 )
+from app.tour.checks import CheckIssue, CheckKind
 from app.tour.review import DEFAULT_MIN_DISTINCT_FILES, review_tour
 from app.tour.schemas import DraftedStep, TourPlan
 from app.tour.state import TourState
-from eval.structural.validate import CheckIssue, CheckKind
 
 logger = logging.getLogger(__name__)
 

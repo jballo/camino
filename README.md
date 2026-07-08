@@ -198,6 +198,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [x] GitHub App connect + repo listing
 - [ ] Shareable tour URLs
 - [~] Error handling — basic; needs clone-fail / repo-too-large / bad-LLM paths
+- [ ] Shared BFF proxy/auth wrapper — centralize Clerk auth + status-code forwarding for `/api/**` routes (tour doc §13)
 - [ ] Rate limiting
 
 ### CLI (stretch)

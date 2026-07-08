@@ -472,3 +472,20 @@ scores as a directional regression signal, not ground truth:
 **Scope caps.** Live eval runs a small topic set against the single pinned FastAPI
 fixture (`0.115.6`); it is a smoke/regression harness, not a broad benchmark. Multi-repo
 coverage, a larger topic bank, and human-rated calibration are future work.
+
+---
+
+## 13. Future improvements
+
+**Shared BFF proxy/auth wrapper (frontend).** The Next.js proxy routes under
+`Frontend/src/app/api/journeys/**` each repeat the same boilerplate: resolve Clerk auth,
+check `isAuthenticated`/token, read `BACKEND_URL`, `fetch` the backend with a bearer
+token, and forward the JSON. This duplication is also where the current per-file error
+handling collapses auth/validation/backend-4xx into a generic `500`. As more
+backend-for-frontend routes are added (e.g. delete/re-run a tour, list repos, user
+settings), extract a single helper — a `withAuth` / `proxyToBackend` wrapper — that
+centralizes auth resolution, correct status-code propagation (401/400/backend status vs.
+a real 500), and the fetch/forward plumbing. Every existing and future route then gets
+consistent, correct error semantics for free instead of copy-pasting the same pattern
+(and the same bug). Deferred for now since journeys is the only proxy surface; revisit
+when a second family of routes lands.

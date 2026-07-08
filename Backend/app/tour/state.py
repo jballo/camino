@@ -4,8 +4,8 @@ from typing import TypedDict
 
 from app.models.tour import TourStep
 from app.services.search import SearchResult
+from app.tour.checks import CheckIssue
 from app.tour.schemas import PlannedStep
-from eval.structural.validate import CheckIssue
 
 
 class TourState(TypedDict, total=False):

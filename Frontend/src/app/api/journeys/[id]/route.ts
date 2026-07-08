@@ -9,10 +9,14 @@ export async function GET(
     const { isAuthenticated, getToken } = await auth();
     const user = await currentUser();
 
-    if (!isAuthenticated || user === null) throw new Error(`Not authenticated`);
+    if (!isAuthenticated || user === null) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
     const token = await getToken();
-    if (token === null) throw new Error(`Not authenticated`);
+    if (token === null) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
     const { id } = await params;
 
@@ -28,12 +32,18 @@ export async function GET(
       },
     );
 
-    if (!response.ok) throw new Error("Failed to get journey");
-
-    const result = await response.json();
+    // Preserve the backend's status (esp. 4xx) instead of collapsing to 500, so
+    // the client can react to auth/not-found errors distinctly.
+    const result = await response.json().catch(() => null);
+    if (!response.ok) {
+      return NextResponse.json(
+        result ?? { error: "Backend request failed" },
+        { status: response.status },
+      );
+    }
     return NextResponse.json(result);
   } catch (error) {
-    console.log("Error: ", error);
+    console.error("GET /api/journeys/[id] failed:", error);
     return NextResponse.json(
       { error: "Internal Server Error" },
       { status: 500 },
