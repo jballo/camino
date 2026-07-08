@@ -5,7 +5,9 @@ import pytest
 
 from app.models.tour import TourArtifact, TourStep
 from eval.structural.validate import (
+    CheckIssue,
     CheckKind,
+    ValidationResult,
     normalize_text,
     parse_tour_payload,
     validate_tour,
@@ -37,6 +39,18 @@ def _sample_tour(**overrides) -> dict:
 def _write_repo(root: Path) -> None:
     (root / "src").mkdir(parents=True)
     (root / "src" / "app.py").write_text("def main():\n    return 42\n")
+
+
+def test_validation_result_passed_is_derived_from_issues():
+    assert ValidationResult().passed
+    assert ValidationResult(issues=[]).passed
+
+    issue = CheckIssue(kind=CheckKind.SCHEMA, message="boom")
+    result = ValidationResult(issues=[issue])
+    assert not result.passed
+    # `passed` is read-only — the invariant can't be overridden after construction.
+    with pytest.raises(AttributeError):
+        result.passed = True
 
 
 def test_normalize_text_strips_trailing_whitespace():

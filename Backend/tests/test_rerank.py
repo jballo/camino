@@ -204,6 +204,44 @@ def test_build_rerank_text_body_preview_skips_multiline_signature_and_docstring(
     assert "username: str" not in text.split("Verify credentials")[-1]
 
 
+def test_build_rerank_text_skips_signature_closing_on_indented_line():
+    # The class header closes on a continuation line (``    Baz):``) whose
+    # indentation is deeper than the ``class`` line. The signature skip must
+    # still consume it so the closing-argument line never leaks into the body
+    # preview alongside the normalized one-line signature.
+    result = SearchResult(
+        chunk_id=1,
+        repo_name="org/repo",
+        file_path="src/models.py",
+        symbol_name="Foo",
+        symbol_type="class",
+        language="python",
+        start_line=1,
+        end_line=6,
+        source_code=(
+            "class Foo(\n"
+            "    Bar,\n"
+            "    Baz):\n"
+            "    x = 1\n"
+            "    y = 2\n"
+        ),
+        signature="class Foo(Bar, Baz):",
+        docstring=None,
+        score=0.5,
+    )
+
+    text = _build_rerank_text(result)
+
+    assert "x = 1" in text
+    assert "y = 2" in text
+    # The normalized one-line signature is included once via `parts`...
+    assert "class Foo(Bar, Baz):" in text
+    # ...but none of the wrapped *source* signature lines leak into the preview.
+    assert "class Foo(\n" not in text
+    assert "    Bar," not in text
+    assert "    Baz):" not in text
+
+
 def test_build_rerank_text_signature_skip_ignores_nested_colon_lines():
     result = SearchResult(
         chunk_id=1,

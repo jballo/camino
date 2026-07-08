@@ -29,8 +29,16 @@ class CheckIssue:
 
 @dataclass
 class ValidationResult:
-    passed: bool
     issues: list[CheckIssue] = field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        """A result passes iff it carries no issues.
+
+        Derived rather than stored so the invariant can't drift — no caller can
+        construct a ``passed=True`` result that also holds issues.
+        """
+        return not self.issues
 
     @property
     def failed_checks(self) -> set[CheckKind]:
@@ -190,7 +198,7 @@ def validate_tour_artifact(artifact: TourArtifact, repo_root: Path) -> Validatio
                 )
             )
 
-    return ValidationResult(passed=not issues, issues=issues)
+    return ValidationResult(issues=issues)
 
 
 def validate_tour(payload: str | bytes | dict[str, Any], repo_root: Path) -> ValidationResult:
@@ -202,6 +210,6 @@ def validate_tour(payload: str | bytes | dict[str, Any], repo_root: Path) -> Val
     """
     artifact, schema_issues = parse_tour_payload(payload)
     if artifact is None:
-        return ValidationResult(passed=False, issues=schema_issues)
+        return ValidationResult(issues=schema_issues)
 
     return validate_tour_artifact(artifact, repo_root)

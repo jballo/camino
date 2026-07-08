@@ -90,7 +90,6 @@ def _source_signature_line_count(lines: list[str]) -> int:
     if not lines or not _SIGNATURE_START.match(lines[0]):
         return 0
 
-    base_indent = len(lines[0]) - len(lines[0].lstrip())
     bracket_depth = 0
     source = "\n".join(lines)
     try:
@@ -105,11 +104,12 @@ def _source_signature_line_count(lines: list[str]) -> int:
             elif token in ")]}":
                 bracket_depth = max(0, bracket_depth - 1)
             elif token == ":" and bracket_depth == 0:
-                line_no, col = token_info.start
-                if len(lines[line_no - 1]) - len(lines[line_no - 1].lstrip()) == base_indent:
-                    return line_no
-                if col == base_indent:
-                    return line_no
+                # The tokenizer never emits OP colons from inside strings or
+                # comments, so the first colon at bracket depth 0 is always the
+                # signature terminator — even when the header wraps onto
+                # continuation lines with deeper-than-base indentation
+                # (e.g. ``class Foo(\n    Bar,\n    Baz):``).
+                return token_info.start[0]
     except (tokenize.TokenError, IndentationError, SyntaxError):
         return 1
 

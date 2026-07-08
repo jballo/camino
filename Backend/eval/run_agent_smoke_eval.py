@@ -202,16 +202,27 @@ async def _run_question(
 
 def _aggregate(runs: list[QuestionRun]) -> dict:
     n = len(runs)
-    with_citations = sum(1 for r in runs if r.citation_count > 0)
-    valid = sum(1 for r in runs if r.citations_valid)
-    total_citations = sum(r.citation_count for r in runs)
+    # A harness error (API timeout, rate limit, DB failure) means the agent
+    # never produced an answer, so citation quality is undefined for it. Keep
+    # these out of the validity/average denominators — otherwise an intermittent
+    # LLM endpoint can drive citation_validity_rate to 0 even when every real
+    # citation was structurally correct, making the metric useless for telling
+    # citation quality apart from infrastructure flakiness.
+    harness_errors = sum(1 for r in runs if "harness_error" in r.failed_checks)
+    answered = [r for r in runs if "harness_error" not in r.failed_checks]
+    answered_n = len(answered)
+    with_citations = sum(1 for r in answered if r.citation_count > 0)
+    valid = sum(1 for r in answered if r.citations_valid)
+    total_citations = sum(r.citation_count for r in answered)
     return {
         "questions": n,
+        "harness_errors": harness_errors,
+        "answered_questions": answered_n,
         "questions_with_citations": with_citations,
         "questions_all_citations_valid": valid,
-        "citation_validity_rate": valid / n if n else 0.0,
+        "citation_validity_rate": valid / answered_n if answered_n else 0.0,
         "total_citations": total_citations,
-        "avg_citations_per_question": total_citations / n if n else 0.0,
+        "avg_citations_per_question": total_citations / answered_n if answered_n else 0.0,
     }
 
 
@@ -241,9 +252,11 @@ def _print_report(
     print("=" * 90)
     print("AGGREGATE")
     print(f"  questions                 : {aggregate['questions']}")
+    print(f"  harness errors            : {aggregate['harness_errors']}")
+    print(f"  answered questions        : {aggregate['answered_questions']}")
     print(f"  with citations            : {aggregate['questions_with_citations']}")
     print(f"  all citations valid       : {aggregate['questions_all_citations_valid']}")
-    print(f"  citation_validity_rate    : {aggregate['citation_validity_rate']:.3f}")
+    print(f"  citation_validity_rate    : {aggregate['citation_validity_rate']:.3f} (of answered)")
     print(f"  total citations           : {aggregate['total_citations']}")
     print()
 

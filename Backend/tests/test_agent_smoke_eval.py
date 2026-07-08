@@ -210,7 +210,9 @@ def test_resolve_questions_reports_invalid_smoke_manifest(tmp_path: Path, monkey
         smoke._resolve_questions(None)
 
 
-def _question_run(smoke, *, citation_count: int, citations_valid: bool):
+def _question_run(
+    smoke, *, citation_count: int, citations_valid: bool, failed_checks=None
+):
     return smoke.QuestionRun(
         id="q01",
         question="q",
@@ -218,7 +220,7 @@ def _question_run(smoke, *, citation_count: int, citations_valid: bool):
         citations=[],
         citation_count=citation_count,
         citations_valid=citations_valid,
-        failed_checks=[],
+        failed_checks=failed_checks or [],
         issues=[],
         source_count=0,
         elapsed_s=0.0,
@@ -253,3 +255,29 @@ def test_strict_gate_passes_when_all_questions_cite_validly():
     aggregate = smoke._aggregate(runs)
 
     assert not _strict_fails(aggregate)
+
+
+def test_aggregate_excludes_harness_errors_from_citation_validity_rate():
+    from eval import run_agent_smoke_eval as smoke
+
+    # One infra failure plus one structurally valid answer. The validity rate
+    # must stay 1.0 (measured over the answered question) rather than collapsing
+    # to 0.5 because an unrelated endpoint failure was counted against it.
+    runs = [
+        _question_run(
+            smoke,
+            citation_count=0,
+            citations_valid=False,
+            failed_checks=["harness_error"],
+        ),
+        _question_run(smoke, citation_count=1, citations_valid=True),
+    ]
+    aggregate = smoke._aggregate(runs)
+
+    assert aggregate["questions"] == 2
+    assert aggregate["harness_errors"] == 1
+    assert aggregate["answered_questions"] == 1
+    assert aggregate["citation_validity_rate"] == 1.0
+    assert aggregate["avg_citations_per_question"] == 1.0
+    # A harness error means not every question was answered, so --strict fails.
+    assert _strict_fails(aggregate)

@@ -230,4 +230,4 @@ def validate_citations(citations: list[CitationRef], repo_root: Path) -> Validat
                 )
             )
 
-    return ValidationResult(passed=not issues, issues=issues)
+    return ValidationResult(issues=issues)
