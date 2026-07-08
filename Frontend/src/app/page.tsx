@@ -64,7 +64,23 @@ export default function Home() {
         }),
       });
 
-      if (!response.ok) throw new Error("Error");
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => null)) as
+          | { error?: string }
+          | null;
+        if (response.status === 401 || response.status === 403) {
+          setSubmitError(
+            "Your session expired. Please refresh the page and log in again.",
+          );
+        } else {
+          setSubmitError(
+            errBody?.error ??
+              "Failed to start tour generation. Select a repo and try again.",
+          );
+        }
+        setSubmitting(false);
+        return;
+      }
 
       const result = (await response.json()) as { id: number; status: string };
       router.push(`/generate?id=${result.id}`);

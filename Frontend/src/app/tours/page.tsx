@@ -60,7 +60,19 @@ export default function ToursList() {
     setError(undefined);
     try {
       const response = await fetch("/api/journeys", { method: "GET" });
-      if (!response.ok) throw new Error("Failed to fetch tours");
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => null)) as
+          | { error?: string }
+          | null;
+        if (response.status === 401 || response.status === 403) {
+          setError(
+            "Your session expired. Please refresh the page and log in again.",
+          );
+        } else {
+          setError(errBody?.error ?? "Failed to load tours.");
+        }
+        return;
+      }
       const result = (await response.json()) as JourneySummary[];
       setTours(Array.isArray(result) ? result : []);
     } catch (err) {
