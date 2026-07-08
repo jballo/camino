@@ -197,7 +197,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [x] Clerk auth (sign-in, session JWT to backend)
 - [x] GitHub App connect + repo listing
 - [ ] Shareable tour URLs
-- [~] Error handling — basic; needs clone-fail / repo-too-large / bad-LLM paths
+- [~] Error handling — tour flow (`/`, `/generate`, `/tours`, `/tours/{id}`) surfaces expired-session (401/403), not-found (404), and backend errors distinctly; still needs clone-fail / repo-too-large / bad-LLM paths
 - [ ] Shared BFF proxy/auth wrapper — centralize Clerk auth + status-code forwarding for `/api/**` routes (tour doc §13)
 - [ ] Rate limiting
 
