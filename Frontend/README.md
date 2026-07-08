@@ -10,6 +10,10 @@ Next.js web app for Camino. Clerk handles auth; API routes proxy to the FastAPI 
 **Generate tour**. The app creates a journey through `/api/journeys`, polls progress on
 `/generate?id=...`, then opens the completed reader at `/tours/{id}`.
 
+Every tour page distinguishes an expired Clerk session (401/403) from a missing tour
+(404) and other backend errors, so users see an actionable message instead of one
+generic failure. The proxy routes preserve the backend's HTTP status for this.
+
 ---
 
 ## Run locally
