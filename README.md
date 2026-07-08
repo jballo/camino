@@ -53,7 +53,7 @@ flowchart LR
 
 | Phase | Goal | Key deliverables |
 |---|---|---|
-| **1 — Now** | Best-in-class retrieval for code Q&A | Cross-encoder reranker (exp6), close q03/q17 gap |
+| **1 — Now** | Best-in-class retrieval for code Q&A | exp1–5 shipped (0.900 hit@5); optional exp6 BGE reranker (0.950, closes q17); q03 last miss |
 | **2 — Next** | Structured guided tours | Plan → Retrieve → Draft → Review pipeline, tour reader UI, shareable URLs |
 | **3** | Ship to users | AWS (ECS, RDS, S3, SQS), observability (Langfuse), rate limits |
 | **4 — Stretch** | Meet devs where they work | CLI (`onboard generate`), PR reviewer bot |
@@ -131,15 +131,16 @@ Details: [Backend/README.md](Backend/README.md) · [Frontend/README.md](Frontend
 
 ## Now / next 3 actions
 
-1. **Exp 6 — cross-encoder reranker** — close the last 2 retrieval misses (q03, q17) on
-   the FastAPI golden set; target hit@5 ≥ 0.95.
-2. **Tour generation pipeline** — replace the ReAct Q&A stub with Plan → Retrieve →
+1. **Tour generation pipeline** — replace the ReAct Q&A stub with Plan → Retrieve →
    Draft → Review → structured tour artifact.
-3. **Tour reader UI** — render tour steps with syntax highlighting, TOC, and file paths
+2. **Tour reader UI** — render tour steps with syntax highlighting, TOC, and file paths
    (wire up `/tours` and the home-page journeys flow).
+3. **Decide reranker in prod** — exp6 is done and off by default; ship BGE only if the
+   +0.05 hit@5 justifies the latency, or leave query-time only for now.
 
-**Blocked / open questions:** none critical — reranker model choice (latency vs accuracy)
-is the main open decision before Phase 2.
+**Retrieval status:** loop paused. exp6 (cross-encoder reranker) is complete — BGE blend
+hits the ≥0.95 target and closes q17; only q03 remains. Kept optional (off by default) to
+avoid prod latency. No critical blockers before Phase 2.
 
 ---
 
@@ -219,13 +220,16 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 Retrieval on FastAPI 0.115.6 (20 questions, k=5) — full log in
 [Backend/eval/EXPERIMENTS.md](Backend/eval/EXPERIMENTS.md):
 
-| Metric | Baseline | Shipped (exp1+3+4+5) |
-|---|---|---|
-| Hit rate@5 | 0.800 | **0.900** |
-| Recall@5 | 0.767 | **0.858** |
-| MRR | 0.649 | **0.766** |
+| Metric | Baseline | Shipped (exp1+3+4+5) | +exp6 BGE rerank (optional) |
+|---|---|---|---|
+| Hit rate@5 | 0.800 | **0.900** | **0.950** |
+| Recall@5 | 0.767 | **0.858** | **0.925** |
+| MRR | 0.649 | 0.766 | 0.817 |
 
-Still missing: q03 (path param validation), q17 (websocket routes) — reranker territory.
+Shipped default (rerank off) still misses q03 (path param validation) and q17 (websocket
+routes). The optional exp6 BGE reranker closes **q17**, leaving **q03** as the only miss —
+its labeled chunks sit in the fused pool (vector@20 / FTS@6) but not top-5, so it needs a
+larger final limit (exp7) or class-aware chunk splits (exp8), not more reranking.
 
 Additional harnesses now available:
 

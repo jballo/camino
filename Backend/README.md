@@ -3,8 +3,10 @@
 FastAPI service: GitHub repo ingest, hybrid code search, and a LangGraph agent that
 answers questions grounded in retrieved chunks.
 
-**Current focus:** retrieval quality (see [eval/EXPERIMENTS.md](eval/EXPERIMENTS.md)).
-**Next up:** cross-encoder reranker, then the guided-tour generation pipeline.
+**Retrieval loop:** paused at a tuned stack — exp1–5 shipped (hit@5 0.900), plus an
+optional exp6 cross-encoder reranker (BGE blend → 0.950). See
+[eval/EXPERIMENTS.md](eval/EXPERIMENTS.md).
+**Next up:** the guided-tour generation pipeline (Phase 2).
 
 ---
 
