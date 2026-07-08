@@ -31,9 +31,6 @@ export default function Header() {
               <Link href="/tours">Tours</Link>
             </div>
             <div>
-              <Link href="/generate">Generate</Link>
-            </div>
-            <div>
               <Link href="/settings">Settings</Link>
             </div>
             <div>

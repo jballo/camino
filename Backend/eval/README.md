@@ -16,7 +16,8 @@ Retrieval work is paused at a strong baseline; structural eval is the active tra
 - `run_agent_smoke_eval.py` — runs the live LangGraph agent on selected golden questions, parses answer citations, and validates citation paths/line ranges.
 - `run_structural_eval.py` — runs tour JSON fixtures through schema + repo-grounding validators.
 - `structural/` — tour schema validators (`validate.py`), citation validators (`citations.py`), hand-written pass/fail fixtures, and the smoke question manifest.
-- `baseline_results.json` — recorded baseline numbers.
+- `baseline_results.json` — recorded retrieval baseline numbers.
+- `judge_baseline.json` — recorded tour judge baseline (aggregate + per-topic scores).
 - `EXPERIMENTS.md` — **retrieval experiment log** (paused; resume from handoff section).
 - `.data/` — the cloned fixture source. **Gitignored** (not committed); fetched on demand, see below.
 
@@ -117,6 +118,65 @@ OpenAI key required.
 
 When the tour generation pipeline exists, point the same `validate_tour()` helper at
 live agent output before persisting or returning tours.
+
+## Tour judge eval (LLM-as-judge)
+
+Structural eval proves a tour is *grounded* (real files, matching snippets). It cannot
+tell you whether the prose is any good. The judge eval scores the qualities structure
+can't see, on a 1-5 scale:
+
+| Dimension | Grain | What it asks |
+|---|---|---|
+| Faithfulness | per step | Is the explanation supported by the cited snippet (no invented behaviour)? |
+| Relevance | per step | Does this step actually serve the tour topic? |
+| Completeness | per tour | Do the steps together cover the topic's important aspects? |
+| Ordering | per tour | Do the steps flow in a logical teaching order? |
+
+One structured-output judge call scores a whole tour (the model sees every step in
+order, so completeness/ordering get full context). Per-step faithfulness/relevance are
+averaged; `overall` is the mean of the four dimensions. `--min-score` (default 3.5) is
+the pass bar; `--strict` exits non-zero if any judged tour falls below it.
+
+```bash
+cd Backend
+# live: generate a fresh tour per topic, then judge (needs DB + OpenAI)
+uv run python -m eval.ingest_local
+uv run python -m eval.run_tour_judge_eval
+uv run python -m eval.run_tour_judge_eval --topic "dependency injection" --json
+
+# fixture: judge a saved artifact only (OpenAI, no DB / no generation)
+uv run python -m eval.run_tour_judge_eval --from-fixture valid_minimal
+
+# CI gate + a stronger, separate judge model to reduce self-preference bias
+uv run python -m eval.run_tour_judge_eval --strict --min-score 3.5 --judge-model gpt-4o
+uv run pytest tests/test_tour_judge.py -q
+```
+
+The judge is a calibrated but imperfect signal — see "Known limitations & failure
+modes" in `docs/tour-generation.md`. Treat scores as a directional regression signal,
+not ground truth; grounding is still enforced deterministically by the structural eval.
+
+**Baseline.** `judge_baseline.json` holds a committed reference run (FastAPI `0.115.6`,
+`gpt-4o-mini` as both generator and judge) to diff future runs against. Refresh it at
+full per-step fidelity whenever the pipeline/prompts/model change:
+
+```bash
+uv run python -m eval.run_tour_judge_eval --out eval/judge_baseline.json
+```
+
+Scores wiggle run-to-run even at `temperature=0`, so watch the trend across runs rather
+than gating on a single number. The current baseline aggregate:
+
+| Dimension | Avg |
+|---|---|
+| Faithfulness | 4.95 |
+| Relevance | 4.81 |
+| Completeness | 3.67 |
+| Ordering | 4.33 |
+| Overall | 4.44 |
+
+Completeness is the weakest dimension — expected, since grounding-by-construction makes
+faithfulness easy while topic *coverage* is the hard part. It's the number to watch.
 
 ## Baseline (FastAPI 0.115.6, k=5, retrieve 10)
 

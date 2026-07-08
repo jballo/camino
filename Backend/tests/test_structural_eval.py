@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +12,7 @@ from eval.structural.validate import (
     normalize_text,
     parse_tour_payload,
     validate_tour,
+    validate_tour_against_chunks,
     validate_tour_artifact,
 )
 
@@ -165,6 +167,74 @@ def test_tour_step_rejects_end_before_start():
             end_line=5,
             snippet="x",
         )
+
+
+# ── validate_tour_against_chunks (generation-time, no disk clone) ────
+
+def _chunk(file_path: str, start_line: int, source_code: str) -> SimpleNamespace:
+    """A minimal ChunkSource: file path, absolute start, and its exact source."""
+    end_line = start_line + max(len(source_code.splitlines()) - 1, 0)
+    return SimpleNamespace(
+        file_path=file_path,
+        start_line=start_line,
+        end_line=end_line,
+        source_code=source_code,
+    )
+
+
+def _artifact_with_step(**step_overrides) -> TourArtifact:
+    step = {
+        "title": "Login",
+        "explanation": "Validates then issues a token.",
+        "file_path": "src/auth.py",
+        "start_line": 11,
+        "end_line": 12,
+        "snippet": "    validate()\n    issue_token()",
+    }
+    step.update(step_overrides)
+    return TourArtifact(
+        title="Auth", topic="auth", repo_name="org/repo", steps=[TourStep(**step)]
+    )
+
+
+def test_validate_against_chunks_passes_for_matching_snippet():
+    chunk = _chunk(
+        "src/auth.py",
+        10,
+        "def login():\n    validate()\n    issue_token()\n    return ok",
+    )
+    result = validate_tour_against_chunks(_artifact_with_step(), [chunk])
+    assert result.passed, result.issues
+
+
+def test_validate_against_chunks_flags_missing_path():
+    chunk = _chunk("src/other.py", 1, "x = 1")
+    result = validate_tour_against_chunks(_artifact_with_step(), [chunk])
+    assert result.failed_checks == {CheckKind.PATH_EXISTS}
+
+
+def test_validate_against_chunks_flags_lines_outside_chunk():
+    chunk = _chunk(
+        "src/auth.py",
+        10,
+        "def login():\n    validate()\n    issue_token()\n    return ok",
+    )
+    artifact = _artifact_with_step(
+        start_line=99, end_line=100, snippet="    validate()"
+    )
+    result = validate_tour_against_chunks(artifact, [chunk])
+    assert result.failed_checks == {CheckKind.LINES_IN_BOUNDS}
+
+
+def test_validate_against_chunks_flags_snippet_mismatch():
+    chunk = _chunk(
+        "src/auth.py",
+        10,
+        "def login():\n    validate()\n    issue_token()\n    return ok",
+    )
+    artifact = _artifact_with_step(snippet="    not_real()\n    nope()")
+    result = validate_tour_against_chunks(artifact, [chunk])
+    assert result.failed_checks == {CheckKind.SNIPPET_MATCHES}
 
 
 def test_valid_minimal_fixture_against_fastapi_repo():

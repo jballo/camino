@@ -1,59 +1,43 @@
-"""Validate tour artifacts against schema and on-disk repo source."""
+"""Validate tour artifacts against schema and on-disk repo source.
+
+The shared primitives (``CheckKind`` / ``CheckIssue`` / ``ValidationResult`` /
+``normalize_text`` / ``validate_tour_against_chunks``) now live in
+``app.tour.checks`` so the production pipeline never depends on ``eval`` being on
+the path; they're re-exported here for backwards compatibility. This module keeps
+the *disk/repo-clone* checks that only the offline eval harness needs.
+"""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
-from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
 from app.models.tour import TourArtifact
+from app.tour.checks import (
+    CheckIssue,
+    CheckKind,
+    ChunkSource,
+    ValidationResult,
+    normalize_text,
+    validate_tour_against_chunks,
+)
 
-
-class CheckKind(StrEnum):
-    SCHEMA = "schema"
-    PATH_EXISTS = "path_exists"
-    LINES_IN_BOUNDS = "lines_in_bounds"
-    SNIPPET_MATCHES = "snippet_matches"
-
-
-@dataclass
-class CheckIssue:
-    kind: CheckKind
-    message: str
-    step_index: int | None = None
-
-
-@dataclass
-class ValidationResult:
-    issues: list[CheckIssue] = field(default_factory=list)
-
-    @property
-    def passed(self) -> bool:
-        """A result passes iff it carries no issues.
-
-        Derived rather than stored so the invariant can't drift — no caller can
-        construct a ``passed=True`` result that also holds issues.
-        """
-        return not self.issues
-
-    @property
-    def failed_checks(self) -> set[CheckKind]:
-        return {issue.kind for issue in self.issues}
-
-
-def normalize_text(text: str) -> str:
-    """Collapse insignificant whitespace so snippet checks tolerate formatting.
-
-    Trailing whitespace and blank edge lines are dropped, but leading
-    indentation on content lines is preserved — a bare ``.strip()`` would erase
-    the first line's indentation and corrupt snippet matching for indented code.
-    """
-    lines = [line.rstrip() for line in text.replace("\r\n", "\n").split("\n")]
-    return "\n".join(lines).strip("\n")
+__all__ = [
+    "CheckIssue",
+    "CheckKind",
+    "ChunkSource",
+    "ValidationResult",
+    "normalize_text",
+    "validate_tour_against_chunks",
+    "resolve_repo_file",
+    "count_repo_file_lines",
+    "parse_tour_payload",
+    "validate_tour_artifact",
+    "validate_tour",
+]
 
 
 def resolve_repo_file(repo_root: Path, file_path: str) -> Path | None:
