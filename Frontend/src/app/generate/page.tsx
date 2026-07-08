@@ -43,7 +43,7 @@ function GenerateInner() {
 
   useEffect(() => {
     if (!id) {
-      setError("No journey id provided.");
+      router.replace("/");
       return;
     }
 
