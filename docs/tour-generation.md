@@ -1,9 +1,9 @@
 # Guided Tour Generation — Design & Plan (Phase 2)
 
-Status: **backend implemented / frontend pending.** The Plan → Retrieve → Draft →
-Review generator, `TourJob` persistence, and FastAPI journeys endpoints now exist.
-The remaining product work is the Next.js journeys proxy, `/generate` polling page,
-and `/tours/{id}` reader.
+Status: **end-to-end implemented.** The Plan → Retrieve → Draft → Review generator,
+`TourJob` persistence, FastAPI journeys endpoints, and the Next.js frontend (journeys
+proxy, `/generate` polling page, `/tours` library, and `/tours/{id}` reader) now all
+exist. Remaining work is the M5 eval harness + failure-mode docs.
 
 This doc is now both the Phase 2 design record and the current implementation tracker.
 Earlier sections preserve the decisions; the milestones at the bottom show what has
@@ -35,14 +35,15 @@ flowchart LR
     Validate["validate_tour()<br/>eval/structural/validate.py"]
   end
 
-  subgraph built["Built in backend"]
+  subgraph built["Built"]
     Pipeline[Tour generation pipeline]
     Persist[(tour_jobs table)]
     API[FastAPI journeys API + polling]
+    Reader["Next.js proxy + /generate + /tours reader UI"]
   end
 
   subgraph remaining["Still pending"]
-    Reader["/tours reader UI"]
+    Eval["LLM-as-judge eval + failure-mode docs (M5)"]
   end
 
   Search --> Pipeline
@@ -51,6 +52,7 @@ flowchart LR
   Pipeline --> Persist
   Persist --> API
   API --> Reader
+  Reader --> Eval
 
   style built fill:#f0fdf4,stroke:#16a34a
   style remaining fill:#fef3c7,stroke:#d97706
@@ -280,28 +282,36 @@ sequenceDiagram
 
 ## 8. Frontend
 
-Replace the stub and add two pages. Reuse `/explore`'s markdown + `SourceCard`
-rendering patterns.
+Implemented. Replaced the stub proxy and added the polling + reader + library pages,
+reusing `/explore`'s markdown + `SourceCard` rendering patterns.
 
 | Route | State today | Plan |
 |---|---|---|
-| `/api/journeys` (proxy) | stub returns `"Success"` | proxy to backend, forward Clerk JWT, return `{ id }` |
-| `/` home form | POSTs to stub | POST → get `id` → route to `/generate?id=` |
-| `/generate` | not built | poll `GET /api/journeys/{id}`, show progress, redirect to reader on `complete` |
-| `/tours/{id}` | not built | reader: TOC, per-step title/explanation/why, syntax-highlighted snippet with `file_path:start-end` |
+| `/api/journeys` (proxy) | done | `POST` create + `GET` list, forward Clerk JWT + inject `userId`, return backend JSON |
+| `/api/journeys/[id]` (proxy) | done | `GET` poll one job (Bearer only) |
+| `/` home form | done | POST `{ repoName, topic }` → read `{ id }` → route to `/generate?id=` |
+| `/generate` | done | poll `GET /api/journeys/{id}` every 2s, show progress, redirect to reader on `complete`, show `error` on `failed` |
+| `/tours` | done | library list of a user's jobs with status badges |
+| `/tours/{id}` | done | reader: sticky TOC, per-step title/explanation/why, line-numbered snippet with `file_path:start-end` (plain `<pre>`; no highlighter dep) |
 
-Current stub for reference:
+The stub was replaced by a real proxy (`POST` create + `GET` list) that forwards the
+Clerk JWT and injects `userId`, mirroring `api/agent/ask`:
 
-```3:12:Frontend/src/app/api/journeys/route.ts
-export async function POST(req: Request) {
-  try {
-    const body = await req.json();
-    const { url, prompt } = body;
-    if (!url || url.length === 0) throw new Error(`Failure to process`);
-    console.log("Generating journey for: ", url, " with prompt: ", prompt);
-    return new NextResponse(`Success`, { status: 200 });
-  } catch (error) { ... }
-}
+```18:31:Frontend/src/app/api/journeys/route.ts
+    const backend_url = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
+
+    const response = await fetch(`${backend_url}/api/v1/journeys`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        repoName,
+        topic,
+        userId,
+      }),
+    });
 ```
 
 ---
@@ -362,8 +372,17 @@ export async function POST(req: Request) {
       `complete`+artifact or `failed`+error (catches `TourGenerationError`). Auth +
       `installationId` resolution mirror `app/api/agent.py`. Route tests in
       `tests/test_journeys_route.py` (11, passing).
-- [ ] **M4 — Frontend.** Real `/api/journeys` proxy; `/generate` polling page;
-      `/tours/{id}` reader with syntax highlighting + TOC.
+- [x] **M4 — Frontend.** Real `/api/journeys` proxy (`POST` create + `GET` list) and
+      `/api/journeys/[id]` (`GET` poll), all forwarding the Clerk JWT and injecting
+      `userId`, mirroring `api/agent/ask`. Home form now sends `{ repoName, topic }`,
+      reads `{ id }`, and routes to `/generate?id=`. `/generate` polls
+      `GET /api/journeys/{id}` every 2s with a pending→generating→complete progress
+      indicator, redirects to the reader on `complete`, and surfaces `error` on
+      `failed`. `/tours/{id}` reader renders the `TourArtifact`: sticky TOC, per-step
+      title/explanation (markdown)/why callout, and a citation block with
+      `file_path:start-end` + line-numbered snippet (plain `<pre>`; no highlighter dep
+      added). `/tours` library lists a user's jobs with status badges. Shared TS types
+      in `src/types/tour.ts`. `tsc --noEmit` and `eslint` clean.
 - [ ] **M5 — Eval + docs.** LLM-as-judge harness; known limitations and failure
       modes.
 
