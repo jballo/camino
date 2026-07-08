@@ -344,8 +344,17 @@ export async function POST(req: Request) {
       aren't repairable. `run_tour_smoke_eval.py --save-fixture NAME` persists a real
       generated artifact as a structural fixture + manifest entry to lock the output
       shape. Tests in `tests/test_tour.py` + `tests/test_structural_eval.py`.
-- [ ] **M3 — Persistence + API.** `TourJob` model + table; `POST /api/v1/journeys`,
-      `GET /api/v1/journeys/{id}`; `BackgroundTasks` runner; ownership checks.
+- [x] **M3 — Persistence + API.** `TourJob` model + `tour_jobs` table
+      (`app/models/tour_job.py`, artifact stored as JSONB, `TourJobStatus`
+      pending→generating→complete/failed; int PK per existing SQLModel convention
+      rather than the uuid sketch in §6). `app/api/journeys.py` wired at
+      `/api/v1/journeys` in `main.py`: `POST` (create job + schedule background
+      generation → `{id, status}`), `GET /{id}` (poll, with ownership check), and
+      `GET ?repo=` (list a user's jobs). In-process `BackgroundTasks` runner
+      (`_run_generation`) opens its own session, calls `generate_tour`, and persists
+      `complete`+artifact or `failed`+error (catches `TourGenerationError`). Auth +
+      `installationId` resolution mirror `app/api/agent.py`. Route tests in
+      `tests/test_journeys_route.py` (11, passing).
 - [ ] **M4 — Frontend.** Real `/api/journeys` proxy; `/generate` polling page;
       `/tours/{id}` reader with syntax highlighting + TOC.
 - [ ] **M5 — Eval + docs.** LLM-as-judge harness; README/tracker updates; failure
