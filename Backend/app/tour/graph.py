@@ -190,19 +190,20 @@ def build_tour_graph(
                 drafted: DraftedStep = await drafter.ainvoke(
                     [SystemMessage(content=DRAFT_SYSTEM), HumanMessage(content=human)]
                 )
+                chunk = _pick_chunk(cands, drafted.chunk_id)
+                step = build_grounded_step(
+                    chunk=chunk,
+                    title=drafted.title,
+                    explanation=drafted.explanation,
+                    why=drafted.why,
+                    req_start=drafted.start_line,
+                    req_end=drafted.end_line,
+                )
             except Exception:
                 logger.exception("tour draft | step %d failed; skipping", index)
                 return index, None
 
-            chunk = _pick_chunk(cands, drafted.chunk_id)
-            return index, build_grounded_step(
-                chunk=chunk,
-                title=drafted.title,
-                explanation=drafted.explanation,
-                why=drafted.why,
-                req_start=drafted.start_line,
-                req_end=drafted.end_line,
-            )
+            return index, step
 
         results = await asyncio.gather(*[_draft(i) for i in targets])
         for index, step in results:

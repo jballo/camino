@@ -53,7 +53,22 @@ function GenerateInner() {
     const poll = async () => {
       try {
         const response = await fetch(`/api/journeys/${id}`, { method: "GET" });
-        if (!response.ok) throw new Error("Failed to fetch journey");
+        if (!response.ok) {
+          if (cancelled) return;
+          const errBody = (await response.json().catch(() => null)) as
+            | { error?: string }
+            | null;
+          if (response.status === 401 || response.status === 403) {
+            setError(
+              "Your session expired. Please refresh the page and log in again.",
+            );
+          } else if (response.status === 404) {
+            setError("We couldn't find this tour. It may have been removed.");
+          } else {
+            setError(errBody?.error ?? "Failed to fetch journey status.");
+          }
+          return;
+        }
         const result = (await response.json()) as JourneyResponse;
         if (cancelled) return;
 
