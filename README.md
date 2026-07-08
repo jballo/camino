@@ -11,7 +11,7 @@ Built for new hires, OSS contributors, and anyone who's opened a repo and though
 
 ## Where we are
 
-**Phase 2 — Guided tours** · `✅ M4 implemented`
+**Phase 2 — Guided tours** · `✅ M5 implemented`
 
 The core indexing and hybrid-search pipeline is **built and tuned**. A LangGraph ReAct
 agent can answer natural-language questions about an ingested repo, grounded in retrieved
@@ -29,6 +29,7 @@ What works today:
 | Retrieval eval harness | ✅ 20-question FastAPI golden set |
 | Agent smoke eval | ✅ live agent + citation validity checks |
 | Structural tour eval | ✅ schema + path/line/snippet fixture checks |
+| LLM-as-judge tour eval | ✅ faithfulness/relevance/completeness/ordering + baseline |
 | ReAct Q&A agent | ✅ `/explore` + `/api/v1/agent/ask` |
 | Guided tour generation | ✅ backend pipeline + jobs/API + frontend flow |
 | Production deploy | ❌ local dev only |
@@ -56,7 +57,7 @@ flowchart LR
 | Phase | Goal | Key deliverables |
 |---|---|---|
 | **1 — Done** | Best-in-class retrieval for code Q&A | exp1–5 shipped (0.900 hit@5); optional exp6 BGE reranker (0.950, closes q17); q03 last miss |
-| **2 — Now** | Structured guided tours | End-to-end tour generation flow built; M5 eval + failure-mode docs next |
+| **2 — Now** | Structured guided tours | End-to-end tour generation flow built; M5 LLM-as-judge eval + failure-mode docs landed |
 | **3** | Ship to users | AWS (ECS, RDS, S3, SQS), observability (Langfuse), rate limits |
 | **4 — Stretch** | Meet devs where they work | CLI (`onboard generate`), PR reviewer bot |
 
@@ -149,10 +150,12 @@ Details: [Backend/README.md](Backend/README.md) · [Frontend/README.md](Frontend
 
 ## Now / next 3 actions
 
-1. **Add LLM-as-judge tour evals** — score faithfulness, relevance, completeness, and
-   ordering over a small topic set.
-2. **Document tour failure modes** — repo not processed, no GitHub connection, sparse
-   retrieval, partial coverage, and generation retries/out-of-retries.
+1. **Expand the eval set** — LLM-as-judge is live over 3 topics on FastAPI; broaden to
+   2–3 repos (~35–40 topics) and cross-check with a stronger `--judge-model` to gauge
+   self-preference bias.
+2. **CI eval gates** — keep the no-LLM tour tests (`test_tour_judge.py`,
+   `run_structural_eval`) blocking; run the live judge on a schedule against
+   `judge_baseline.json` rather than blocking PRs on it.
 3. **Decide reranker in prod** — exp6 is done and off by default; ship BGE only if the
    +0.05 hit@5 justifies the latency, or leave query-time only for now.
 
@@ -219,7 +222,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [x] Agent smoke eval (live ReAct path + citation parser/validator)
 - [x] Structural evals (schema + path/line/snippet validators, fixture CLI — no LLM)
 - [x] Tour route tests (`POST`, poll, list, auth/ownership, DB failures)
-- [ ] LLM-as-judge (faithfulness, relevance, completeness, ordering)
+- [x] LLM-as-judge (faithfulness, relevance, completeness, ordering) + committed baseline
 - [ ] Eval suite across 2–3 repos (~35–40 questions total)
 - [ ] Eval gates in CI (GitHub Actions, fail on regression)
 
@@ -229,8 +232,8 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 
 ### Ship
 - [~] README: overview, architecture, run instructions (this file)
-- [~] README: eval results table (retrieval filled; LLM-as-judge pending)
-- [~] README: known limitations & failure modes
+- [x] README: eval results table (retrieval + LLM-as-judge filled)
+- [x] README: known limitations & failure modes (tour doc §12)
 - [ ] Langfuse + CloudWatch screenshots
 - [ ] Medium blog post
 - [ ] Live end-to-end test (web + CLI)
@@ -259,13 +262,27 @@ Additional harnesses now available:
 - Agent smoke eval: `uv run python -m eval.run_agent_smoke_eval --strict`
 - Structural tour eval: `uv run python -m eval.run_structural_eval`
 - Live tour smoke eval: `uv run python -m eval.run_tour_smoke_eval`
+- LLM-as-judge tour eval: `uv run python -m eval.run_tour_judge_eval`
 
-LLM-as-judge: _not run yet_
+Tour quality (LLM-as-judge, FastAPI 0.115.6, 3 topics, `gpt-4o-mini`) — baseline in
+[Backend/eval/judge_baseline.json](Backend/eval/judge_baseline.json):
+
+| Dimension | Avg (1–5) |
+|---|---|
+| Faithfulness | 4.95 |
+| Relevance | 4.81 |
+| Completeness | 3.67 |
+| Ordering | 4.33 |
+| **Overall** | **4.44** |
+
+Completeness is the weakest dimension — expected, since snippets are grounded by
+construction while topic *coverage* is the hard part. See failure modes in
+[docs/tour-generation.md](docs/tour-generation.md) §12.
 
 ---
 
 ## Cut these first if behind
 
-1. CLI · 2. Third eval repo · 3. CI eval gates · 4. LLM-as-judge
+1. CLI · 2. Third eval repo · 3. CI eval gates
 
 **Never cut:** README + honest failure analysis.

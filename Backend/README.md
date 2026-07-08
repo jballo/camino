@@ -88,6 +88,9 @@ eval/
 ├── run_agent_smoke_eval.py
 ├── run_structural_eval.py
 ├── run_tour_smoke_eval.py
+├── run_tour_judge_eval.py   # LLM-as-judge tour scoring
+├── judge/               # judge rubric schemas, prompt, call + score reduction
+├── judge_baseline.json  # committed tour judge reference run
 ├── ingest_local.py      # eval ingest from local clone
 └── EXPERIMENTS.md       # experiment log + next steps
 ```
@@ -121,7 +124,12 @@ uv run python -m eval.run_eval --k 5        # run against golden set
 uv run python -m eval.run_agent_smoke_eval  # live agent + citation smoke check
 uv run python -m eval.run_structural_eval   # tour artifact validator fixtures
 uv run python -m eval.run_tour_smoke_eval   # live tour generation smoke test
+uv run python -m eval.run_tour_judge_eval   # LLM-as-judge: faithfulness/relevance/completeness/ordering
 ```
+
+The tour judge scores generated (or `--from-fixture`) tours 1-5 per dimension against a
+committed baseline (`eval/judge_baseline.json`, overall 4.44); `--strict --min-score`
+gates on it and `--judge-model` decouples judge from generator.
 
 See [eval/README.md](eval/README.md) and [eval/EXPERIMENTS.md](eval/EXPERIMENTS.md).
 
