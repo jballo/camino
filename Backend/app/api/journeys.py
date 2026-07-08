@@ -96,7 +96,16 @@ async def _run_generation(job_id: int) -> None:
         job.artifact = artifact.model_dump()
         job.error = None
         session.add(job)
-        session.commit()
+        try:
+            session.commit()
+        except exc.SQLAlchemyError:
+            logger.exception(
+                "tour job commit failed after successful generation | id=%s topic=%r repo=%r",
+                job_id, topic, repo_name,
+            )
+            session.rollback()
+            _mark_failed(session, job_id, "Failed to persist generated tour")
+            return
         logger.info(
             "tour generation complete | id=%s topic=%r steps=%d",
             job_id, topic, len(artifact.steps),
@@ -104,13 +113,19 @@ async def _run_generation(job_id: int) -> None:
 
 
 def _mark_failed(session: Session, job_id: int, error: str) -> None:
-    job = session.get(TourJob, job_id)
-    if job is None:
-        return
-    job.status = TourJobStatus.FAILED
-    job.error = error
-    session.add(job)
-    session.commit()
+    try:
+        job = session.get(TourJob, job_id)
+        if job is None:
+            return
+        job.status = TourJobStatus.FAILED
+        job.error = error
+        session.add(job)
+        session.commit()
+    except exc.SQLAlchemyError:
+        logger.exception(
+            "failed to mark tour job as FAILED | id=%s", job_id
+        )
+        session.rollback()
 
 
 @router.post("")
