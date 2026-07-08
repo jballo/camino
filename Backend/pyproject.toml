@@ -24,6 +24,13 @@ dependencies = [
     "langchain-core>=1.4.8",
 ]
 
+[project.optional-dependencies]
+# Cross-encoder rerank (Exp 6) is opt-in (--rerank); keep the heavy PyTorch /
+# HuggingFace stack out of the default image. Install with `uv sync --extra rerank`.
+rerank = [
+    "sentence-transformers>=5.6.0",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",

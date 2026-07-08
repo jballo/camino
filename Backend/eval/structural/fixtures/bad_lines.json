@@ -1,0 +1,15 @@
+{
+  "title": "Lines out of bounds",
+  "topic": "line range failure",
+  "repo_name": "tiangolo/fastapi",
+  "steps": [
+    {
+      "title": "Past EOF",
+      "explanation": "These line numbers exceed the file length.",
+      "file_path": "fastapi/applications.py",
+      "start_line": 99999,
+      "end_line": 99999,
+      "snippet": "class FastAPI(Starlette):"
+    }
+  ]
+}

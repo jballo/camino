@@ -1,0 +1,16 @@
+{
+  "title": "FastAPI application entrypoint",
+  "topic": "core application class",
+  "repo_name": "tiangolo/fastapi",
+  "steps": [
+    {
+      "title": "The FastAPI class",
+      "explanation": "FastAPI's main app class extends Starlette and is the primary entry point for routes and middleware.",
+      "file_path": "fastapi/applications.py",
+      "start_line": 48,
+      "end_line": 50,
+      "snippet": "class FastAPI(Starlette):\n    \"\"\"\n    `FastAPI` app class, the main entrypoint to use FastAPI.",
+      "why": "Every FastAPI app instantiates this class."
+    }
+  ]
+}

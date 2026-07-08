@@ -3,8 +3,10 @@
 FastAPI service: GitHub repo ingest, hybrid code search, and a LangGraph agent that
 answers questions grounded in retrieved chunks.
 
-**Current focus:** retrieval quality (see [eval/EXPERIMENTS.md](eval/EXPERIMENTS.md)).
-**Next up:** cross-encoder reranker, then the guided-tour generation pipeline.
+**Retrieval loop:** paused at a tuned stack — exp1–5 shipped (hit@5 0.900), plus an
+optional exp6 cross-encoder reranker (BGE blend → 0.950). See
+[eval/EXPERIMENTS.md](eval/EXPERIMENTS.md).
+**Next up:** the guided-tour generation pipeline (Phase 2).
 
 ---
 
@@ -93,12 +95,14 @@ All routes require `Authorization: Bearer <clerk_session_jwt>`.
 
 ---
 
-## Retrieval eval
+## Eval Harnesses
 
 ```bash
 cd Backend
 uv run python -m eval.ingest_local          # clone FastAPI 0.115.6 + ingest
 uv run python -m eval.run_eval --k 5        # run against golden set
+uv run python -m eval.run_agent_smoke_eval  # live agent + citation smoke check
+uv run python -m eval.run_structural_eval   # tour artifact validator fixtures
 ```
 
 See [eval/README.md](eval/README.md) and [eval/EXPERIMENTS.md](eval/EXPERIMENTS.md).
