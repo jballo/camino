@@ -6,9 +6,10 @@ backend guided-tour generation.
 **Retrieval loop:** paused at a tuned stack — exp1–5 shipped (hit@5 0.900), plus an
 optional exp6 cross-encoder reranker (BGE blend → 0.950). See
 [eval/EXPERIMENTS.md](eval/EXPERIMENTS.md).
-**Phase 2 status:** the guided-tour backend is in progress. The Plan → Retrieve →
-Draft → Review graph, `TourJob` persistence, and `/api/v1/journeys` create/poll/list
-routes exist; the frontend proxy, polling page, and reader UI are still pending.
+**Phase 2 status:** the guided-tour backend is wired end-to-end with the frontend.
+The Plan → Retrieve → Draft → Review graph, `TourJob` persistence, and
+`/api/v1/journeys` create/poll/list routes back the Next.js `/api/journeys` proxy,
+`/generate` polling page, `/tours` library, and `/tours/{id}` reader UI.
 
 ---
 
@@ -106,6 +107,8 @@ eval/
 | `GET` | `/api/v1/journeys?repo=` | List the authenticated user's journey jobs |
 
 All routes require `Authorization: Bearer <clerk_session_jwt>`.
+Journey creation expects `{ repoName, topic, userId }`; the frontend injects `userId`
+from the Clerk session and redirects users to `/generate?id=<job_id>` for polling.
 
 ---
 
@@ -117,6 +120,7 @@ uv run python -m eval.ingest_local          # clone FastAPI 0.115.6 + ingest
 uv run python -m eval.run_eval --k 5        # run against golden set
 uv run python -m eval.run_agent_smoke_eval  # live agent + citation smoke check
 uv run python -m eval.run_structural_eval   # tour artifact validator fixtures
+uv run python -m eval.run_tour_smoke_eval   # live tour generation smoke test
 ```
 
 See [eval/README.md](eval/README.md) and [eval/EXPERIMENTS.md](eval/EXPERIMENTS.md).

@@ -2,11 +2,13 @@
 
 Next.js web app for Camino. Clerk handles auth; API routes proxy to the FastAPI backend.
 
-**What works:** sign-in, GitHub App install, repo ingest, ask-the-codebase on `/explore`.
+**What works:** sign-in, GitHub App install, repo ingest, ask-the-codebase on
+`/explore`, and guided-tour generation from the home page through `/generate` and
+`/tours/{id}`.
 
-**Current gap:** the backend now has real `/api/v1/journeys` job endpoints, but the
-Next.js `/api/journeys` route is still a local stub. The home-page tour request,
-`/generate`, and `/tours` need to be wired before guided tours are usable in the UI.
+**Tour flow:** select a repo, make sure it has been processed, enter a topic, and click
+**Generate tour**. The app creates a journey through `/api/journeys`, polls progress on
+`/generate?id=...`, then opens the completed reader at `/tours/{id}`.
 
 ---
 
@@ -36,19 +38,21 @@ The backend must be running on port 8000 (see [Backend/README.md](../Backend/REA
 
 | Route | Status | Description |
 |---|---|---|
-| `/` | partial | Tour request form — selects/ingests repos, then posts to stub `/api/journeys` |
+| `/` | live | Guided tour request form — select repo, enter topic, create journey |
 | `/explore` | **live** | Select repo → ingest → ask questions with cited sources |
 | `/sign-in` | live | Clerk sign-in |
-| `/tours` | planned | Tour reader (Phase 2) |
-| `/generate` | planned | Tour generation status (Phase 2) |
+| `/generate` | live | Poll journey status and redirect to reader on completion |
+| `/tours` | live | Library of the user's generated tours |
+| `/tours/{id}` | live | Guided tour reader with TOC, explanations, why callouts, and snippets |
 | `/settings` | planned | User / GitHub settings |
 
 ---
 
 ## API routes (Next.js → Backend proxy)
 
-Live authenticated proxy routes forward the Clerk session JWT as
-`Authorization: Bearer …`; `/api/journeys` still needs that wiring.
+Authenticated proxy routes forward the Clerk session JWT as
+`Authorization: Bearer …`. Journey creation also injects `userId` from Clerk before
+calling FastAPI.
 
 | Route | Backend |
 |---|---|
@@ -58,8 +62,9 @@ Live authenticated proxy routes forward the Clerk session JWT as
 | `/api/agent/ask` | `POST /api/v1/agent/ask` |
 | `/api/github/install` | GitHub App install redirect |
 | `/api/github/authorize` | OAuth callback |
-| `/api/journeys` | **stub** — should proxy to backend `POST /api/v1/journeys` next |
+| `/api/journeys` | `POST /api/v1/journeys`, `GET /api/v1/journeys?repo=` |
+| `/api/journeys/{id}` | `GET /api/v1/journeys/{id}` |
 
-Next frontend work: make `/api/journeys` forward the Clerk JWT to FastAPI, add
-`GET /api/journeys/{id}` polling for `/generate`, then render completed artifacts in
-`/tours/{id}`.
+Completed tour artifacts render directly from the backend `TourArtifact` shape:
+`title`, `topic`, `repo_name`, and ordered `steps` with file paths, line ranges,
+snippets, explanations, and optional "why" notes.

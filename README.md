@@ -11,13 +11,13 @@ Built for new hires, OSS contributors, and anyone who's opened a repo and though
 
 ## Where we are
 
-**Phase 2 — Guided tour backend** · `🟡 In progress`
+**Phase 2 — Guided tours** · `✅ M4 implemented`
 
 The core indexing and hybrid-search pipeline is **built and tuned**. A LangGraph ReAct
 agent can answer natural-language questions about an ingested repo, grounded in retrieved
-code chunks. Phase 2 has started: the backend now has a Plan → Retrieve → Draft → Review
-tour generator, persisted journey jobs, and polling/list APIs. The frontend tour reader
-and generation status flow are still pending, so `/explore` remains the main usable UI.
+code chunks. Phase 2 now has the full guided-tour path: a Plan → Retrieve → Draft →
+Review generator, persisted journey jobs, polling/list APIs, a Next.js journeys proxy,
+the `/generate` polling page, the `/tours` library, and the `/tours/{id}` reader UI.
 
 What works today:
 
@@ -30,7 +30,7 @@ What works today:
 | Agent smoke eval | ✅ live agent + citation validity checks |
 | Structural tour eval | ✅ schema + path/line/snippet fixture checks |
 | ReAct Q&A agent | ✅ `/explore` + `/api/v1/agent/ask` |
-| Guided tour generation | 🟡 backend pipeline + jobs/API built; frontend not wired |
+| Guided tour generation | ✅ backend pipeline + jobs/API + frontend flow |
 | Production deploy | ❌ local dev only |
 
 **Eval hero repo:** [FastAPI 0.115.6](https://github.com/tiangolo/fastapi). See
@@ -56,7 +56,7 @@ flowchart LR
 | Phase | Goal | Key deliverables |
 |---|---|---|
 | **1 — Done** | Best-in-class retrieval for code Q&A | exp1–5 shipped (0.900 hit@5); optional exp6 BGE reranker (0.950, closes q17); q03 last miss |
-| **2 — Now** | Structured guided tours | Backend generator + jobs API built; frontend proxy, polling page, reader UI next |
+| **2 — Now** | Structured guided tours | End-to-end tour generation flow built; M5 eval + failure-mode docs next |
 | **3** | Ship to users | AWS (ECS, RDS, S3, SQS), observability (Langfuse), rate limits |
 | **4 — Stretch** | Meet devs where they work | CLI (`onboard generate`), PR reviewer bot |
 
@@ -71,8 +71,9 @@ flowchart TB
   subgraph frontend [Frontend — Next.js]
     Clerk[Clerk auth]
     Explore["/explore — ingest + Q&A"]
-    Home["/ — tour request form (stub proxy)"]
-    TourUI["/generate + /tours — planned"]
+    Home["/ — guided tour request form"]
+    TourUI["/generate + /tours — tour polling + reader"]
+    Proxy["/api/journeys — Clerk-auth proxy"]
   end
 
   subgraph backend [Backend — FastAPI]
@@ -93,10 +94,12 @@ flowchart TB
   end
 
   Clerk --> Explore
+  Clerk --> Home
   Explore --> GH
   Explore --> Ingest
   Explore --> Agent
-  Home --> Journeys
+  Home --> Proxy --> Journeys
+  TourUI --> Proxy
   Journeys --> TourGraph
   Ingest --> Parser --> Embed --> Chunks
   Embed --> Vectors
@@ -132,12 +135,13 @@ npm run dev            # http://localhost:3000
 ```
 
 1. Sign in → install the GitHub App (header menu).
-2. Open **Explore** → select a repo → **Process** (ingest).
-3. Ask a question — the agent retrieves code and answers with citations.
-
-Tour generation is currently backend-first: `POST /api/v1/journeys` creates a job and
-stores the generated artifact when complete, but the Next.js `/api/journeys` proxy and
-reader pages are not wired yet.
+2. Open **Explore** → select a repo → **Process** (ingest). The repo must be indexed
+   before Q&A or tour generation can use it.
+3. Ask a question in **Explore**, or go back to **Home** to generate a tour:
+   select the processed repo, enter a topic such as "authentication flow", and click
+   **Generate tour**.
+4. Camino routes to `/generate?id=...`, polls the job, then opens `/tours/{id}` when
+   the grounded tour is ready.
 
 Details: [Backend/README.md](Backend/README.md) · [Frontend/README.md](Frontend/README.md)
 
@@ -145,16 +149,16 @@ Details: [Backend/README.md](Backend/README.md) · [Frontend/README.md](Frontend
 
 ## Now / next 3 actions
 
-1. **Wire the frontend journeys flow** — replace the Next.js `/api/journeys` stub with
-   a Clerk-authenticated proxy, then route successful requests to `/generate?id=...`.
-2. **Tour reader UI** — build `/generate` polling and `/tours/{id}` with syntax
-   highlighting, TOC, file paths, and grounded snippets.
+1. **Add LLM-as-judge tour evals** — score faithfulness, relevance, completeness, and
+   ordering over a small topic set.
+2. **Document tour failure modes** — repo not processed, no GitHub connection, sparse
+   retrieval, partial coverage, and generation retries/out-of-retries.
 3. **Decide reranker in prod** — exp6 is done and off by default; ship BGE only if the
    +0.05 hit@5 justifies the latency, or leave query-time only for now.
 
 **Retrieval status:** loop paused. exp6 (cross-encoder reranker) is complete — BGE blend
 hits the ≥0.95 target and closes q17; only q03 remains. Kept optional (off by default) to
-avoid prod latency. No critical retrieval blockers for the current Phase 2 frontend work.
+avoid prod latency. No critical retrieval blockers for the current Phase 2 eval work.
 
 ---
 
@@ -182,10 +186,11 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [ ] Suggested tour topics auto-generated from repo structure
 
 ### Web app
-- [~] Request-a-tour form — home page UI exists; Next.js `/api/journeys` proxy is still a stub
+- [x] Request-a-tour form — select repo, enter topic, create journey, route to `/generate`
 - [x] Explore page — repo list, ingest, ask-the-codebase with source citations
-- [ ] Tour reader page (syntax highlighting, TOC, file paths, navigation)
-- [ ] Generation status / polling page
+- [x] Tour reader page — TOC, markdown explanations, file paths, line-numbered snippets
+- [x] Generation status / polling page
+- [x] Tours library page
 - [x] Clerk auth (sign-in, session JWT to backend)
 - [x] GitHub App connect + repo listing
 - [ ] Shareable tour URLs
@@ -253,6 +258,7 @@ Additional harnesses now available:
 
 - Agent smoke eval: `uv run python -m eval.run_agent_smoke_eval --strict`
 - Structural tour eval: `uv run python -m eval.run_structural_eval`
+- Live tour smoke eval: `uv run python -m eval.run_tour_smoke_eval`
 
 LLM-as-judge: _not run yet_
 
