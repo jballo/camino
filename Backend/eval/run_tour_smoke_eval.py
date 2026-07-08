@@ -52,6 +52,10 @@ DEFAULT_TOPICS = [
 ]
 
 
+STRUCTURAL_FIXTURES_DIR = Path(__file__).parent / "structural" / "fixtures"
+STRUCTURAL_MANIFEST = STRUCTURAL_FIXTURES_DIR / "manifest.json"
+
+
 @dataclass
 class TopicRun:
     topic: str
@@ -62,6 +66,7 @@ class TopicRun:
     issues: list[dict]
     error: str | None
     elapsed_s: float
+    artifact: dict | None = None
 
 
 def _load_repo_name() -> str:
@@ -123,7 +128,8 @@ async def _run_topic(
             elapsed_s=round(time.monotonic() - started, 2),
         )
 
-    result = validate_tour(artifact.model_dump(), repo_root)
+    artifact_dict = artifact.model_dump()
+    result = validate_tour(artifact_dict, repo_root)
     return TopicRun(
         topic=topic,
         title=artifact.title,
@@ -136,6 +142,7 @@ async def _run_topic(
         ],
         error=None,
         elapsed_s=round(time.monotonic() - started, 2),
+        artifact=artifact_dict,
     )
 
 
@@ -221,6 +228,35 @@ def _print_report(repo_root: Path, repo_name: str, runs: list[TopicRun], aggrega
         print()
 
 
+def _save_structural_fixture(name: str, run: TopicRun, repo_version: str) -> Path:
+    """Persist a real generated artifact as a structural fixture + manifest entry.
+
+    Locks the pipeline's output shape into the (no-LLM) structural eval: the saved
+    JSON must keep validating against the pinned fixture repo, so a regression that
+    breaks grounding turns into a failing structural fixture.
+    """
+    if run.artifact is None:
+        raise SystemExit(f"cannot save fixture {name!r}: topic produced no artifact")
+    if not run.valid:
+        raise SystemExit(
+            f"refusing to save fixture {name!r}: generated tour did not validate "
+            f"({', '.join(run.failed_checks) or 'unknown'})"
+        )
+
+    fixture_path = STRUCTURAL_FIXTURES_DIR / f"{name}.json"
+    fixture_path.write_text(json.dumps(run.artifact, indent=2) + "\n")
+
+    manifest = json.loads(STRUCTURAL_MANIFEST.read_text())
+    manifest["repo_version"] = repo_version
+    entry = {"id": name, "file": f"{name}.json", "expect": "pass"}
+    fixtures = [f for f in manifest.get("fixtures", []) if f.get("id") != name]
+    fixtures.append(entry)
+    manifest["fixtures"] = fixtures
+    STRUCTURAL_MANIFEST.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    return fixture_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", default=str(DEFAULT_FIXTURE_PATH))
@@ -239,6 +275,15 @@ def main() -> None:
         "--strict",
         action="store_true",
         help="exit 1 unless every topic generated a structurally valid tour",
+    )
+    parser.add_argument(
+        "--save-fixture",
+        default=None,
+        metavar="NAME",
+        help=(
+            "save the first valid generated tour as eval/structural/fixtures/"
+            "NAME.json and register it in the manifest (locks output shape)"
+        ),
     )
     args = parser.parse_args()
 
@@ -276,7 +321,10 @@ def main() -> None:
         "model": args.model or settings.agent_model,
         "search_limit": args.search_limit,
         "aggregate": aggregate,
-        "topics": [asdict(run) for run in runs],
+        # Drop the full artifact from the report — it's captured via --save-fixture.
+        "topics": [
+            {k: v for k, v in asdict(run).items() if k != "artifact"} for run in runs
+        ],
     }
 
     if args.json:
@@ -289,6 +337,18 @@ def main() -> None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(output, indent=2))
         print(f"wrote {out_path}", file=sys.stderr if args.json else sys.stdout)
+
+    if args.save_fixture:
+        valid_run = next((r for r in runs if r.valid and r.artifact), None)
+        if valid_run is None:
+            raise SystemExit("no valid tour to save as a fixture")
+        fixture_path = _save_structural_fixture(
+            args.save_fixture, valid_run, FIXTURE_REPO_VERSION
+        )
+        print(
+            f"saved fixture {fixture_path} (topic={valid_run.topic!r})",
+            file=sys.stderr if args.json else sys.stdout,
+        )
 
     if args.strict and aggregate["valid_tours"] != aggregate["topics"]:
         sys.exit(1)

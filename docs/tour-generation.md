@@ -335,8 +335,15 @@ export async function POST(req: Request) {
       passing) and a live smoke eval `eval/run_tour_smoke_eval.py` that generates real
       tours and runs them through `validate_tour` (needs DB + `OPENAI_API_KEY`; not run
       here). Review/repair loop deferred to M2.
-- [ ] **M2 — Validation.** `validate_tour_against_chunks()`; Review node wired with a
-      bounded repair loop; structural fixture from real output.
+- [x] **M2 — Validation.** `validate_tour_against_chunks()` (`eval/structural/validate.py`,
+      §5 option A) validates steps against stored chunk source, no clone. Review node
+      (`app/tour/review.py`) combines those structural checks with coverage checks
+      (every planned step produced, no duplicate citations, ≥ N distinct files) and is
+      wired into the graph with a bounded Draft↔Review repair loop (`max_attempts`,
+      default 2) that redrafts only flagged steps and stops early when remaining issues
+      aren't repairable. `run_tour_smoke_eval.py --save-fixture NAME` persists a real
+      generated artifact as a structural fixture + manifest entry to lock the output
+      shape. Tests in `tests/test_tour.py` + `tests/test_structural_eval.py`.
 - [ ] **M3 — Persistence + API.** `TourJob` model + table; `POST /api/v1/journeys`,
       `GET /api/v1/journeys/{id}`; `BackgroundTasks` runner; ownership checks.
 - [ ] **M4 — Frontend.** Real `/api/journeys` proxy; `/generate` polling page;

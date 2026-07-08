@@ -49,3 +49,14 @@ DRAFT_HUMAN = """Step intent: {step_intent}
 
 Candidates:
 {candidates}"""
+
+# Appended to DRAFT_HUMAN only on a repair pass, so the model can correct the
+# specific problems the Review node found instead of re-emitting the same step.
+DRAFT_REPAIR = """Your previous attempt at this step had problems — fix them:
+{problems}
+
+Choose a different candidate or a tighter span if that resolves the issue."""
+
+# A note listing citations already used by other steps, so a repair pass can
+# avoid producing a duplicate.
+DRAFT_AVOID = """Do not cite code already covered by other steps: {used}."""
