@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -5,6 +6,7 @@ from sqlalchemy import text
 from sqlmodel import Session
 
 from app.services.embeddings import EMBED_MODEL, embed_batch
+from app.services.rerank import DEFAULT_RERANK_RRF_WEIGHT, DEFAULT_RERANK_TOP_N
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,7 @@ DEFAULT_PATH_PENALTY = 0.3
 # Exp 5: exclude test/tutorial paths from the retriever candidate pool so top_n
 # slots go to library internals (post-fusion demotion is too late for deep hits).
 DEFAULT_FILTER_DEMO_PATHS = True
+DEFAULT_RERANK = False
 
 
 def _demo_path_exclusion_sql(alias: str = "c") -> str:
@@ -259,6 +262,10 @@ async def hybrid_search_debug(
     mode: str = "hybrid",
     path_penalty: float = DEFAULT_PATH_PENALTY,
     filter_demo_paths: bool = DEFAULT_FILTER_DEMO_PATHS,
+    rerank: bool = DEFAULT_RERANK,
+    rerank_top_n: int = DEFAULT_RERANK_TOP_N,
+    rerank_rrf_weight: float = DEFAULT_RERANK_RRF_WEIGHT,
+    rerank_model: str | None = None,
 ) -> tuple[list[SearchResult], RetrievalDebug]:
     """Retrieval core: hydrated results plus per-retriever diagnostics.
 
@@ -302,7 +309,25 @@ async def hybrid_search_debug(
     )
     fused = _demote_paths(session, fused, path_penalty)
 
-    results = _load_chunks(session, fused, limit)
+    # max(): a caller passing rerank_top_n < limit must still get `limit`
+    # candidates through to the final slice, not just rerank_top_n of them.
+    hydrate_limit = max(rerank_top_n, limit) if rerank else limit
+    results = _load_chunks(session, fused, hydrate_limit)
+    if rerank and results:
+        from app.services.rerank import RERANK_MODEL, rerank_results
+
+        # rerank_results runs synchronous CPU-bound neural inference; offload it
+        # to a thread so it doesn't block the event loop for other requests.
+        results = await asyncio.to_thread(
+            rerank_results,
+            query,
+            results,
+            top_n=rerank_top_n,
+            rrf_weight=rerank_rrf_weight,
+            model_name=rerank_model or RERANK_MODEL,
+        )
+        results = results[:limit]
+
     debug = RetrievalDebug(
         vector_ranks={cid: rank for cid, rank in vector_ranked},
         fts_ranks={cid: rank for cid, rank in fts_ranked},
@@ -325,6 +350,10 @@ async def hybrid_search(
     mode: str = "hybrid",
     path_penalty: float = DEFAULT_PATH_PENALTY,
     filter_demo_paths: bool = DEFAULT_FILTER_DEMO_PATHS,
+    rerank: bool = DEFAULT_RERANK,
+    rerank_top_n: int = DEFAULT_RERANK_TOP_N,
+    rerank_rrf_weight: float = DEFAULT_RERANK_RRF_WEIGHT,
+    rerank_model: str | None = None,
 ) -> list[SearchResult]:
     """Run hybrid vector + FTS search with RRF fusion.
     This is the main entry point. It embeds the query, runs both retrievers
@@ -344,6 +373,10 @@ async def hybrid_search(
         mode=mode,
         path_penalty=path_penalty,
         filter_demo_paths=filter_demo_paths,
+        rerank=rerank,
+        rerank_top_n=rerank_top_n,
+        rerank_rrf_weight=rerank_rrf_weight,
+        rerank_model=rerank_model,
     )
     return results
 

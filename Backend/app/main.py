@@ -6,9 +6,10 @@ from sqlalchemy import text
 
 from app.db import engine
 
-from app.api import agent, github, repositories
+from app.api import agent, github, journeys, repositories
 from app.webhooks import clerk, github as github_webhook
 from app.models.code import CodeChunkModel, CodeChunkEmbedding
+from app.models.tour_job import TourJob
 
 
 
@@ -38,5 +39,6 @@ app = FastAPI(lifespan=lifespan)
 app.include_router(github.router, prefix="/api/v1/github", tags=["github"])
 app.include_router(repositories.router, prefix="/api/v1/repositories", tags=["repositories"])
 app.include_router(agent.router, prefix="/api/v1/agent", tags=["agent"])
+app.include_router(journeys.router, prefix="/api/v1/journeys", tags=["journeys"])
 app.include_router(clerk.router, prefix="/webhooks/clerk", tags=["webhooks"])
 app.include_router(github_webhook.router, prefix="/webhooks/github", tags=["webhooks"])

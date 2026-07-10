@@ -20,20 +20,18 @@ How to use:
 ## Continue here (handoff for a new chat)
 
 **Current shipped stack:** exp1 (FTS) + exp3 (post-fusion demotion + top_n=60) +
-exp4 (embedding text) + exp5 (retrieval-time demo-path filter).
+exp4 (embedding text) + exp5 (retrieval-time demo-path filter). Optional exp6
+(cross-encoder rerank, `--rerank`, not default in prod).
 
-**Best numbers (FastAPI golden set, k=5, limit=10):** hit **0.900**, recall **0.858**,
-MRR **0.766** (baseline 0.800 / 0.767 / 0.649).
+**Best numbers (FastAPI golden set, k=5, limit=10):** hit **0.950**, recall **0.925**
+(exp6 + BGE reranker blend). Shipped defaults (no rerank): hit **0.900**, recall
+**0.858**, MRR **0.766**. Baseline: 0.800 / 0.767 / 0.649.
 
-**Still missing (2/20):**
+**Still missing (1/20):**
 
-| id | question | labeled chunks | exp5 ranks (vector / fts / final) |
+| id | question | labeled chunks | ranks (vector / fts / final) |
 |---|---|---|---|
 | q03 | path param validation on route | `routing.py:APIRoute`, `routing.py:get_request_handler` | 20 / 17 / **9**; handler in FTS@6 but not top-5 |
-| q17 | websocket routes | `routing.py:APIWebSocketRoute` | 4 / 9 / **6** (baseline had hit at rr≈0.2) |
-
-Both are **in the candidate pool** after exp5 — fusion/ranking is the blocker, not
-indexing or embedding. Next lever is **reranking** or tuning final `limit` / fusion.
 
 **Reproduce shipped eval (needs DB + OpenAI):**
 
@@ -89,6 +87,8 @@ Stored config: `mode=hybrid top_n=20 rrf_k=60 vector_weight=1.0 fts_weight=1.0`.
 | exp2 | FTS weight sweep (on top of exp1+3) | query | 0.850 | 0.792 | 0.736–0.782 | partial | |
 | **exp4** | **NL header + class methods in embedding text** | ingest | **0.850** | **0.850** | 0.773 | **yes (shipped)** | `runs/exp4.json` |
 | **exp5** | **retrieval-time demo-path filter** | query | **0.900** | **0.858** | 0.766 | **yes (shipped)** | `runs/exp5.json` |
+| exp6 | cross-encoder rerank (MiniLM blend rrf_w=0.9) | query | 0.900 | **0.875** | **0.839** | partial | `runs/exp6.json` |
+| **exp6+bge** | **BGE reranker blend rrf_w=0.9** | query | **0.950** | **0.925** | 0.817 | partial | |
 | exp4 (no filter) | exp4 config, filter off (A/B) | query | 0.850 | 0.850 | 0.748 | — | |
 
 **Shipped defaults**: `top_n=60`, `path_penalty=0.3`, `filter_demo_paths=True`,
@@ -110,6 +110,9 @@ Cumulative vs baseline: **hit 0.800→0.900, recall 0.767→0.858, MRR
 | `vector_weight` / `fts_weight` | 1.0 / 1.0 | equal RRF (exp2 showed no gain from tuning) |
 | `path_penalty` | 0.3 | `search.py` `DEFAULT_PATH_PENALTY` |
 | `filter_demo_paths` | True | `search.py` `DEFAULT_FILTER_DEMO_PATHS` |
+| `rerank` | False | `search.py` `DEFAULT_RERANK` (exp6 optional) |
+| `rerank_top_n` / `rerank_rrf_weight` | 30 / 0.9 | `search.py`, `rerank.py` |
+| `rerank_model` | `BAAI/bge-reranker-base` | `rerank.py` `RERANK_MODEL` (exp6 optional) |
 | `limit` (final hydrate) | 10 | `search.py` `DEFAULT_FINAL_LIMIT` |
 | FTS index | split identifiers + OR query | `search_index.py`, `_fts_search` |
 | embedding text | NL header + class methods | `embeddings.py` `build_embedding_text` |
@@ -121,12 +124,13 @@ Demo-path markers (filter + demotion): `tests/`, `test_`, `docs_src/`, `tutorial
 
 | file | exps | role |
 |---|---|---|
-| `app/services/search.py` | 0–3, 5 | hybrid search, RRF, FTS query, demotion, retrieval filter |
+| `app/services/search.py` | 0–3, 5, 6 | hybrid search, RRF, FTS query, demotion, retrieval filter, rerank hook |
+| `app/services/rerank.py` | 6 | cross-encoder rerank stage |
 | `app/services/search_index.py` | 1 | canonical `search_vector` SQL + `--rebuild-fts` helper |
 | `app/services/embeddings.py` | 4 | `build_embedding_text` enrichment |
 | `app/services/parser.py` | — | unchanged; chunk boundaries still default tree-sitter |
 | `app/api/repositories.py` | 1 | prod ingest uses shared `search_vector` expr |
-| `eval/run_eval.py` | 0–5 | harness, flags, ablation, diagnostics |
+| `eval/run_eval.py` | 0–6 | harness, flags, ablation, diagnostics |
 | `eval/ingest_local.py` | 1 | eval ingest + `--rebuild-fts` |
 | `eval/golden_dataset.json` | — | 20 hand-labeled Qs, FastAPI 0.115.6 |
 | `eval/baseline_results.json` | — | frozen baseline metrics + per-question rows |
@@ -140,30 +144,30 @@ Demo-path markers (filter + demotion): `tests/`, `test_`, `docs_src/`, `tutorial
 `↓` = lost vs baseline; `↑` = gained vs baseline. `@N` = best relevant chunk at
 final rank N (miss). `rec` = recall when <1.0 or notably changed.
 
-| q | question (short) | n_rel | baseline | exp1 | exp1+3 | exp4 | exp5 ★ |
-|---|---|---|---|---|---|---|---|
-| q01 | dependency injection | 3 | Y (.33) | Y (F) | Y (.33) | Y (1.0) | Y (.67) |
-| q02 | OpenAPI schema generated | 1 | **.** | **.** | **.** | **.** | **Y ↑** |
-| q03 | path param validation | 2 | **.** | **.** | **.** | **.** | **.** (@9) |
-| q04 | objects → JSON | 1 | Y | Y | Y | Y | Y |
-| q05 | where is Depends | 2 | **.** | Y (F) | Y | Y (1.0) | Y (.5) |
-| q06 | OAuth2 password bearer | 1 | Y | Y | Y | Y | Y |
-| q07 | request validation → HTTP | 1 | Y | Y | Y | Y | Y |
-| q08 | main FastAPI app class | 1 | Y | Y (F) | Y | Y | Y |
-| q09 | uploaded files | 1 | Y | . ↓ | Y | Y | Y |
-| q10 | serialize response model | 1 | **.** | **.** | Y ↑ | Y | Y |
-| q11 | Swagger UI HTML | 1 | Y | Y (F) | Y | Y | Y |
-| q12 | OAuth2 password form | 1 | Y | Y (F) | Y | Y | Y |
-| q13 | API key header auth | 1 | Y | Y (F) | Y | Y | Y |
-| q14 | HTTP exceptions | 2 | Y | Y (F) | Y | Y | Y |
-| q15 | form field parameter | 1 | Y | . ↓ | Y | Y | Y |
-| q16 | APIRouter / sub-routers | 1 | Y | Y | Y | Y | Y |
-| q17 | websocket routes | 1 | Y | . ↓ | . ↓ | . ↓ | **.** (@6) |
-| q18 | path op in OpenAPI | 1 | Y | Y | Y | Y | Y |
-| q19 | HTTP bearer token | 1 | Y | Y | Y | Y | Y |
-| q20 | background tasks | 1 | Y | Y (F) | Y | Y | Y |
+| q | question (short) | n_rel | baseline | exp1 | exp1+3 | exp4 | exp5 ★ | exp6 |
+|---|---|---|---|---|---|---|---|---|
+| q01 | dependency injection | 3 | Y (.33) | Y (F) | Y (.33) | Y (1.0) | Y (.67) | Y (.67) |
+| q02 | OpenAPI schema generated | 1 | **.** | **.** | **.** | **.** | **Y ↑** | Y |
+| q03 | path param validation | 2 | **.** | **.** | **.** | **.** | **.** (@9) | **.** (@9) |
+| q04 | objects → JSON | 1 | Y | Y | Y | Y | Y | Y |
+| q05 | where is Depends | 2 | **.** | Y (F) | Y | Y (1.0) | Y (.5) | Y (.5) |
+| q06 | OAuth2 password bearer | 1 | Y | Y | Y | Y | Y | Y |
+| q07 | request validation → HTTP | 1 | Y | Y | Y | Y | Y | Y |
+| q08 | main FastAPI app class | 1 | Y | Y (F) | Y | Y | Y | Y |
+| q09 | uploaded files | 1 | Y | . ↓ | Y | Y | Y | Y |
+| q10 | serialize response model | 1 | **.** | **.** | Y ↑ | Y | Y | Y |
+| q11 | Swagger UI HTML | 1 | Y | Y (F) | Y | Y | Y | Y |
+| q12 | OAuth2 password form | 1 | Y | Y (F) | Y | Y | Y | Y |
+| q13 | API key header auth | 1 | Y | Y (F) | Y | Y | Y | Y |
+| q14 | HTTP exceptions | 2 | Y | Y (F) | Y | Y | Y | Y |
+| q15 | form field parameter | 1 | Y | . ↓ | Y | Y | Y | Y |
+| q16 | APIRouter / sub-routers | 1 | Y | Y | Y | Y | Y | Y |
+| q17 | websocket routes | 1 | Y | . ↓ | . ↓ | . ↓ | **.** (@6) | **.** (@7) |
+| q18 | path op in OpenAPI | 1 | Y | Y | Y | Y | Y | Y |
+| q19 | HTTP bearer token | 1 | Y | Y | Y | Y | Y | Y |
+| q20 | background tasks | 1 | Y | Y (F) | Y | Y | Y | Y |
 
-★ exp5 = current shipped defaults (exp1+3+4+5).
+★ exp5 = current shipped defaults (exp1+3+4+5). exp6 = exp5 + optional rerank blend.
 
 **Miss progression:** baseline q02,q03,q05,q10 → exp1+3 adds q05,q10, loses q17 →
 exp5 adds q02; still q03,q17.
@@ -367,6 +371,52 @@ chunk displaced). Candidate for reranker / larger final limit.
 
 **Artifacts:** `runs/exp5.json`.
 
+## EXP 6 — Cross-encoder reranker (DONE, partial — not shipped as default)
+
+**Hypothesis:** q03/q17 fail because RRF can't promote the right chunk from a
+mixed pool even when vector/fts both surface it (q03: APIRoute vector@20, fts@17;
+q17: vector@4 but final@6).
+
+**Change shipped:**
+- New `app/services/rerank.py` — `cross-encoder/ms-marco-MiniLM-L-6-v2` scores
+  `(query, chunk_text)` pairs after RRF fusion; chunk text = symbol + path +
+  signature + docstring + body preview.
+- `search.py` — optional final stage: hydrate `rerank_top_n` fused candidates,
+  rerank, cut to `limit`. Knobs: `rerank`, `rerank_top_n`, `rerank_rrf_weight`,
+  `rerank_model`. Default `rerank=False` (no prod latency change).
+- Blended score: `rerank_rrf_weight * norm(RRF) + (1-w) * norm(CE)` — pure CE
+  regresses because the model favors generic OpenAPI helpers over `get_openapi`.
+- Eval flags: `--rerank`, `--rerank-top-n`, `--rerank-rrf-weight`, `--rerank-model`.
+- Dependency: `sentence-transformers` in `pyproject.toml`.
+
+**Result (exp5 config + rerank on vs off):**
+
+| config | hit@5 | recall@5 | MRR |
+|---|---|---|---|
+| exp5 (rerank off) | **0.900** | 0.858 | 0.766 |
+| exp6 pure CE (rrf_w=0.0) | 0.850 ↓ | 0.792 | 0.775 |
+| **exp6 blend MiniLM (rrf_w=0.9)** | **0.900** | **0.875** | **0.839** |
+| **exp6 blend BGE (rrf_w=0.9)** | **0.950** | **0.925** | 0.817 |
+
+**BGE follow-up** (`BAAI/bge-reranker-base`, rrf_w=0.9, rerank_top_n=30): hits
+the ≥0.95 target — fixes **q17** (`APIWebSocketRoute`), only **q03** remains.
+MiniLM top_n=60 at rrf_w=0.9 regressed q02/q17 vs MiniLM top_n=30.
+
+**Interpretation:** Reranking is a real lever. MiniLM blend (+0.017 recall,
++0.073 MRR at rrf_w=0.9) does not fix q03/q17. Pure CE **regresses q02**;
+blending 90% RRF / 10% CE recovers the hit. **BGE reranker** is the better
+model for this stack — promotes websocket routing without dropping OpenAPI hits.
+
+**Residual:** q03 still misses — `APIRoute` final rank 9, `get_request_handler`
+in FTS@6 but outside hydrated rerank pool.
+
+**Conclusion:** Exp6 is worth keeping as an **optional** query-time stage.
+Default model should be **BGE** when rerank is enabled (`--rerank-model
+BAAI/bge-reranker-base`). q03 alone may need exp7 (larger limit) or exp8
+(chunk boundaries).
+
+**Artifacts:** `runs/exp6.json`.
+
 ---
 
 ## Deferred from original plan (not run yet)
@@ -388,18 +438,11 @@ still valid if q03/q17 reranking doesn't close the gap:
 Prioritized by evidence from exp5 residuals. All assume current shipped stack unless
 noted.
 
-### Exp 6 — Cross-encoder reranker (highest priority for q03/q17)
+### Exp 6 — Cross-encoder reranker (DONE — see section above)
 
-**Hypothesis:** q03/q17 fail because RRF can't promote the right chunk from a
-mixed pool even when vector/fts both surface it (q03: APIRoute vector@20, fts@17;
-q17: vector@4 but final@6).
-
-**Approach:** after RRF fusion, take top 20–30 fused candidates, score
-`(query, chunk_text)` with a lightweight cross-encoder (e.g. `ms-marco-MiniLM`),
-re-sort, then cut to `limit`. Keep hybrid retrieval unchanged; rerank is a final stage.
-
-**Test:** `--rerank` flag in `run_eval`; watch q03, q17, ensure no regression on
-q02/q10. Metric target: hit ≥ 0.95.
+**Status:** run; partial. MiniLM blend rrf_w=0.9 preserves hit@5, lifts recall/MRR
+but does not close q03/q17; BGE blend rrf_w=0.9 fixes q17, leaving only q03. Not
+default in prod.
 
 ### Exp 7 — Raise final `limit` / agent context window
 
@@ -454,10 +497,9 @@ Measured pairings so far:
 - **exp3 post-fusion demotion + exp5 retrieval filter = complementary.** Exp3
   reorders what was retrieved; exp5 changes *what gets retrieved*. Both kept:
   filter for the candidate pool, demotion for edge paths that slip through.
-- **Remaining gap = q03/q17 (reranker territory).** q03 has relevant chunks in
-  the pool (vector 20 / FTS 6) but not top-5; q17 at final rank 6. A cross-
-  encoder reranker or higher final `limit` are the natural next steps outside
-  this experiment series.
+- **Remaining gap = q03/q17.** q03 has relevant chunks in the pool (vector 20 /
+  FTS 6) but not top-5; q17 at final rank 6–7. Exp6 rerank did not close the gap.
+  Larger final `limit` (exp7) or class-aware splits (exp8) are the natural next steps.
 
 Current best (shipped) = **exp1 + exp3 + exp4 + exp5** → **0.900 / 0.858 / 0.766**
 vs baseline 0.800 / 0.767 / 0.649. Remaining misses: **q03, q17**.

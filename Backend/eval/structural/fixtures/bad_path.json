@@ -1,0 +1,15 @@
+{
+  "title": "Hallucinated path",
+  "topic": "path failure",
+  "repo_name": "tiangolo/fastapi",
+  "steps": [
+    {
+      "title": "Nowhere file",
+      "explanation": "This file does not exist in the repo.",
+      "file_path": "fastapi/nonexistent_module.py",
+      "start_line": 1,
+      "end_line": 1,
+      "snippet": "pass"
+    }
+  ]
+}
