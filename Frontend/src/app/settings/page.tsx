@@ -1,6 +1,5 @@
 "use client";
 
-import Header from "@/components/header";
 import { GitHub } from "@/icons/Github";
 import { Show, SignInButton } from "@clerk/nextjs";
 import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
@@ -65,9 +64,8 @@ export default function Settings() {
   }, []);
 
   return (
-    <div className="flex w-full flex-col min-h-screen">
-      <Header />
-      <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 px-8 pb-16">
+    <div className="flex w-full flex-col min-h-full">
+      <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 px-8 py-12">
         <div className="flex flex-col gap-1">
           <h1 className="text-2xl font-semibold">Settings</h1>
           <p className="text-sm text-muted-foreground">

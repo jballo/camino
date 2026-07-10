@@ -1,6 +1,5 @@
 "use client";
 
-import Header from "@/components/header";
 import type { JourneyStatus, JourneySummary } from "@/types/tour";
 import { Button } from "@headlessui/react";
 import {
@@ -88,9 +87,8 @@ export default function ToursList() {
   }, [loadTours]);
 
   return (
-    <div className="flex flex-col w-full min-h-screen">
-      <Header />
-      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 px-8 pb-16">
+    <div className="flex flex-col w-full min-h-full">
+      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 px-8 py-12">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-semibold">Your tours</h1>
           <Button

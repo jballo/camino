@@ -1,6 +1,5 @@
 "use client";
 
-import Header from "@/components/header";
 import type { JourneyResponse, TourStep } from "@/types/tour";
 import {
   AlertTriangle,
@@ -75,8 +74,7 @@ export default function TourReader({
 
   if (loading) {
     return (
-      <div className="flex flex-col w-full min-h-screen">
-        <Header />
+      <div className="flex flex-col w-full min-h-full">
         <div className="flex flex-1 items-center justify-center">
           <Loader2 className="size-6 animate-spin text-muted-foreground" />
         </div>
@@ -86,8 +84,7 @@ export default function TourReader({
 
   if (error || !journey) {
     return (
-      <div className="flex flex-col w-full min-h-screen">
-        <Header />
+      <div className="flex flex-col w-full min-h-full">
         <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center px-8">
           <AlertTriangle className="size-10 text-destructive" />
           <p className="text-sm text-muted-foreground">
@@ -104,8 +101,7 @@ export default function TourReader({
   if (journey.status !== "complete" || !artifact) {
     const isFailed = journey.status === "failed";
     return (
-      <div className="flex flex-col w-full min-h-screen">
-        <Header />
+      <div className="flex flex-col w-full min-h-full">
         <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center px-8">
           {isFailed ? (
             <AlertTriangle className="size-10 text-destructive" />
@@ -132,9 +128,8 @@ export default function TourReader({
   }
 
   return (
-    <div className="flex flex-col w-full min-h-screen">
-      <Header />
-      <div className="mx-auto flex w-full max-w-[1400px] flex-1 flex-col gap-6 px-8 pb-16 lg:flex-row">
+    <div className="flex flex-col w-full min-h-full">
+      <div className="mx-auto flex w-full max-w-[1400px] flex-1 flex-col gap-6 px-8 py-12 lg:flex-row">
         {/* Table of contents */}
         <aside className="w-full shrink-0 lg:sticky lg:top-8 lg:h-fit lg:w-64">
           <Link

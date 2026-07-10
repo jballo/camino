@@ -1,6 +1,5 @@
 "use client";
 
-import Header from "@/components/header";
 import { Button, Textarea } from "@headlessui/react";
 import {
   ArrowUp,
@@ -159,9 +158,8 @@ export default function Explore() {
   }, [selectedRepo, query]);
 
   return (
-    <div className="flex flex-col w-full min-h-screen">
-      <Header />
-      <div className="flex flex-1 w-full flex-col lg:flex-row gap-6 px-8 pb-12 max-w-[1400px] mx-auto">
+    <div className="flex flex-col w-full min-h-full">
+      <div className="flex flex-1 w-full flex-col lg:flex-row gap-6 px-8 py-12 max-w-[1400px] mx-auto">
         {/* Repositories panel */}
         <aside className="w-full lg:w-80 shrink-0 flex flex-col gap-4">
           <div className="flex items-center justify-between">

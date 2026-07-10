@@ -1,6 +1,5 @@
 "use client";
 
-import Header from "@/components/header";
 import type { JourneyResponse, JourneyStatus } from "@/types/tour";
 import {
   AlertTriangle,
@@ -103,9 +102,8 @@ function GenerateInner() {
   const currentRank = statusRank(currentStatus);
 
   return (
-    <div className="flex flex-col w-full min-h-screen">
-      <Header />
-      <div className="flex flex-1 flex-col items-center justify-center px-8 pb-24">
+    <div className="flex flex-col w-full min-h-full">
+      <div className="flex flex-1 flex-col items-center justify-center px-8 py-12">
         <div className="flex w-full max-w-md flex-col gap-8">
           {error ? (
             <div className="flex flex-col items-center gap-4 text-center">
@@ -177,8 +175,7 @@ export default function Generate() {
   return (
     <Suspense
       fallback={
-        <div className="flex flex-col w-full min-h-screen">
-          <Header />
+        <div className="flex flex-col w-full min-h-full">
           <div className="flex flex-1 items-center justify-center">
             <Loader2 className="size-6 animate-spin text-muted-foreground" />
           </div>

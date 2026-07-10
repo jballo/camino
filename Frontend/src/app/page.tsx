@@ -1,6 +1,5 @@
 "use client";
 
-import Header from "@/components/header";
 import { Button, Label, Radio, RadioGroup, Textarea } from "@headlessui/react";
 import {
   CheckCircleIcon,
@@ -139,12 +138,8 @@ export default function Home() {
   }, [repoSelected]);
 
   return (
-    <div className="flex flex-col w-full h-screen">
-      <div className="flex w-full h-1/12">
-        <Header />
-      </div>
-      <div className="flex flex-col justify-center items-center w-full h-11/12">
-        <div className="flex flex-col justify-center items-center w-2/3 gap-3 -mt-24 max-w-[760px]">
+    <div className="flex flex-col justify-center items-center w-full min-h-full">
+      <div className="flex flex-col justify-center items-center w-full max-w-[760px] px-8 py-12 gap-3">
           <div className="flex flex-col items-center gap-2 text-center">
             <h2 className="text-4xl">Generate a guided tour</h2>
             <p className="text-sm text-muted-foreground max-w-md">
@@ -288,7 +283,6 @@ export default function Home() {
               </Dialog>
           </div>
         </div>
-      </div>
     </div>
   );
 }
