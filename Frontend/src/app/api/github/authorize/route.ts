@@ -28,15 +28,21 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(signInUrl);
   }
 
+  const storedState = req.cookies.get("gh_oauth_state")?.value;
+  const hasValidState = Boolean(state && storedState && state === storedState);
+
   // No OAuth code means this is an installation *update* (repos added/removed),
-  // not a fresh authorization. Nothing to exchange — just return to the app.
+  // not a fresh authorization. Only show success for callbacks with valid state.
   if (code === null) {
-    return settingsRedirect("update", false);
+    if (!hasValidState) {
+      return NextResponse.redirect(new URL("/settings", appUrl));
+    }
+
+    return settingsRedirect("update");
   }
 
   try {
-    const storedState = req.cookies.get("gh_oauth_state")?.value;
-    if (!state || !storedState || state !== storedState)
+    if (!hasValidState)
       throw new Error(`Invalid state - possible CSRF`);
 
     const token = await getToken();
