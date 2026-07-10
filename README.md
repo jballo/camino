@@ -11,11 +11,13 @@ Built for new hires, OSS contributors, and anyone who's opened a repo and though
 
 ## Where we are
 
-**Phase 1 — Retrieval engine + ask-the-codebase** · `🟡 In progress`
+**Phase 2 — Guided tours** · `✅ M5 implemented`
 
 The core indexing and hybrid-search pipeline is **built and tuned**. A LangGraph ReAct
 agent can answer natural-language questions about an ingested repo, grounded in retrieved
-code chunks. The web app supports GitHub connect → ingest → Q&A on `/explore`.
+code chunks. Phase 2 now has the full guided-tour path: a Plan → Retrieve → Draft →
+Review generator, persisted journey jobs, polling/list APIs, a Next.js journeys proxy,
+the `/generate` polling page, the `/tours` library, and the `/tours/{id}` reader UI.
 
 What works today:
 
@@ -25,12 +27,16 @@ What works today:
 | Repo ingest (clone → parse → embed → index) | ✅ Python, JS, TS/TSX |
 | Hybrid retrieval (pgvector + FTS + RRF) | ✅ shipped stack (exp1–5) |
 | Retrieval eval harness | ✅ 20-question FastAPI golden set |
+| Agent smoke eval | ✅ live agent + citation validity checks |
+| Structural tour eval | ✅ schema + path/line/snippet fixture checks |
+| LLM-as-judge tour eval | ✅ faithfulness/relevance/completeness/ordering + baseline |
 | ReAct Q&A agent | ✅ `/explore` + `/api/v1/agent/ask` |
-| Guided tour generation | ❌ not started (journeys endpoint is a stub) |
+| Guided tour generation | ✅ backend pipeline + jobs/API + frontend flow |
 | Production deploy | ❌ local dev only |
 
-**Eval hero repo:** [FastAPI 0.115.6](https://github.com/tiangolo/fastapi) — see
-[Backend/eval/EXPERIMENTS.md](Backend/eval/EXPERIMENTS.md) for the full experiment log.
+**Eval hero repo:** [FastAPI 0.115.6](https://github.com/tiangolo/fastapi). See
+[Backend/eval/README.md](Backend/eval/README.md) for current harnesses and
+[Backend/eval/EXPERIMENTS.md](Backend/eval/EXPERIMENTS.md) for the retrieval experiment log.
 
 ---
 
@@ -42,16 +48,16 @@ flowchart LR
   P2 --> P3["Phase 3<br/>Production"]
   P3 --> P4["Phase 4<br/>CLI + PR bot"]
 
-  style P1 fill:#fef3c7,stroke:#d97706
-  style P2 fill:#e0e7ff,stroke:#4f46e5
+  style P1 fill:#f0fdf4,stroke:#16a34a
+  style P2 fill:#fef3c7,stroke:#d97706
   style P3 fill:#f3f4f6,stroke:#6b7280
   style P4 fill:#f3f4f6,stroke:#6b7280
 ```
 
 | Phase | Goal | Key deliverables |
 |---|---|---|
-| **1 — Now** | Best-in-class retrieval for code Q&A | Cross-encoder reranker (exp6), close q03/q17 gap |
-| **2 — Next** | Structured guided tours | Plan → Retrieve → Draft → Review pipeline, tour reader UI, shareable URLs |
+| **1 — Done** | Best-in-class retrieval for code Q&A | exp1–5 shipped (0.900 hit@5); optional exp6 BGE reranker (0.950, closes q17); q03 last miss |
+| **2 — Now** | Structured guided tours | End-to-end tour generation flow built; M5 LLM-as-judge eval + failure-mode docs landed |
 | **3** | Ship to users | AWS (ECS, RDS, S3, SQS), observability (Langfuse), rate limits |
 | **4 — Stretch** | Meet devs where they work | CLI (`onboard generate`), PR reviewer bot |
 
@@ -65,8 +71,11 @@ The north star hasn't changed: **web app first, CLI later, PR reviewer bot event
 flowchart TB
   subgraph frontend [Frontend — Next.js]
     Clerk[Clerk auth]
+    Settings["/settings — GitHub connection"]
     Explore["/explore — ingest + Q&A"]
-    Home["/ — tour request (stub)"]
+    Home["/ — guided tour request form"]
+    TourUI["/generate + /tours — tour polling + reader"]
+    Proxy["/api/journeys — Clerk-auth proxy"]
   end
 
   subgraph backend [Backend — FastAPI]
@@ -76,20 +85,30 @@ flowchart TB
     Embed[OpenAI embeddings]
     Search[Hybrid search — pgvector + FTS + RRF]
     Agent[LangGraph ReAct agent]
+    Journeys["/api/v1/journeys — jobs + polling"]
+    TourGraph["Tour graph<br/>Plan → Retrieve → Draft → Review"]
   end
 
   subgraph data [Postgres + pgvector]
     Chunks[(code_chunks)]
     Vectors[(code_chunk_embeddings)]
+    Jobs[(tour_jobs)]
   end
 
+  Clerk --> Settings
   Clerk --> Explore
+  Clerk --> Home
   Explore --> GH
   Explore --> Ingest
   Explore --> Agent
+  Home --> Proxy --> Journeys
+  TourUI --> Proxy
+  Journeys --> TourGraph
   Ingest --> Parser --> Embed --> Chunks
   Embed --> Vectors
   Agent --> Search
+  TourGraph --> Search
+  Journeys --> Jobs
   Search --> Chunks
   Search --> Vectors
 ```
@@ -118,25 +137,34 @@ npm install
 npm run dev            # http://localhost:3000
 ```
 
-1. Sign in → install the GitHub App (header menu).
-2. Open **Explore** → select a repo → **Process** (ingest).
-3. Ask a question — the agent retrieves code and answers with citations.
+1. Sign in → open **Settings** → connect or manage the GitHub App.
+2. Open **Explore** → select a repo → **Process** (ingest). The repo must be indexed
+   before Q&A or tour generation can use it.
+3. Ask a question in **Explore**, or go back to **Home** to generate a tour:
+   select the processed repo, enter a topic such as "authentication flow", and click
+   **Generate tour**.
+4. Camino routes to `/generate?id=...`, polls the job, then opens `/tours/{id}` when
+   the grounded tour is ready.
 
-Details: [Backend/README.md](Backend/README.md) · [Frontend/README.md](Frontend/README.md)
+Details: [Backend/README.md](Backend/README.md) · [Frontend/README.md](Frontend/README.md) ·
+[Backend/eval/README.md](Backend/eval/README.md)
 
 ---
 
 ## Now / next 3 actions
 
-1. **Exp 6 — cross-encoder reranker** — close the last 2 retrieval misses (q03, q17) on
-   the FastAPI golden set; target hit@5 ≥ 0.95.
-2. **Tour generation pipeline** — replace the ReAct Q&A stub with Plan → Retrieve →
-   Draft → Review → structured tour artifact.
-3. **Tour reader UI** — render tour steps with syntax highlighting, TOC, and file paths
-   (wire up `/tours` and the home-page journeys flow).
+1. **Expand the eval set** — LLM-as-judge is live over 3 topics on FastAPI; broaden to
+   2–3 repos (~35–40 topics) and cross-check with a stronger `--judge-model` to gauge
+   self-preference bias.
+2. **CI eval gates** — keep the no-LLM tour tests (`test_tour_judge.py`,
+   `run_structural_eval`) blocking; run the live judge on a schedule against
+   `judge_baseline.json` rather than blocking PRs on it.
+3. **Decide reranker in prod** — exp6 is done and off by default; ship BGE only if the
+   +0.05 hit@5 justifies the latency, or leave query-time only for now.
 
-**Blocked / open questions:** none critical — reranker model choice (latency vs accuracy)
-is the main open decision before Phase 2.
+**Retrieval status:** loop paused. exp6 (cross-encoder reranker) is complete — BGE blend
+hits the ≥0.95 target and closes q17; only q03 remains. Kept optional (off by default) to
+avoid prod latency. No critical retrieval blockers for the current Phase 2 eval work.
 
 ---
 
@@ -155,20 +183,26 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [~] Multi-language support — Python + JS/TS/TSX done; Go/Rust not yet
 
 ### Tour generation (the agent)
-- [~] LangGraph agent — ReAct Q&A with `hybrid_search` tool works; full tour pipeline not built
-- [ ] Structured tour artifact (steps: title, explanation, snippet, path, lines, "why")
+- [x] LangGraph Q&A agent — ReAct with `hybrid_search` tool works on `/explore`
+- [x] Tour graph — Plan → Retrieve → Draft → Review with bounded repair loop
+- [x] Structured tour artifact (steps: title, explanation, snippet, path, lines, "why")
+- [x] Deterministic grounding — snippets/path/lines extracted from retrieved chunks
+- [x] Journey persistence/API — `tour_jobs`, `POST /api/v1/journeys`, `GET /{id}`, `GET ?repo=`
 - [~] Model routing — single model (`gpt-4o-mini`); no cheap/expensive split yet
 - [ ] Suggested tour topics auto-generated from repo structure
 
 ### Web app
-- [~] Request-a-tour form — home page UI exists; `/api/journeys` is a stub
+- [x] Request-a-tour form — select repo, enter topic, create journey, route to `/generate`
 - [x] Explore page — repo list, ingest, ask-the-codebase with source citations
-- [ ] Tour reader page (syntax highlighting, TOC, file paths, navigation)
-- [ ] Generation status / polling page
+- [x] Tour reader page — TOC, markdown explanations, file paths, line-numbered snippets
+- [x] Generation status / polling page
+- [x] Tours library page
+- [x] Settings page — GitHub connection status plus install/manage-repositories entry point
 - [x] Clerk auth (sign-in, session JWT to backend)
 - [x] GitHub App connect + repo listing
 - [ ] Shareable tour URLs
-- [~] Error handling — basic; needs clone-fail / repo-too-large / bad-LLM paths
+- [~] Error handling — tour flow (`/`, `/generate`, `/tours`, `/tours/{id}`) surfaces expired-session (401/403), not-found (404), and backend errors distinctly; still needs clone-fail / repo-too-large / bad-LLM paths
+- [ ] Shared BFF proxy/auth wrapper — centralize Clerk auth + status-code forwarding for `/api/**` routes (tour doc §13)
 - [ ] Rate limiting
 
 ### CLI (stretch)
@@ -190,8 +224,10 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 ### Evaluation (the differentiator)
 - [x] Golden retrieval dataset (20 questions → expected files/symbols, FastAPI 0.115.6)
 - [x] Retrieval eval script (hit rate, recall@k, precision@k, MRR, ablation mode)
-- [ ] Structural evals (valid JSON, paths exist, line numbers in bounds, snippets match)
-- [ ] LLM-as-judge (faithfulness, relevance, completeness, ordering)
+- [x] Agent smoke eval (live ReAct path + citation parser/validator)
+- [x] Structural evals (schema + path/line/snippet validators, fixture CLI — no LLM)
+- [x] Tour route tests (`POST`, poll, list, auth/ownership, DB failures)
+- [x] LLM-as-judge (faithfulness, relevance, completeness, ordering) + committed baseline
 - [ ] Eval suite across 2–3 repos (~35–40 questions total)
 - [ ] Eval gates in CI (GitHub Actions, fail on regression)
 
@@ -200,9 +236,9 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [ ] Cost + latency surfaced (per-tour token cost, model routing, step latency)
 
 ### Ship
-- [~] README: overview, architecture, run instructions (this file)
-- [~] README: eval results table (retrieval filled; LLM-as-judge pending)
-- [ ] README: known limitations & failure modes
+- [x] README: overview, architecture, run instructions (this file)
+- [x] README: eval results table (retrieval + LLM-as-judge filled)
+- [x] README: known limitations & failure modes (tour doc §12)
 - [ ] Langfuse + CloudWatch screenshots
 - [ ] Medium blog post
 - [ ] Live end-to-end test (web + CLI)
@@ -215,20 +251,43 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 Retrieval on FastAPI 0.115.6 (20 questions, k=5) — full log in
 [Backend/eval/EXPERIMENTS.md](Backend/eval/EXPERIMENTS.md):
 
-| Metric | Baseline | Shipped (exp1+3+4+5) |
-|---|---|---|
-| Hit rate@5 | 0.800 | **0.900** |
-| Recall@5 | 0.767 | **0.858** |
-| MRR | 0.649 | **0.766** |
+| Metric | Baseline | Shipped (exp1+3+4+5) | +exp6 BGE rerank (optional) |
+|---|---|---|---|
+| Hit rate@5 | 0.800 | **0.900** | **0.950** |
+| Recall@5 | 0.767 | **0.858** | **0.925** |
+| MRR | 0.649 | 0.766 | 0.817 |
 
-Still missing: q03 (path param validation), q17 (websocket routes) — reranker territory.
+Shipped default (rerank off) still misses q03 (path param validation) and q17 (websocket
+routes). The optional exp6 BGE reranker closes **q17**, leaving **q03** as the only miss —
+its labeled chunks sit in the fused pool (vector@20 / FTS@6) but not top-5, so it needs a
+larger final limit (exp7) or class-aware chunk splits (exp8), not more reranking.
 
-LLM-as-judge: _not run yet_
+Additional harnesses now available:
+
+- Agent smoke eval: `uv run python -m eval.run_agent_smoke_eval --strict`
+- Structural tour eval: `uv run python -m eval.run_structural_eval`
+- Live tour smoke eval: `uv run python -m eval.run_tour_smoke_eval`
+- LLM-as-judge tour eval: `uv run python -m eval.run_tour_judge_eval`
+
+Tour quality (LLM-as-judge, FastAPI 0.115.6, 3 topics, `gpt-4o-mini`) — baseline in
+[Backend/eval/judge_baseline.json](Backend/eval/judge_baseline.json):
+
+| Dimension | Avg (1–5) |
+|---|---|
+| Faithfulness | 4.95 |
+| Relevance | 4.81 |
+| Completeness | 3.67 |
+| Ordering | 4.33 |
+| **Overall** | **4.44** |
+
+Completeness is the weakest dimension — expected, since snippets are grounded by
+construction while topic *coverage* is the hard part. See failure modes in
+[docs/tour-generation.md](docs/tour-generation.md) §12.
 
 ---
 
 ## Cut these first if behind
 
-1. CLI · 2. Third eval repo · 3. CI eval gates · 4. LLM-as-judge
+1. CLI · 2. Third eval repo · 3. CI eval gates
 
 **Never cut:** README + honest failure analysis.
