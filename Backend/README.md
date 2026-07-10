@@ -1,7 +1,7 @@
 # Camino — Backend
 
-FastAPI service: GitHub repo ingest, hybrid code search, ask-the-codebase Q&A, and
-backend guided-tour generation.
+FastAPI service: GitHub App connection storage, repo ingest, hybrid code search,
+ask-the-codebase Q&A, and backend guided-tour generation.
 
 **Retrieval loop:** paused at a tuned stack — exp1–5 shipped (hit@5 0.900), plus an
 optional exp6 cross-encoder reranker (BGE blend → 0.950). See
@@ -101,7 +101,10 @@ eval/
 
 | Method | Path | Description |
 |---|---|---|
+| `GET` | `/api/v1/github/connection/{userId}` | Return GitHub connection status for settings UI |
+| `POST` | `/api/v1/github/connect` | Exchange GitHub OAuth code and persist encrypted installation credentials |
 | `GET` | `/api/v1/repositories/{userId}` | List repos for GitHub installation |
+| `GET` | `/api/v1/repositories/{userId}/processed` | List indexed repos and chunk counts for the installation |
 | `POST` | `/api/v1/repositories/ingest` | Clone + parse + embed a repo |
 | `POST` | `/api/v1/repositories/search` | Direct hybrid search (no agent) |
 | `POST` | `/api/v1/agent/ask` | Ask the codebase (ReAct agent) |

@@ -71,6 +71,7 @@ The north star hasn't changed: **web app first, CLI later, PR reviewer bot event
 flowchart TB
   subgraph frontend [Frontend — Next.js]
     Clerk[Clerk auth]
+    Settings["/settings — GitHub connection"]
     Explore["/explore — ingest + Q&A"]
     Home["/ — guided tour request form"]
     TourUI["/generate + /tours — tour polling + reader"]
@@ -94,6 +95,7 @@ flowchart TB
     Jobs[(tour_jobs)]
   end
 
+  Clerk --> Settings
   Clerk --> Explore
   Clerk --> Home
   Explore --> GH
@@ -135,7 +137,7 @@ npm install
 npm run dev            # http://localhost:3000
 ```
 
-1. Sign in → install the GitHub App (header menu).
+1. Sign in → open **Settings** → connect or manage the GitHub App.
 2. Open **Explore** → select a repo → **Process** (ingest). The repo must be indexed
    before Q&A or tour generation can use it.
 3. Ask a question in **Explore**, or go back to **Home** to generate a tour:
@@ -144,7 +146,8 @@ npm run dev            # http://localhost:3000
 4. Camino routes to `/generate?id=...`, polls the job, then opens `/tours/{id}` when
    the grounded tour is ready.
 
-Details: [Backend/README.md](Backend/README.md) · [Frontend/README.md](Frontend/README.md)
+Details: [Backend/README.md](Backend/README.md) · [Frontend/README.md](Frontend/README.md) ·
+[Backend/eval/README.md](Backend/eval/README.md)
 
 ---
 
@@ -194,6 +197,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [x] Tour reader page — TOC, markdown explanations, file paths, line-numbered snippets
 - [x] Generation status / polling page
 - [x] Tours library page
+- [x] Settings page — GitHub connection status plus install/manage-repositories entry point
 - [x] Clerk auth (sign-in, session JWT to backend)
 - [x] GitHub App connect + repo listing
 - [ ] Shareable tour URLs
@@ -232,7 +236,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [ ] Cost + latency surfaced (per-tour token cost, model routing, step latency)
 
 ### Ship
-- [~] README: overview, architecture, run instructions (this file)
+- [x] README: overview, architecture, run instructions (this file)
 - [x] README: eval results table (retrieval + LLM-as-judge filled)
 - [x] README: known limitations & failure modes (tour doc §12)
 - [ ] Langfuse + CloudWatch screenshots

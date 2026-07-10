@@ -1,12 +1,17 @@
 # Eval Harnesses
 
-Three eval harnesses live here:
+Five eval harnesses live here:
 
 1. **Retrieval eval** — does hybrid search surface the right chunks? (needs DB + OpenAI)
 2. **Agent smoke eval** — does the live agent answer with structurally valid code citations? (needs DB + OpenAI)
 3. **Structural eval** — does a tour artifact parse, reference real files, and quote matching source? (no LLM, no DB)
+4. **Live tour smoke eval** — can the generation graph produce a grounded tour end to end? (needs DB + OpenAI)
+5. **Tour judge eval** — does an LLM judge score generated tours for faithfulness, relevance, completeness, and ordering? (needs OpenAI; DB only for live generation)
 
-Retrieval work is paused at a strong baseline; structural eval is the active track for Phase 2 tour generation. Agent smoke eval is a lightweight end-to-end check over the current ReAct answer path.
+Retrieval work is paused at the shipped exp1+3+4+5 stack. Tour evaluation now has
+both deterministic grounding checks and an LLM-as-judge baseline for quality trends.
+Agent smoke eval remains a lightweight end-to-end check over the current ReAct answer
+path.
 
 ## Files
 
@@ -15,6 +20,9 @@ Retrieval work is paused at a strong baseline; structural eval is the active tra
 - `run_eval.py` — runs each question through `hybrid_search` and reports hit rate, recall@k, precision@k, MRR.
 - `run_agent_smoke_eval.py` — runs the live LangGraph agent on selected golden questions, parses answer citations, and validates citation paths/line ranges.
 - `run_structural_eval.py` — runs tour JSON fixtures through schema + repo-grounding validators.
+- `run_tour_smoke_eval.py` — generates live tours for smoke topics and validates their grounded artifact shape.
+- `run_tour_judge_eval.py` — scores live or fixture tours with the judge rubric.
+- `judge/` — structured judge schemas, prompt, model call, and aggregate score reduction.
 - `structural/` — tour schema validators (`validate.py`), citation validators (`citations.py`), hand-written pass/fail fixtures, and the smoke question manifest.
 - `baseline_results.json` — recorded retrieval baseline numbers.
 - `judge_baseline.json` — recorded tour judge baseline (aggregate + per-topic scores).
@@ -116,8 +124,8 @@ Fixtures live in `structural/fixtures/` (`valid_minimal`, `bad_path`, `bad_lines
 `.data/fastapi` when missing (same pin as the retrieval golden set). No database or
 OpenAI key required.
 
-When the tour generation pipeline exists, point the same `validate_tour()` helper at
-live agent output before persisting or returning tours.
+The live generation pipeline uses the same grounding contract before persisted tours
+are returned to the frontend.
 
 ## Tour judge eval (LLM-as-judge)
 
@@ -178,15 +186,15 @@ than gating on a single number. The current baseline aggregate:
 Completeness is the weakest dimension — expected, since grounding-by-construction makes
 faithfulness easy while topic *coverage* is the hard part. It's the number to watch.
 
-## Baseline (FastAPI 0.115.6, k=5, retrieve 10)
+## Retrieval Results (FastAPI 0.115.6, k=5)
 
-| Metric | Value |
-|---|---|
-| Hit rate@5 | 0.800 |
-| Recall@5 | 0.767 |
-| Precision@5 | 0.170 |
-| MRR | 0.649 |
+| Metric | Baseline | Shipped (exp1+3+4+5) | +exp6 BGE rerank (optional) |
+|---|---|---|---|
+| Hit rate@5 | 0.800 | **0.900** | **0.950** |
+| Recall@5 | 0.767 | **0.858** | **0.925** |
+| MRR | 0.649 | 0.766 | 0.817 |
 
 The whole repo is ingested (including `tests/` and `docs_src/`) to match production
 ingest behavior; those paths are the main source of misses, crowding out library
-internals for several queries.
+internals for several queries. The optional BGE reranker closes q17, leaving q03 as
+the remaining miss in the current golden set.
