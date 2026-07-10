@@ -12,6 +12,23 @@ import os
 import random
 import time
 
+from app.services.embeddings import (
+    EMBED_DIMENSIONS,
+    EMBED_MODEL,
+    EmbeddingError,
+    build_embedding_text,
+    embed_all,
+)
+from app.models.code import CodeChunkEmbedding, CodeChunkModel
+from app.config import settings
+from app.db import SessionDep
+from app.models.github_connection import GithubConnections
+from app.security import get_authenticated_user_id
+from app.services.parser import LANGUAGES, MAX_FILE_BYTES, SKIP_DIRS, parse_file
+
+from app.services.search import hybrid_search
+from app.services.search_index import populate_search_vector_sql
+
 logger = logging.getLogger(__name__)
 
 # GitHub transient upstream errors worth retrying.
@@ -38,23 +55,6 @@ async def _gh_with_retry(fn, what, attempts=4, base_delay=0.5):
                 what, status, attempt, attempts, delay,
             )
             await asyncio.sleep(delay)
-
-from app.services.embeddings import (
-    EMBED_DIMENSIONS,
-    EMBED_MODEL,
-    EmbeddingError,
-    build_embedding_text,
-    embed_all,
-)
-from app.models.code import CodeChunkEmbedding, CodeChunkModel
-from app.config import settings
-from app.db import SessionDep
-from app.models.github_connection import GithubConnections
-from app.security import get_authenticated_user_id
-from app.services.parser import LANGUAGES, MAX_FILE_BYTES, SKIP_DIRS, parse_file
-
-from app.services.search import hybrid_search
-from app.services.search_index import populate_search_vector_sql
 
 
 router = APIRouter()
@@ -246,10 +246,7 @@ async def process_repository(
             )
 
             try:
-                source_bytes = await _gh_with_retry(
-                    lambda fc=file_content: fc.decoded_content,
-                    f"decoded_content:{file_content.path}",
-                )
+                source_bytes = file_content.decoded_content
             except AssertionError:
                 continue
 

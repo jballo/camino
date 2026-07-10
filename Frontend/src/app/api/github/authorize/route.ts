@@ -8,11 +8,14 @@ export async function GET(req: NextRequest) {
   const state = searchParams.get("state");
 
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? req.nextUrl.origin;
-  const settingsRedirect = (status: string) => {
+  const settingsRedirect = (status: string, clearState = true) => {
     const url = new URL("/settings", appUrl);
     url.searchParams.set("github", status);
     const res = NextResponse.redirect(url);
-    res.cookies.delete("gh_oauth_state");
+    // Only clear the CSRF state cookie when we actually consumed it as part of
+    // an authorization exchange. Clearing it on unrelated requests would break
+    // a concurrent in-progress OAuth flow.
+    if (clearState) res.cookies.delete("gh_oauth_state");
     return res;
   };
 
@@ -28,7 +31,7 @@ export async function GET(req: NextRequest) {
   // No OAuth code means this is an installation *update* (repos added/removed),
   // not a fresh authorization. Nothing to exchange — just return to the app.
   if (code === null) {
-    return settingsRedirect("update");
+    return settingsRedirect("update", false);
   }
 
   try {

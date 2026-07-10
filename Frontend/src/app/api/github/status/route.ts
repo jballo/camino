@@ -40,10 +40,7 @@ export async function GET() {
       detail,
     );
     return NextResponse.json(
-      {
-        error: `Backend returned ${response.status}`,
-        detail: detail.slice(0, 500),
-      },
+      { error: `Backend returned ${response.status}` },
       { status: response.status },
     );
   }
