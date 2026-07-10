@@ -5,7 +5,7 @@ export async function GET() {
   const { isAuthenticated, userId, getToken } = await auth();
   const user = await currentUser();
 
-  if (!isAuthenticated || user === null) {
+  if (!isAuthenticated || userId === null || user === null) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
 

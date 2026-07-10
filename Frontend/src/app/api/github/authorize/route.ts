@@ -22,7 +22,7 @@ export async function GET(req: NextRequest) {
   const { isAuthenticated, userId, getToken } = await auth();
   const user = await currentUser();
 
-  if (!isAuthenticated || user === null) {
+  if (!isAuthenticated || userId === null || user === null) {
     const signInUrl = new URL("/sign-in", appUrl);
     signInUrl.searchParams.set("redirect_url", "/settings");
     return NextResponse.redirect(signInUrl);
