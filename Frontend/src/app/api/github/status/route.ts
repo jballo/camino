@@ -40,7 +40,7 @@ export async function GET() {
       detail,
     );
     return NextResponse.json(
-      { error: `Backend returned ${response.status}` },
+      { error: "Backend unreachable" },
       { status: response.status },
     );
   }
