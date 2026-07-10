@@ -6,11 +6,38 @@ from requests.exceptions import RequestException, Timeout
 from sqlalchemy import exc, func, text
 from sqlmodel import delete, select
 
+import asyncio
 import logging
 import os
+import random
 import time
 
 logger = logging.getLogger(__name__)
+
+# GitHub transient upstream errors worth retrying.
+_RETRYABLE_GH_STATUS = {500, 502, 503, 504}
+
+
+async def _gh_with_retry(fn, what, attempts=4, base_delay=0.5):
+    """Call a GitHub-hitting function, retrying transient 5xx errors.
+
+    Retries with exponential backoff + jitter. Re-raises immediately on
+    non-retryable errors (e.g. 404) or once attempts are exhausted.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except GithubException as e:
+            status = getattr(e, "status", None)
+            if status not in _RETRYABLE_GH_STATUS or attempt == attempts:
+                raise
+            delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.25)
+            logger.warning(
+                "github transient error, retrying | what=%s status=%s "
+                "attempt=%d/%d sleep=%.2fs",
+                what, status, attempt, attempts, delay,
+            )
+            await asyncio.sleep(delay)
 
 from app.services.embeddings import (
     EMBED_DIMENSIONS,
@@ -179,7 +206,10 @@ async def process_repository(
         )
 
         phase = "walk"
-        contents = repo_selected.get_contents("")
+        contents = await _gh_with_retry(
+            lambda: repo_selected.get_contents(""),
+            "get_contents:root",
+        )
         all_chunks = []
         while contents:
             file_content = contents.pop(0)
@@ -191,7 +221,11 @@ async def process_repository(
 
             if file_content.type == "dir":
                 dirs_walked += 1
-                contents.extend(repo_selected.get_contents(file_content.path))
+                sub = await _gh_with_retry(
+                    lambda p=file_content.path: repo_selected.get_contents(p),
+                    f"get_contents:{file_content.path}",
+                )
+                contents.extend(sub)
                 continue
 
             if file_content.type != "file":
@@ -212,7 +246,10 @@ async def process_repository(
             )
 
             try:
-                source_bytes = file_content.decoded_content
+                source_bytes = await _gh_with_retry(
+                    lambda fc=file_content: fc.decoded_content,
+                    f"decoded_content:{file_content.path}",
+                )
             except AssertionError:
                 continue
 

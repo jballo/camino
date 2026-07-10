@@ -1,12 +1,16 @@
 import { auth } from "@clerk/nextjs/server";
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import crypto from "crypto";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const { isAuthenticated } = await auth();
 
-  if (!isAuthenticated)
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!isAuthenticated) {
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? req.nextUrl.origin;
+    const signInUrl = new URL("/sign-in", appUrl);
+    signInUrl.searchParams.set("redirect_url", "/settings");
+    return NextResponse.redirect(signInUrl);
+  }
 
   const state = crypto.randomBytes(32).toString("hex");
   const ghUrl = `https://github.com/apps/camino-onboarder/installations/new?state=${state}`;

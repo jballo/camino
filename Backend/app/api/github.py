@@ -11,6 +11,7 @@ from github import (
 )
 from pydantic import BaseModel
 from sqlalchemy import exc
+from sqlmodel import select
 
 from app.config import settings
 from app.db import SessionDep
@@ -25,6 +26,35 @@ class GithubConnectBody(BaseModel):
     code: str
     userId: str
     installationId: int
+
+
+class GithubConnectionStatus(BaseModel):
+    connected: bool
+    githubUsername: str | None = None
+
+
+@router.get("/connection/{userId}")
+async def get_github_connection(
+    userId: str,
+    session: SessionDep,
+    auth_user_id: str = Depends(get_authenticated_user_id),
+) -> GithubConnectionStatus:
+    if auth_user_id != userId:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        statement = select(GithubConnections).where(
+            GithubConnections.userId == userId
+        )
+        connection = session.exec(statement).one_or_none()
+    except exc.OperationalError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+
+    if connection is None:
+        return GithubConnectionStatus(connected=False)
+    return GithubConnectionStatus(
+        connected=True, githubUsername=connection.githubUsername
+    )
 
 
 @router.post("/connect")
@@ -81,6 +111,23 @@ async def add_github_connection(
     try:
         token_expires_at = created_at + dt.timedelta(seconds=expires_in)
         refresh_token_expires_at = created_at + dt.timedelta(seconds=refresh_expires_in)
+
+        existing = session.exec(
+            select(GithubConnections).where(
+                GithubConnections.userId == payload.userId
+            )
+        ).one_or_none()
+
+        if existing is not None:
+            existing.githubUsername = username
+            existing.installationId = payload.installationId
+            existing.encryptedAccessToken = encrypted_access_token
+            existing.encryptedRefreshToken = encrypted_refresh_token
+            existing.tokenExpiresAt = token_expires_at
+            existing.refreshTokenExpiresAt = refresh_token_expires_at
+            session.add(existing)
+            session.commit()
+            return "Successfully updated github connection"
 
         connection = GithubConnections(
             userId=payload.userId,
