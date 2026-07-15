@@ -4,6 +4,8 @@ import logging
 from fastapi import Depends, HTTPException
 from sqlalchemy import exc, text
 from sqlmodel import Session
+from fastapi.concurrency import run_in_threadpool
+
 
 from app.config import settings
 from app.db import engine
@@ -121,7 +123,8 @@ def fixed_window_rate_limit(
     async def enforce(
         user_id: str = Depends(get_authenticated_user_id),
     ) -> None:
-        decision = consume_fixed_window(
+        decision = await run_in_threadpool(
+            consume_fixed_window,
             bucket=bucket,
             user_id=user_id,
             request_limit=request_limit,

@@ -31,7 +31,7 @@ export async function POST(req: NextRequest) {
       }),
     });
 
-    if (!response.ok) return forwardBackendResponse(response);
+    if (!response.ok) return await forwardBackendResponse(response);
 
     const result = await response.json();
     console.log("Result: ", result);

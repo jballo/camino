@@ -41,7 +41,7 @@ export async function POST(req: NextRequest) {
       }),
     });
 
-    return forwardBackendResponse(response);
+    return await forwardBackendResponse(response);
   } catch (error) {
     console.error("POST /api/journeys failed:", error);
     return NextResponse.json(
@@ -76,7 +76,7 @@ export async function GET(req: NextRequest) {
       },
     });
 
-    return forwardBackendResponse(response);
+    return await forwardBackendResponse(response);
   } catch (error) {
     console.error("GET /api/journeys failed:", error);
     return NextResponse.json(
