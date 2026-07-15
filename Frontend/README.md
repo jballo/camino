@@ -60,11 +60,12 @@ Authenticated proxy routes forward the Clerk session JWT as
 calling FastAPI.
 
 `src/lib/backend-response.ts` provides the shared `forwardBackendResponse` helper. It
-parses the backend JSON body (or supplies a fallback error), preserves the backend HTTP
-status, and forwards `Retry-After` when present. It is currently used by agent ask,
-repository ingest/search, and journey collection proxies. Authentication and request
-construction remain route-local, and several other proxies still have route-specific
-response handling.
+parses the backend JSON body, supplies a fallback for malformed error responses, and
+preserves successful responses that intentionally have no JSON body. It also preserves
+the backend HTTP status and forwards `Retry-After` when present. The helper is currently
+used by agent ask, repository ingest/search, and journey collection proxies.
+Authentication and request construction remain route-local, and several other proxies
+still have route-specific response handling.
 
 This means backend validation, authentication, not-found, service-unavailable, and
 rate-limit responses can reach clients without being collapsed into a generic `500`.

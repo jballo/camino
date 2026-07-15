@@ -123,8 +123,9 @@ eval/
 All routes require `Authorization: Bearer <clerk_session_jwt>`.
 Journey creation expects `{ repoName, topic, userId }`; the frontend injects `userId`
 from the Clerk session and redirects users to `/generate?id=<job_id>` for polling.
-Core frontend proxies use a shared response helper to preserve this API's JSON body and
-HTTP status; it also forwards `Retry-After` when the backend rate-limits a request.
+Core frontend proxies use a shared response helper to preserve this API's JSON body,
+bodyless successful responses, and HTTP status; it also forwards `Retry-After` when the
+backend rate-limits a request.
 
 ### Rate limiting
 

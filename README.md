@@ -228,7 +228,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 
 - [~] Error handling — tour flow (`/`, `/generate`, `/tours`, `/tours/{id}`) surfaces expired-session (401/403), not-found (404), and backend errors distinctly; still needs clone-fail / repo-too-large / bad-LLM paths
 
-- [~] Shared BFF proxy/auth wrapper — `forwardBackendResponse` centralizes JSON fallback, backend status preservation, and `Retry-After` forwarding for agent ask, ingest, search, and journey collection routes; shared auth and remaining proxies are still pending (tour doc §13)
+- [~] Shared BFF proxy/auth wrapper — `forwardBackendResponse` centralizes JSON/error fallback, preserves bodyless successful responses and backend statuses, and forwards `Retry-After` for agent ask, ingest, search, and journey collection routes; shared auth and remaining proxies are still pending (tour doc §13)
 - [x] Per-user PostgreSQL fixed-window rate limiting for agent Q&A, ingest, direct search, and journey creation; proxies preserve `429` and `Retry-After`
 
 ### CLI (stretch)
