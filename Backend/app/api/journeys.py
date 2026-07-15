@@ -9,6 +9,7 @@ from sqlmodel import Session, select
 from app.db import SessionDep, engine
 from app.models.github_connection import GithubConnections
 from app.models.tour_job import TourJob, TourJobStatus
+from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
 from app.security import get_authenticated_user_id
 from app.tour import TourGenerationError, generate_tour
 
@@ -128,7 +129,7 @@ def _mark_failed(session: Session, job_id: int, error: str) -> None:
         session.rollback()
 
 
-@router.post("")
+@router.post("", dependencies=[Depends(JOURNEY_CREATE_RATE_LIMIT)])
 async def create_journey(
     payload: CreateJourneyBody,
     session: SessionDep,

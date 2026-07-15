@@ -23,6 +23,10 @@ from app.models.code import CodeChunkEmbedding, CodeChunkModel
 from app.config import settings
 from app.db import SessionDep
 from app.models.github_connection import GithubConnections
+from app.rate_limit import (
+    REPOSITORY_INGEST_RATE_LIMIT,
+    REPOSITORY_SEARCH_RATE_LIMIT,
+)
 from app.security import get_authenticated_user_id
 from app.services.parser import LANGUAGES, MAX_FILE_BYTES, SKIP_DIRS, parse_file
 
@@ -151,7 +155,7 @@ async def list_processed_repositories(
     return [{"repo_name": repo_name, "chunk_count": count} for repo_name, count in rows]
 
 
-@router.post("/ingest")
+@router.post("/ingest", dependencies=[Depends(REPOSITORY_INGEST_RATE_LIMIT)])
 async def process_repository(
     payload: RepoIngestBody,
     session: SessionDep,
@@ -371,7 +375,7 @@ async def process_repository(
         raise HTTPException(status_code=500, detail="Internal ingestion error")
 
 
-@router.post("/search")
+@router.post("/search", dependencies=[Depends(REPOSITORY_SEARCH_RATE_LIMIT)])
 async def search_repository(
     payload: SearchBody,
     session: SessionDep,

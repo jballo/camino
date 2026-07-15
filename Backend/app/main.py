@@ -9,6 +9,7 @@ from app.db import engine
 from app.api import agent, github, journeys, repositories
 from app.webhooks import clerk, github as github_webhook
 from app.models.code import CodeChunkModel, CodeChunkEmbedding
+from app.models.rate_limit import RateLimit
 from app.models.tour_job import TourJob
 
 

@@ -6,6 +6,7 @@ from sqlalchemy import exc
 
 from app.main import app
 from app.db import get_session
+from app.rate_limit import AGENT_ASK_RATE_LIMIT
 from app.security import get_authenticated_user_id
 from app.agent.runner import AgentAnswer
 from app.services.embeddings import EmbeddingError
@@ -31,6 +32,7 @@ def _fake_session():
 def _override_deps():
     app.dependency_overrides[get_authenticated_user_id] = _noop_verify
     app.dependency_overrides[get_session] = _fake_session
+    app.dependency_overrides[AGENT_ASK_RATE_LIMIT] = lambda: None
     yield
     app.dependency_overrides.clear()
 

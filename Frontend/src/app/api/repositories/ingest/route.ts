@@ -1,6 +1,8 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextResponse, type NextRequest } from "next/server";
 
+import { forwardBackendResponse } from "@/lib/backend-response";
+
 export async function POST(req: NextRequest) {
   try {
     const { isAuthenticated, userId, getToken } = await auth();
@@ -29,7 +31,7 @@ export async function POST(req: NextRequest) {
       }),
     });
 
-    if (!response.ok) throw new Error("Failed to process repo");
+    if (!response.ok) return forwardBackendResponse(response);
 
     const result = await response.json();
     console.log("Result: ", result);
