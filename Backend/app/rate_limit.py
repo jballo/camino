@@ -78,7 +78,11 @@ def consume_fixed_window(
     request_limit: int,
     window_seconds: int,
 ) -> RateLimitDecision:
-    """Atomically consume one request from a PostgreSQL fixed window."""
+    """Atomically consume one request using a short, independent transaction.
+
+    Protected requests perform this transaction before the handler's transaction.
+    The transactions are sequential, but both contribute to pool utilization.
+    """
 
     try:
         with Session(engine) as session:

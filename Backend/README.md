@@ -44,6 +44,8 @@ API docs: http://127.0.0.1:8000/docs
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | Postgres connection string |
+| `DATABASE_POOL_SIZE` | Persistent connections per backend process (default `5`) |
+| `DATABASE_MAX_OVERFLOW` | Temporary overflow connections per backend process (default `10`) |
 | `OPENAI_API_KEY` | Embeddings + agent chat |
 | `AGENT_MODEL` | Chat model (default `gpt-4o-mini`) |
 | `CLERK_SECRET_KEY` | Clerk backend API |
@@ -132,6 +134,14 @@ table. Limits apply to `POST /api/v1/agent/ask`,
 `POST /api/v1/journeys`; read-only polling and list routes are not limited. Exceeded
 limits return `429` with `Retry-After`. If the counter store is unavailable, protected
 routes fail closed with `503`.
+
+The limiter intentionally uses a short transaction that commits before the route
+handler starts its own database work. Thus, an allowed protected request performs two
+sequential pool checkouts, not two simultaneous checkouts. Size
+`DATABASE_POOL_SIZE` and `DATABASE_MAX_OVERFLOW` for the resulting checkout rate and
+database latency. Across multiple backend processes, the maximum application
+connection count is `processes × (DATABASE_POOL_SIZE + DATABASE_MAX_OVERFLOW)`; keep
+that below the Postgres connection budget.
 
 ---
 
