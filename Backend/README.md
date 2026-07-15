@@ -62,6 +62,73 @@ API docs: http://127.0.0.1:8000/docs
 
 ---
 
+## AWS deployment target
+
+The backend will run on **ECS Fargate**, provisioned by the TypeScript CDK app in the
+planned `Infrastructure/` directory. PostgreSQL will run on **Amazon RDS** in isolated
+subnets. See the root [AWS deployment plan](../README.md#aws-deployment-plan) for stack
+boundaries and deployment order.
+
+### Backend work required before Fargate
+
+- Add a production Dockerfile using Python 3.14, install locked `uv` dependencies, run
+  as a non-root user, and start Uvicorn on `0.0.0.0:$PORT`.
+- Add an unauthenticated `/health` liveness endpoint that does not depend on external
+  APIs. Add a readiness check that verifies required startup configuration and database
+  connectivity without calling GitHub or OpenAI.
+- Validate that `installationId` submitted to `POST /api/v1/github/connect` belongs to
+  an installation the authenticated GitHub user may access before persisting it.
+- Add explicit request/model deadlines and cap repository file count, total bytes, and
+  generated chunks before cloning, embedding, or generating tours.
+- Handle `SIGTERM` gracefully and define recovery for `TourJob` rows left in
+  `pending`/`generating` when ECS replaces a task.
+
+### RDS and migrations
+
+The current lifespan hook in `app/main.py` runs `CREATE EXTENSION`,
+`SQLModel.metadata.create_all()`, and index creation. That is acceptable for local
+development but must not be the production migration mechanism.
+
+Before connecting ECS to RDS:
+
+1. Add Alembic and create an initial migration for all SQLModel tables, the `vector`
+   extension, HNSW index, and GIN index.
+2. Keep schema migration permission separate from the runtime application's normal
+   database access where practical.
+3. Package migrations in the backend image and execute them as a one-off ECS task before
+   updating the web service.
+4. Make application startup validate the schema rather than mutate it.
+5. Use an RDS connection URL with TLS enabled, and size
+   `DATABASE_POOL_SIZE`/`DATABASE_MAX_OVERFLOW` against the instance's connection budget.
+
+The private alpha can begin with Single-AZ RDS, encrypted gp3 storage, seven-day backups,
+and one Fargate web task. RDS must not be publicly accessible; its security group should
+accept port 5432 only from the Fargate task security group.
+
+### Secrets and runtime configuration
+
+Inject these values from Secrets Manager into the task definition:
+
+- `DATABASE_URL`
+- `OPENAI_API_KEY`
+- `CLERK_SECRET_KEY`, `CLERK_WH_KEY`, and `CLERK_JWT_KEY`
+- `GH_APP_ID`, `GH_APP_CLIENT_ID`, `GH_APP_SECRET`, `GH_APP_PRIVATE_KEY`, and
+  `GH_WEBHOOK_SECRET`
+- `ENCRYPTION_KEY`
+
+Non-secret settings such as `AGENT_MODEL`, pool sizes, and rate-limit thresholds can be
+plain task-definition environment variables. Secret values must not be embedded in the
+Docker image, CDK source, CloudFormation outputs, or committed `.env` files.
+
+### Current job limitation
+
+Journey creation uses FastAPI `BackgroundTasks`; it is not a durable queue. Keep the
+private-alpha service at one desired task and expect deployments to interrupt active
+generation. Before autoscaling or public launch, move generation to SQS plus a separate
+worker and add a sweep that retries or fails stale jobs.
+
+---
+
 ## Module layout
 
 ```

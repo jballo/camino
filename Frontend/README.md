@@ -39,6 +39,29 @@ The backend must be running on port 8000 (see [Backend/README.md](../Backend/REA
 
 ---
 
+## Production configuration
+
+The frontend is not part of the initial RDS/ECS CDK stacks, but it must be updated when
+the Fargate backend is deployed:
+
+- Set `BACKEND_URL` to the backend's HTTPS ALB/custom-domain origin. It is consumed by
+  server-side proxy routes and should not be exposed as a `NEXT_PUBLIC_*` variable.
+- Set `NEXT_PUBLIC_APP_URL` to the frontend's canonical HTTPS origin.
+- Configure the production frontend URL in Clerk's allowed redirect/origin settings.
+- Configure GitHub App setup/callback URLs to use the production frontend routes and
+  webhook URLs to use the production backend.
+- Replace the hardcoded `camino-onboarder` installation URL in
+  `src/app/api/github/install/route.ts` with a required server-side
+  `GITHUB_APP_SLUG` environment variable.
+- Make production builds fail when required URLs or credentials are absent instead of
+  falling back to localhost.
+
+After deployment, smoke-test the complete browser flow through the proxies: sign in,
+connect GitHub, list and ingest a repository, ask a question, generate a tour, and poll
+it to completion.
+
+---
+
 ## Pages
 
 | Route | Status | Description |
