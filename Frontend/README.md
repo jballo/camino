@@ -4,7 +4,8 @@ Next.js web app for Camino. Clerk handles auth; API routes proxy to the FastAPI 
 
 **What works:** sign-in, GitHub connection management, repo ingest/reprocess,
 processed-repo status, ask-the-codebase on `/explore`, and guided-tour generation
-from the home page through `/generate` and `/tours/{id}`.
+from the home page through `/generate` and `/tours/{id}`. Costly backend POST routes
+are protected by per-user rate limits.
 
 **Tour flow:** select a repo, make sure it has been processed, enter a topic, and click
 **Generate tour**. The app creates a journey through `/api/journeys`, polls progress on
@@ -57,6 +58,16 @@ The backend must be running on port 8000 (see [Backend/README.md](../Backend/REA
 Authenticated proxy routes forward the Clerk session JWT as
 `Authorization: Bearer …`. Journey creation also injects `userId` from Clerk before
 calling FastAPI.
+
+`src/lib/backend-response.ts` provides the shared `forwardBackendResponse` helper. It
+parses the backend JSON body (or supplies a fallback error), preserves the backend HTTP
+status, and forwards `Retry-After` when present. It is currently used by agent ask,
+repository ingest/search, and journey collection proxies. Authentication and request
+construction remain route-local, and several other proxies still have route-specific
+response handling.
+
+This means backend validation, authentication, not-found, service-unavailable, and
+rate-limit responses can reach clients without being collapsed into a generic `500`.
 
 | Route | Backend |
 |---|---|

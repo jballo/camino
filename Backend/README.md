@@ -1,7 +1,7 @@
 # Camino — Backend
 
 FastAPI service: GitHub App connection storage, repo ingest, hybrid code search,
-ask-the-codebase Q&A, and backend guided-tour generation.
+ask-the-codebase Q&A, backend guided-tour generation, and per-user API rate limiting.
 
 **Retrieval loop:** paused at a tuned stack — exp1–5 shipped (hit@5 0.900), plus an
 optional exp6 cross-encoder reranker (BGE blend → 0.950). See
@@ -21,6 +21,7 @@ The Plan → Retrieve → Draft → Review graph, `TourJob` persistence, and
 - **LangGraph** — ReAct Q&A agent plus structured tour generation graph
 - **Clerk** — JWT auth on API routes
 - **PyGithub** — GitHub App installation tokens for repo access
+- **PostgreSQL fixed windows** — atomic, per-Clerk-user limits for costly POST routes
 
 ---
 
@@ -52,6 +53,10 @@ API docs: http://127.0.0.1:8000/docs
 | `GH_APP_PRIVATE_KEY` | GitHub App PEM (escaped newlines OK) |
 | `GH_WEBHOOK_SECRET` | GitHub webhook verification |
 | `ENCRYPTION_KEY` | Fernet key for token encryption at rest |
+| `RATE_LIMIT_AGENT_ASK_REQUESTS` / `RATE_LIMIT_AGENT_ASK_WINDOW_SECONDS` | Q&A limit (default 20 requests / 600 seconds) |
+| `RATE_LIMIT_REPOSITORY_INGEST_REQUESTS` / `RATE_LIMIT_REPOSITORY_INGEST_WINDOW_SECONDS` | Ingest limit (default 2 requests / 3600 seconds) |
+| `RATE_LIMIT_REPOSITORY_SEARCH_REQUESTS` / `RATE_LIMIT_REPOSITORY_SEARCH_WINDOW_SECONDS` | Direct-search limit (default 60 requests / 60 seconds) |
+| `RATE_LIMIT_JOURNEY_CREATE_REQUESTS` / `RATE_LIMIT_JOURNEY_CREATE_WINDOW_SECONDS` | Journey creation limit (default 5 requests / 3600 seconds) |
 
 ---
 
@@ -60,6 +65,7 @@ API docs: http://127.0.0.1:8000/docs
 ```
 app/
 ├── main.py              # FastAPI app, DB init, HNSW + GIN indexes
+├── rate_limit.py        # PostgreSQL fixed-window limiter dependencies
 ├── api/
 │   ├── repositories.py  # list repos, ingest, hybrid search
 │   ├── agent.py         # POST /ask — LangGraph Q&A
@@ -115,6 +121,17 @@ eval/
 All routes require `Authorization: Bearer <clerk_session_jwt>`.
 Journey creation expects `{ repoName, topic, userId }`; the frontend injects `userId`
 from the Clerk session and redirects users to `/generate?id=<job_id>` for polling.
+Core frontend proxies use a shared response helper to preserve this API's JSON body and
+HTTP status; it also forwards `Retry-After` when the backend rate-limits a request.
+
+### Rate limiting
+
+The authenticated Clerk user ID keys atomic fixed-window counters in the `rate_limits`
+table. Limits apply to `POST /api/v1/agent/ask`,
+`POST /api/v1/repositories/ingest`, `POST /api/v1/repositories/search`, and
+`POST /api/v1/journeys`; read-only polling and list routes are not limited. Exceeded
+limits return `429` with `Retry-After`. If the counter store is unavailable, protected
+routes fail closed with `503`.
 
 ---
 
@@ -148,4 +165,5 @@ uv run pytest
 ```
 
 Current focused coverage includes retrieval/search tests, agent smoke helpers,
-structural tour validation, tour generation helpers, and journeys route tests.
+structural tour validation, tour generation helpers, journeys route tests, and
+fixed-window rate-limit behavior.
