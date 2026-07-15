@@ -65,7 +65,7 @@ flowchart LR
 | --------------- | ------------------------------------ | ------------------------------------------------------------------------------------------- |
 | **1 — Done**    | Best-in-class retrieval for code Q&A | exp1–5 shipped (0.900 hit@5); optional exp6 BGE reranker (0.950, closes q17); q03 last miss |
 | **2 — Now**     | Structured guided tours              | End-to-end tour generation flow built; M5 LLM-as-judge eval + failure-mode docs landed      |
-| **3**           | Ship to users                        | AWS (ECS, RDS, S3, SQS), observability (Langfuse), deployment hardening                     |
+| **3**           | Ship to users                        | AWS CDK, RDS PostgreSQL + pgvector, ECS Fargate, then durable jobs and observability         |
 | **4 — Stretch** | Meet devs where they work            | CLI (`onboard generate`), PR reviewer bot                                                   |
 
 
@@ -169,16 +169,85 @@ Details: [Backend/README.md](Backend/README.md) · [Frontend/README.md](Frontend
 
 ---
 
+## AWS deployment plan
+
+**Decision:** provision Camino's AWS infrastructure with **AWS CDK in TypeScript**.
+Keep the infrastructure in an `Infrastructure/` CDK app with two independently
+deployable stacks:
+
+1. **`CaminoDatabaseStack`** — VPC, isolated database subnets, security groups,
+   Secrets Manager credentials, and RDS PostgreSQL with pgvector support.
+2. **`CaminoBackendStack`** — ECR image, ECS Fargate service, public HTTPS
+   Application Load Balancer, CloudWatch logs, task roles, and backend secrets.
+
+The backend stack depends on outputs from the database stack, but the database can be
+deployed first:
+
+```bash
+cd Infrastructure
+npm ci
+npx cdk bootstrap
+npx cdk deploy CaminoDatabaseStack
+# After the backend image, migrations, health check, and secrets are ready:
+npx cdk deploy CaminoBackendStack
+```
+
+### Private-alpha topology
+
+- Run RDS in isolated subnets with `publiclyAccessible: false`; only the ECS task
+  security group may connect to port 5432.
+- Run the internet-facing ALB in public subnets. For the initial cost-conscious alpha,
+  Fargate tasks may use public subnets/public IPs while allowing inbound traffic only
+  from the ALB security group. This avoids a NAT Gateway while preserving the outbound
+  access required by GitHub and OpenAI.
+- Terminate TLS at the ALB with ACM and Route 53. Do not expose the ECS container port
+  directly.
+- Generate database credentials in Secrets Manager and inject application secrets into
+  the task definition. Never put secret values in CDK source, CloudFormation outputs, or
+  committed environment files.
+- Start with one Fargate task because tour generation currently uses in-process FastAPI
+  `BackgroundTasks`. A deployment can interrupt an active tour until SQS/worker recovery
+  is implemented.
+
+### Deployment gates
+
+Before the first backend deployment:
+
+- [ ] Validate that a submitted GitHub installation belongs to the authenticated GitHub user.
+- [ ] Add authenticated account deletion and verified data erasure for all user-owned data.
+- [ ] Add a production backend Dockerfile and pinned production start command.
+- [ ] Add `/health` and readiness behavior for the ALB.
+- [ ] Add Alembic and commit an initial schema migration, including `vector` and indexes.
+- [ ] Run migrations as a one-off ECS task; do not run schema creation in every web task.
+- [ ] Add explicit LLM timeouts and repository-size/file-count limits.
+- [ ] Define recovery for tour jobs left `pending` or `generating` after a task restart.
+- [ ] Add CI checks for backend tests, frontend lint/build, CDK synthesis, and migrations.
+- [ ] Run a deployed smoke test: auth → GitHub connect → ingest → ask → generate tour.
+
+Account deletion is a deployment gate, not a post-launch cleanup. The flow must require
+fresh confirmation, be idempotent, and remove the user's profile, encrypted GitHub
+credentials, GitHub connection, tours/jobs and artifacts, rate-limit records, and
+user-owned indexed repository chunks/embeddings. Before deleting repository data, define
+how ownership works for installations or repositories shared by multiple Camino users so
+one account cannot erase another user's data. Revoke external credentials where
+applicable, delete application data before the Clerk identity, and test both direct
+account deletion and Clerk `user.deleted` webhook retries. Any retained deletion audit
+record must be minimal and non-identifying.
+
+The first alpha may use Single-AZ RDS and one ECS task. Multi-AZ RDS, private Fargate
+tasks with managed egress, autoscaling, SQS workers, and S3 artifact storage are
+post-alpha reliability upgrades.
+
+---
+
 ## Now / next 3 actions
 
-1. **Expand the eval set** — LLM-as-judge is live over 3 topics on FastAPI; broaden to
-  2–3 repos (~35–40 topics) and cross-check with a stronger `--judge-model` to gauge
-   self-preference bias.
-2. **CI eval gates** — keep the no-LLM tour tests (`test_tour_judge.py`,
-  `run_structural_eval`) blocking; run the live judge on a schedule against
-   `judge_baseline.json` rather than blocking PRs on it.
-3. **Decide reranker in prod** — exp6 is done and off by default; ship BGE only if the
-  +0.05 hit@5 justifies the latency, or leave query-time only for now.
+1. **Create the CDK database stack** — VPC, isolated subnets, RDS PostgreSQL,
+   Secrets Manager, backups, and ECS-only database access.
+2. **Prepare the backend for Fargate** — fix GitHub installation ownership, add the
+   production image and health endpoint, and introduce Alembic migrations.
+3. **Create the CDK backend stack** — ECR, Fargate, ALB/HTTPS, CloudWatch logs,
+   secrets injection, CI synthesis, and a live end-to-end smoke test.
 
 **Retrieval status:** loop paused. exp6 (cross-encoder reranker) is complete — BGE blend
 hits the ≥0.95 target and closes q17; only q03 remains. Kept optional (off by default) to
@@ -224,6 +293,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [x] Settings page — GitHub connection status plus install/manage-repositories entry point
 - [x] Clerk auth (sign-in, session JWT to backend)
 - [x] GitHub App connect + repo listing
+- [ ] Delete-account flow with confirmation, external credential revocation, and complete data erasure
 - [ ] Shareable tour URLs
 
 - [~] Error handling — tour flow (`/`, `/generate`, `/tours`, `/tours/{id}`) surfaces expired-session (401/403), not-found (404), and backend errors distinctly; still needs clone-fail / repo-too-large / bad-LLM paths
@@ -241,13 +311,19 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 ### Infra & deploy (AWS)
 
 - [x] Local Postgres + pgvector (`docker-compose.yml`)
-- [ ] ECS Fargate (task def, IAM role, security group, ALB)
-- [ ] RDS Postgres + pgvector (migrated from local)
+- [x] Infrastructure-as-code decision: AWS CDK with TypeScript
+- [ ] `Infrastructure/` CDK app with separate database and backend stacks
+- [ ] VPC: public ALB/Fargate subnets for private alpha plus isolated RDS subnets
+- [ ] RDS PostgreSQL + pgvector, encrypted storage, backups, Secrets Manager credentials
+- [ ] Alembic baseline and one-off ECS migration task
+- [ ] Backend production Dockerfile, ECR repository, and pinned start command
+- [ ] ECS Fargate service (task/execution roles, security groups, desired count 1)
+- [ ] ALB health check, ACM certificate, HTTPS listener, and Route 53 record
+- [ ] CloudWatch application logs, retention policy, alarms, and request correlation
+- [ ] CI: tests, frontend build/lint, Docker build, CDK synth, and migration validation
 - [ ] S3 (tour artifacts + cached repo parses)
 - [ ] SQS (async tour jobs: request → Postgres + SQS → worker → S3 → poll)
-- [ ] CloudWatch log groups + custom metrics
 - [ ] Bedrock access (≥1 LLM call routed through it)
-- [ ] Secrets Manager (IAM task roles, no hardcoded keys)
 
 ### Evaluation (the differentiator)
 
