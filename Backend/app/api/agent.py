@@ -8,6 +8,7 @@ from sqlmodel import select
 from app.agent import answer_question
 from app.db import SessionDep
 from app.models.github_connection import GithubConnections
+from app.rate_limit import AGENT_ASK_RATE_LIMIT
 from app.security import get_authenticated_user_id
 from app.services.embeddings import EmbeddingError
 
@@ -39,7 +40,7 @@ class AskResponse(BaseModel):
     sources: list[SourceResponse]
 
 
-@router.post("/ask")
+@router.post("/ask", dependencies=[Depends(AGENT_ASK_RATE_LIMIT)])
 async def ask_agent(
     payload: AskBody,
     session: SessionDep,

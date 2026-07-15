@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.db import get_session
+from app.rate_limit import REPOSITORY_SEARCH_RATE_LIMIT
 from app.security import get_authenticated_user_id
 from app.services.search import SearchResult
 
@@ -28,6 +29,7 @@ def _fake_session():
 def _override_deps():
     app.dependency_overrides[get_authenticated_user_id] = _noop_verify
     app.dependency_overrides[get_session] = _fake_session
+    app.dependency_overrides[REPOSITORY_SEARCH_RATE_LIMIT] = lambda: None
     yield
     app.dependency_overrides.clear()
 

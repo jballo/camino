@@ -1,18 +1,7 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextResponse, type NextRequest } from "next/server";
 
-async function forwardBackendResponse(response: Response) {
-  // Preserve the backend's status (esp. 4xx) instead of collapsing to 500, so
-  // the client can react to auth/not-found/validation errors distinctly.
-  const result = await response.json().catch(() => null);
-  if (!response.ok) {
-    return NextResponse.json(
-      result ?? { error: "Backend request failed" },
-      { status: response.status },
-    );
-  }
-  return NextResponse.json(result);
-}
+import { forwardBackendResponse } from "@/lib/backend-response";
 
 export async function POST(req: NextRequest) {
   try {
@@ -52,7 +41,7 @@ export async function POST(req: NextRequest) {
       }),
     });
 
-    return forwardBackendResponse(response);
+    return await forwardBackendResponse(response);
   } catch (error) {
     console.error("POST /api/journeys failed:", error);
     return NextResponse.json(
@@ -87,7 +76,7 @@ export async function GET(req: NextRequest) {
       },
     });
 
-    return forwardBackendResponse(response);
+    return await forwardBackendResponse(response);
   } catch (error) {
     console.error("GET /api/journeys failed:", error);
     return NextResponse.json(

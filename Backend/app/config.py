@@ -1,8 +1,11 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     database_url: str
+    database_pool_size: int = Field(default=5, gt=0)
+    database_max_overflow: int = Field(default=10, ge=0)
     clerk_wh_key: str
     clerk_secret_key: str
     clerk_jwt_key: str | None = None
@@ -14,6 +17,14 @@ class Settings(BaseSettings):
     gh_webhook_secret: str
     openai_api_key: str
     agent_model: str = "gpt-4o-mini"
+    rate_limit_agent_ask_requests: int = 20
+    rate_limit_agent_ask_window_seconds: int = 600
+    rate_limit_repository_ingest_requests: int = 2
+    rate_limit_repository_ingest_window_seconds: int = 3600
+    rate_limit_repository_search_requests: int = 60
+    rate_limit_repository_search_window_seconds: int = 60
+    rate_limit_journey_create_requests: int = 5
+    rate_limit_journey_create_window_seconds: int = 3600
     model_config = SettingsConfigDict(env_file=".env")
 
 

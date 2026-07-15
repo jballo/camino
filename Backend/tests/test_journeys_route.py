@@ -8,6 +8,7 @@ from sqlalchemy import exc
 from app.db import get_session
 from app.main import app
 from app.models.tour_job import TourJobStatus
+from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
 from app.security import get_authenticated_user_id
 
 
@@ -36,6 +37,7 @@ def _fake_session():
 def _override_deps():
     app.dependency_overrides[get_authenticated_user_id] = _noop_verify
     app.dependency_overrides[get_session] = _fake_session
+    app.dependency_overrides[JOURNEY_CREATE_RATE_LIMIT] = lambda: None
     yield
     app.dependency_overrides.clear()
 
