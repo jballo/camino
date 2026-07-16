@@ -2,10 +2,10 @@
 
 Next.js web app for Camino. Clerk handles auth; API routes proxy to the FastAPI backend.
 
-**What works:** sign-in, GitHub connection management, repo ingest/reprocess,
-processed-repo status, ask-the-codebase on `/explore`, and guided-tour generation
-from the home page through `/generate` and `/tours/{id}`. Costly backend POST routes
-are protected by per-user rate limits.
+**What works:** sign-in, account deletion through Clerk's UserButton, GitHub connection
+management, repo ingest/reprocess, processed-repo status, ask-the-codebase on `/explore`,
+and guided-tour generation from the home page through `/generate` and `/tours/{id}`.
+Costly backend POST routes are protected by per-user rate limits.
 
 **Tour flow:** select a repo, make sure it has been processed, enter a topic, and click
 **Generate tour**. The app creates a journey through `/api/journeys`, polls progress on
@@ -14,6 +14,12 @@ are protected by per-user rate limits.
 Every tour page distinguishes an expired Clerk session (401/403) from a missing tour
 (404) and other backend errors, so users see an actionable message instead of one
 generic failure. The proxy routes preserve the backend's HTTP status for this.
+
+**Account deletion:** open Clerk's UserButton, select **Security**, and choose
+**Delete account**. Clerk requires the user to type `Delete account`, deletes the Clerk
+identity, and sends the backend a verified `user.deleted` webhook that removes local
+Camino data. This flow does not currently uninstall or revoke the external GitHub App
+authorization.
 
 ---
 

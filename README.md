@@ -35,6 +35,7 @@ What works today:
 | Guided tour generation                      | ✅ backend pipeline + jobs/API + frontend flow             |
 | Backend response forwarding                 | 🟡 shared status/body helper adopted by core proxy routes  |
 | Per-user API rate limiting                  | ✅ PostgreSQL fixed windows on costly POST routes           |
+| Clerk account-deletion webhook cleanup      | ✅ idempotent, transactional local-data cleanup             |
 | Production deploy                           | ❌ local dev only                                          |
 
 
@@ -214,7 +215,7 @@ npx cdk deploy CaminoBackendStack
 Before the first backend deployment:
 
 - [ ] Validate that a submitted GitHub installation belongs to the authenticated GitHub user.
-- [ ] Add authenticated account deletion and verified data erasure for all user-owned data.
+- [~] Revoke the external GitHub App authorization during account deletion; Clerk already provides the authenticated, confirmed deletion flow and webhook-driven local cleanup.
 - [ ] Add a production backend Dockerfile and pinned production start command.
 - [ ] Add `/health` and readiness behavior for the ALB.
 - [ ] Add Alembic and commit an initial schema migration, including `vector` and indexes.
@@ -224,15 +225,22 @@ Before the first backend deployment:
 - [ ] Add CI checks for backend tests, frontend lint/build, CDK synthesis, and migrations.
 - [ ] Run a deployed smoke test: auth → GitHub connect → ingest → ask → generate tour.
 
-Account deletion is a deployment gate, not a post-launch cleanup. The flow must require
-fresh confirmation, be idempotent, and remove the user's profile, encrypted GitHub
-credentials, GitHub connection, tours/jobs and artifacts, rate-limit records, and
-user-owned indexed repository chunks/embeddings. Before deleting repository data, define
-how ownership works for installations or repositories shared by multiple Camino users so
-one account cannot erase another user's data. Revoke external credentials where
-applicable, delete application data before the Clerk identity, and test both direct
-account deletion and Clerk `user.deleted` webhook retries. Any retained deletion audit
-record must be minimal and non-identifying.
+Account deletion is initiated through Clerk's authenticated UserButton security UI,
+which requires the user to type `Delete account` before continuing. Clerk deletes the
+identity and sends a verified `user.deleted` webhook. The webhook performs idempotent,
+transactional cleanup of the user's profile, encrypted GitHub connection, tours/jobs and
+artifacts, and rate-limit records. It deletes indexed chunks and their cascading
+embeddings only when no other Camino connection references the same GitHub installation,
+so a shared installation is preserved. Failures roll back and return `500` so Clerk can
+retry safely.
+
+Camino does not need a separate delete endpoint or confirmation UI for this Clerk-driven
+flow. The remaining deletion work is to uninstall or revoke the external GitHub App
+authorization; removing Camino's encrypted connection prevents further local use but
+does not revoke access at GitHub. Repository-level ownership within an installation also
+needs an explicit policy before shared repositories are supported. Webhook cleanup and
+retry behavior are covered by backend tests. Any retained deletion audit record must be
+minimal and non-identifying.
 
 The first alpha may use Single-AZ RDS and one ECS task. Multi-AZ RDS, private Fargate
 tasks with managed egress, autoscaling, SQS workers, and S3 artifact storage are
@@ -293,7 +301,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [x] Settings page — GitHub connection status plus install/manage-repositories entry point
 - [x] Clerk auth (sign-in, session JWT to backend)
 - [x] GitHub App connect + repo listing
-- [ ] Delete-account flow with confirmation, external credential revocation, and complete data erasure
+- [~] Account deletion — Clerk provides authenticated typed confirmation and identity deletion, and the verified webhook removes local data; external GitHub App revocation remains
 - [ ] Shareable tour URLs
 
 - [~] Error handling — tour flow (`/`, `/generate`, `/tours`, `/tours/{id}`) surfaces expired-session (401/403), not-found (404), and backend errors distinctly; still needs clone-fail / repo-too-large / bad-LLM paths
