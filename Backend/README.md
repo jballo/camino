@@ -1,7 +1,8 @@
 # Camino — Backend
 
 FastAPI service: GitHub App connection storage, repo ingest, hybrid code search,
-ask-the-codebase Q&A, backend guided-tour generation, and per-user API rate limiting.
+ask-the-codebase Q&A, backend guided-tour generation, per-user API rate limiting, and
+Clerk account-lifecycle webhook handling.
 
 **Retrieval loop:** paused at a tuned stack — exp1–5 shipped (hit@5 0.900), plus an
 optional exp6 cross-encoder reranker (BGE blend → 0.950). See
@@ -19,7 +20,7 @@ The Plan → Retrieve → Draft → Review graph, `TourJob` persistence, and
 - **tree-sitter** — Python, JavaScript, TypeScript/TSX symbol extraction
 - **OpenAI** — embeddings (`text-embedding-3-small`) + chat (`gpt-4o-mini` default)
 - **LangGraph** — ReAct Q&A agent plus structured tour generation graph
-- **Clerk** — JWT auth on API routes
+- **Clerk** — JWT auth on API routes plus signed account-lifecycle webhooks
 - **PyGithub** — GitHub App installation tokens for repo access
 - **PostgreSQL fixed windows** — atomic, per-Clerk-user limits for costly POST routes
 
@@ -78,6 +79,8 @@ boundaries and deployment order.
   connectivity without calling GitHub or OpenAI.
 - Validate that `installationId` submitted to `POST /api/v1/github/connect` belongs to
   an installation the authenticated GitHub user may access before persisting it.
+- Revoke or uninstall the external GitHub App authorization when Clerk's confirmed
+  account-deletion flow triggers the existing local cleanup service.
 - Add explicit request/model deadlines and cap repository file count, total bytes, and
   generated chunks before cloning, embedding, or generating tours.
 - Handle `SIGTERM` gracefully and define recovery for `TourJob` rows left in
@@ -150,6 +153,7 @@ app/
 │   ├── extract.py       # deterministic snippet/path/line grounding
 │   └── review.py        # structural + coverage checks
 ├── services/
+│   ├── account_deletion.py # transactional, idempotent local account cleanup
 │   ├── parser.py        # tree-sitter chunk extraction
 │   ├── embeddings.py    # build_embedding_text + OpenAI embed
 │   ├── search.py        # hybrid search (vector + FTS + RRF)
@@ -186,8 +190,10 @@ eval/
 | `POST` | `/api/v1/journeys` | Queue a guided-tour job for an ingested repo |
 | `GET` | `/api/v1/journeys/{id}` | Poll a journey job; returns artifact/error when available |
 | `GET` | `/api/v1/journeys?repo=` | List the authenticated user's journey jobs |
+| `POST` | `/webhooks/clerk` | Process signed Clerk lifecycle events, including account cleanup |
 
-All routes require `Authorization: Bearer <clerk_session_jwt>`.
+All `/api/v1/*` routes require `Authorization: Bearer <clerk_session_jwt>`.
+The Clerk webhook instead requires a valid Svix signature.
 Journey creation expects `{ repoName, topic, userId }`; the frontend injects `userId`
 from the Clerk session and redirects users to `/generate?id=<job_id>` for polling.
 Core frontend proxies use a shared response helper to preserve this API's JSON body,
@@ -210,6 +216,25 @@ sequential pool checkouts, not two simultaneous checkouts. Size
 database latency. Across multiple backend processes, the maximum application
 connection count is `processes × (DATABASE_POOL_SIZE + DATABASE_MAX_OVERFLOW)`; keep
 that below the Postgres connection budget.
+
+### Account deletion
+
+A verified Clerk `user.deleted` event calls `delete_local_account_data` in one database
+transaction. The service removes the user's tour jobs and artifacts, rate-limit counters,
+encrypted GitHub connection, and profile. It removes indexed code chunks only when no
+remaining Camino connection references the same GitHub installation; database cascades
+then remove the associated embeddings.
+
+The cleanup uses set-based deletes, so a missing user and repeated webhook deliveries are
+successful no-ops. Any database or unexpected failure rolls back the transaction, is
+logged without returning internal details, and produces `500` so Clerk can retry.
+
+Account deletion is initiated through Clerk's authenticated UserButton security UI,
+which requires the user to type `Delete account` before continuing. Clerk deletes the
+identity and sends the verified `user.deleted` webhook that triggers this local cleanup;
+Camino does not need a separate delete endpoint or confirmation UI for that flow. The
+cleanup removes Camino's stored encrypted GitHub connection, but it does not uninstall
+or revoke the external GitHub App authorization.
 
 ---
 
@@ -244,4 +269,5 @@ uv run pytest
 
 Current focused coverage includes retrieval/search tests, agent smoke helpers,
 structural tour validation, tour generation helpers, journeys route tests, and
-fixed-window rate-limit behavior.
+fixed-window rate-limit behavior. Account-deletion tests cover full and shared-installation
+cleanup, idempotent webhook replay, rollback, retryable failures, and signature rejection.
