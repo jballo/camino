@@ -6,6 +6,10 @@ from svix.webhooks import Webhook, WebhookVerificationError
 from app.config import settings
 from app.db import SessionDep
 from app.models.user import User
+from app.services.account_deletion import (
+    AccountDeletionError,
+    delete_local_account_data,
+)
 
 
 router = APIRouter()
@@ -71,16 +75,9 @@ async def clerk_webhook_handler(request: Request, session: SessionDep) -> User |
         elif event == "user.deleted":
             user_id = msg["data"]["id"]
             try:
-                statement = select(User).where(User.id == user_id)
-                user = session.exec(statement).one()
-                session.delete(user)
-                session.commit()
+                delete_local_account_data(session, user_id)
                 return "user deleted"
-            except exc.NoResultFound:
-                session.rollback()
-                raise HTTPException(status_code=404, detail="User not found")
-            except exc.IntegrityError:
-                session.rollback()
+            except AccountDeletionError:
                 raise HTTPException(status_code=500, detail="Failed to delete user")
         else:
             print("Unknown event")
