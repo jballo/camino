@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import exc
 from sqlmodel import select
@@ -12,6 +14,7 @@ from app.services.account_deletion import (
 )
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -78,6 +81,7 @@ async def clerk_webhook_handler(request: Request, session: SessionDep) -> User |
                 delete_local_account_data(session, user_id)
                 return "user deleted"
             except AccountDeletionError:
+                logger.exception("Account deletion failed for user %s", user_id)
                 raise HTTPException(status_code=500, detail="Failed to delete user")
         else:
             print("Unknown event")

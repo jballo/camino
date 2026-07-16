@@ -1,7 +1,9 @@
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import SQLAlchemyError
 from svix.webhooks import WebhookVerificationError
 
 from app.db import get_session
@@ -65,18 +67,29 @@ def test_duplicate_deleted_user_delivery_is_successful(
 @patch("app.webhooks.clerk.delete_local_account_data")
 @patch("app.webhooks.clerk.Webhook")
 def test_database_failure_remains_retryable(
-    webhook_class, delete_local, client_and_session
+    webhook_class, delete_local, client_and_session, caplog
 ):
     client, _ = client_and_session
     webhook_class.return_value.verify.return_value = {
         "type": "user.deleted",
         "data": {"id": USER_ID},
     }
-    delete_local.side_effect = AccountDeletionError()
 
-    response = client.post(WEBHOOK_URL, content=b"payload")
+    def fail_deletion(*_args):
+        try:
+            raise SQLAlchemyError("database unavailable")
+        except SQLAlchemyError as error:
+            raise AccountDeletionError() from error
+
+    delete_local.side_effect = fail_deletion
+
+    with caplog.at_level(logging.ERROR, logger="app.webhooks.clerk"):
+        response = client.post(WEBHOOK_URL, content=b"payload")
 
     assert response.status_code == 500
+    assert response.json() == {"detail": "Failed to delete user"}
+    assert f"Account deletion failed for user {USER_ID}" in caplog.text
+    assert "database unavailable" in caplog.text
 
 
 @patch("app.webhooks.clerk.Webhook")
