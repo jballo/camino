@@ -1,5 +1,4 @@
 from sqlalchemy import delete
-from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
 
 from app.models.code import CodeChunkModel
@@ -56,6 +55,6 @@ def delete_local_account_data(session: Session, user_id: str) -> None:
                 )
 
         session.commit()
-    except SQLAlchemyError as error:
+    except Exception as error:
         session.rollback()
         raise AccountDeletionError from error

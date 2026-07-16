@@ -86,3 +86,16 @@ def test_local_cleanup_rolls_back_database_failure():
 
     session.rollback.assert_called_once_with()
     session.commit.assert_not_called()
+
+
+def test_local_cleanup_wraps_unexpected_failure_and_rolls_back():
+    session = MagicMock()
+    error = TypeError("unexpected data")
+    session.exec.side_effect = error
+
+    with pytest.raises(AccountDeletionError) as exc_info:
+        delete_local_account_data(session, USER_ID)
+
+    assert exc_info.value.__cause__ is error
+    session.rollback.assert_called_once_with()
+    session.commit.assert_not_called()
