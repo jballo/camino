@@ -1,16 +1,19 @@
 import hashlib
 import hmac
 import json
+import logging
 
 from fastapi import APIRouter, HTTPException, Request
-from sqlalchemy import exc
-from sqlmodel import select
 
 from app.config import settings
 from app.db import SessionDep
-from app.models.github_connection import GithubConnections
+from app.services.installation_deletion import (
+    InstallationDeletionError,
+    delete_installation_local_data,
+)
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -44,24 +47,14 @@ async def github_webhook_handler(request: Request, session: SessionDep):
 
     if gh_event == "installation" and installation_event == "deleted":
         try:
-            statement = select(GithubConnections).where(
-                GithubConnections.installationId == installation_id
+            delete_installation_local_data(session, installation_id)
+            return "github installation deleted"
+        except InstallationDeletionError:
+            logger.exception(
+                "Installation deletion failed for installation %s", installation_id
             )
-            connection = session.exec(statement).one()
-            session.delete(connection)
-            session.commit()
-            return "github connection deleted"
-        except exc.NoResultFound:
-            session.rollback()
-            raise HTTPException(status_code=404, detail="User not found")
-        except exc.MultipleResultsFound:
-            session.rollback()
-            raise HTTPException(status_code=500, detail="Duplicate installation")
-        except exc.IntegrityError:
-            session.rollback()
-            raise HTTPException(status_code=500, detail="Failed to delete user")
-        except exc.OperationalError:
-            session.rollback()
-            raise HTTPException(status_code=500, detail="Database error")
+            raise HTTPException(
+                status_code=500, detail="Failed to delete installation"
+            )
 
     return "Unknown event"
