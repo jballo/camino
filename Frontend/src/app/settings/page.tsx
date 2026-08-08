@@ -2,7 +2,18 @@
 
 import { GitHub } from "@/icons/Github";
 import { Show, SignInButton } from "@clerk/nextjs";
-import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
+import {
+  Button,
+  Description,
+  Dialog,
+  DialogBackdrop,
+  DialogPanel,
+  DialogTitle,
+  Field,
+  Input,
+  Label,
+} from "@headlessui/react";
+import { AlertTriangle, CheckCircle2, Loader2, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 type ConnectionStatus = {
@@ -10,13 +21,22 @@ type ConnectionStatus = {
   githubUsername?: string | null;
 };
 
+const DELETE_CONFIRMATION = "Delete my account";
+
 export default function Settings() {
   const [status, setStatus] = useState<ConnectionStatus | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | undefined>(undefined);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteConfirmation, setDeleteConfirmation] = useState("");
   const [returnStatus, setReturnStatus] = useState<
     "success" | "error" | undefined
   >(undefined);
+
+  const closeDeleteDialog = () => {
+    setDeleteDialogOpen(false);
+    setDeleteConfirmation("");
+  };
 
   const loadStatus = useCallback(async () => {
     setLoading(true);
@@ -168,6 +188,89 @@ export default function Settings() {
               )}
             </div>
           </div>
+
+          <div className="flex flex-col gap-4 rounded-xl border border-destructive/30 p-6">
+            <div className="flex items-start justify-between gap-6">
+              <div className="flex flex-col gap-1">
+                <h2 className="text-sm font-medium">Delete account</h2>
+                <p className="text-xs text-muted-foreground">
+                  Permanently remove your Camino account and its associated
+                  data.
+                </p>
+              </div>
+              <Button
+                onClick={() => setDeleteDialogOpen(true)}
+                className="inline-flex shrink-0 items-center gap-2 rounded-md border border-destructive/50 px-3 py-1.5 text-sm text-destructive transition hover:bg-destructive/10"
+              >
+                <Trash2 className="size-4" />
+                Delete account
+              </Button>
+            </div>
+          </div>
+
+          <Dialog
+            open={deleteDialogOpen}
+            onClose={closeDeleteDialog}
+            className="relative z-50"
+          >
+            <DialogBackdrop className="fixed inset-0 bg-foreground/30 backdrop-blur-[1px]" />
+            <div className="fixed inset-0 flex w-screen items-center justify-center p-4">
+              <DialogPanel className="w-full max-w-md rounded-xl border border-border bg-background p-6 shadow-xl">
+                <div className="flex size-10 items-center justify-center rounded-full bg-destructive/10 text-destructive">
+                  <AlertTriangle className="size-5" />
+                </div>
+                <DialogTitle className="mt-4 text-lg font-semibold">
+                  Delete your account?
+                </DialogTitle>
+                <Description className="mt-2 text-sm text-muted-foreground">
+                  This action is permanent. Complete both steps in order to
+                  continue.
+                </Description>
+
+                <ol className="mt-5 list-decimal space-y-4 pl-5 text-sm">
+                  <li>
+                    <span>Type this exact phrase:</span>
+                    <code className="mt-2 block select-all rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 font-mono text-base font-semibold text-foreground">
+                      {DELETE_CONFIRMATION}
+                    </code>
+                  </li>
+                  <li>Click the delete button to confirm.</li>
+                </ol>
+
+                <Field className="mt-5">
+                  <Label className="text-sm font-medium">
+                    Enter the phrase shown above
+                  </Label>
+                  <Input
+                    autoFocus
+                    value={deleteConfirmation}
+                    onChange={(event) =>
+                      setDeleteConfirmation(event.target.value)
+                    }
+                    placeholder="Type the exact phrase"
+                    autoComplete="off"
+                    className="mt-2 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none transition placeholder:text-muted-foreground focus:border-ring focus:ring-2 focus:ring-ring/20"
+                  />
+                </Field>
+
+                <div className="mt-6 flex justify-end gap-3">
+                  <Button
+                    onClick={closeDeleteDialog}
+                    className="rounded-md border border-border px-4 py-2 text-sm transition hover:bg-accent"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    disabled={deleteConfirmation !== DELETE_CONFIRMATION}
+                    onClick={closeDeleteDialog}
+                    className="rounded-md bg-destructive px-4 py-2 text-sm text-destructive-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100"
+                  >
+                    Delete account
+                  </Button>
+                </div>
+              </DialogPanel>
+            </div>
+          </Dialog>
         </Show>
       </div>
     </div>
