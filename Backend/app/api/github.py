@@ -78,7 +78,9 @@ async def add_github_connection(
                 token=access_token_obj.token,
             )
         )
-        username = g.get_user().login
+        github_user = g.get_user()
+        username = github_user.login
+        github_user_id = github_user.id
         access_token: str = access_token_obj.token
         expires_in: int | None = access_token_obj.expires_in
         refresh_token: str | None = access_token_obj.refresh_token
@@ -120,6 +122,7 @@ async def add_github_connection(
 
         if existing is not None:
             existing.githubUsername = username
+            existing.githubUserId = github_user_id
             existing.installationId = payload.installationId
             existing.encryptedAccessToken = encrypted_access_token
             existing.encryptedRefreshToken = encrypted_refresh_token
@@ -132,6 +135,7 @@ async def add_github_connection(
         connection = GithubConnections(
             userId=payload.userId,
             githubUsername=username,
+            githubUserId=github_user_id,
             installationId=payload.installationId,
             encryptedAccessToken=encrypted_access_token,
             encryptedRefreshToken=encrypted_refresh_token,

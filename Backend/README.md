@@ -2,7 +2,7 @@
 
 FastAPI service: GitHub App connection storage, repo ingest, hybrid code search,
 ask-the-codebase Q&A, backend guided-tour generation, per-user API rate limiting, and
-Clerk account-lifecycle webhook handling.
+Clerk/GitHub lifecycle webhook handling.
 
 **Retrieval loop:** paused at a tuned stack — exp1–5 shipped (hit@5 0.900), plus an
 optional exp6 cross-encoder reranker (BGE blend → 0.950). See
@@ -79,8 +79,9 @@ boundaries and deployment order.
   connectivity without calling GitHub or OpenAI.
 - Validate that `installationId` submitted to `POST /api/v1/github/connect` belongs to
   an installation the authenticated GitHub user may access before persisting it.
-- Revoke or uninstall the external GitHub App authorization when Clerk's confirmed
-  account-deletion flow triggers the existing local cleanup service.
+- Replace Clerk's built-in account deletion with a Camino-owned handoff that directs the
+  user to uninstall or revoke the external GitHub App; local cleanup alone cannot remove
+  GitHub installation access.
 - Add explicit request/model deadlines and cap repository file count, total bytes, and
   generated chunks before cloning, embedding, or generating tours.
 - Handle `SIGTERM` gracefully and define recovery for `TourJob` rows left in
@@ -153,11 +154,13 @@ app/
 │   ├── extract.py       # deterministic snippet/path/line grounding
 │   └── review.py        # structural + coverage checks
 ├── services/
-│   ├── account_deletion.py # transactional, idempotent local account cleanup
-│   ├── parser.py        # tree-sitter chunk extraction
-│   ├── embeddings.py    # build_embedding_text + OpenAI embed
-│   ├── search.py        # hybrid search (vector + FTS + RRF)
-│   └── search_index.py  # tsvector population SQL
+│   ├── account_deletion.py         # transactional local account cleanup
+│   ├── authorization_revocation.py # delete connections after GitHub user revocation
+│   ├── installation_deletion.py    # delete installation-scoped local data
+│   ├── parser.py                   # tree-sitter chunk extraction
+│   ├── embeddings.py               # build_embedding_text + OpenAI embed
+│   ├── search.py                   # hybrid search (vector + FTS + RRF)
+│   └── search_index.py             # tsvector population SQL
 ├── models/              # SQLModel tables (users, chunks, embeddings, …)
 └── webhooks/            # Clerk + GitHub webhook handlers
 
@@ -191,9 +194,11 @@ eval/
 | `GET` | `/api/v1/journeys/{id}` | Poll a journey job; returns artifact/error when available |
 | `GET` | `/api/v1/journeys?repo=` | List the authenticated user's journey jobs |
 | `POST` | `/webhooks/clerk` | Process signed Clerk lifecycle events, including account cleanup |
+| `POST` | `/webhooks/github` | Process signed installation deletion and user-authorization revocation events |
 
 All `/api/v1/*` routes require `Authorization: Bearer <clerk_session_jwt>`.
-The Clerk webhook instead requires a valid Svix signature.
+The Clerk webhook instead requires a valid Svix signature; the GitHub webhook requires a
+valid `X-Hub-Signature-256`.
 Journey creation expects `{ repoName, topic, userId }`; the frontend injects `userId`
 from the Clerk session and redirects users to `/generate?id=<job_id>` for polling.
 Core frontend proxies use a shared response helper to preserve this API's JSON body,
@@ -216,6 +221,24 @@ sequential pool checkouts, not two simultaneous checkouts. Size
 database latency. Across multiple backend processes, the maximum application
 connection count is `processes × (DATABASE_POOL_SIZE + DATABASE_MAX_OVERFLOW)`; keep
 that below the Postgres connection budget.
+
+### GitHub App lifecycle
+
+GitHub user authorization and App installation are separate lifecycle states. Camino
+handles their signed webhook events independently:
+
+- `github_app_authorization.revoked` matches the payload's immutable `sender.id` against
+  the indexed `GithubConnections.githubUserId` field and deletes every matching
+  connection. It intentionally preserves indexed chunks, tour jobs, and tour artifacts.
+  Connection-dependent repository and agent endpoints return `404` until the user
+  reconnects; existing tours remain readable.
+- `installation.deleted` deletes all local connections, tour jobs, and indexed code for
+  that installation.
+
+Both cleanup services use set-based deletes, making webhook replays successful no-ops.
+Database failures roll back and return `500` so the delivery is visibly retryable.
+Reconnect updates the stored immutable GitHub user ID and username as well as the
+installation and encrypted token fields.
 
 ### Account deletion
 
@@ -271,3 +294,5 @@ Current focused coverage includes retrieval/search tests, agent smoke helpers,
 structural tour validation, tour generation helpers, journeys route tests, and
 fixed-window rate-limit behavior. Account-deletion tests cover full and shared-installation
 cleanup, idempotent webhook replay, rollback, retryable failures, and signature rejection.
+GitHub lifecycle tests cover installation deletion and authorization revocation, including
+replays, malformed payloads, rollback, and retryable service failures.

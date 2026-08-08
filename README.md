@@ -215,7 +215,7 @@ npx cdk deploy CaminoBackendStack
 Before the first backend deployment:
 
 - [ ] Validate that a submitted GitHub installation belongs to the authenticated GitHub user.
-- [~] Revoke the external GitHub App authorization during account deletion; Clerk already provides the authenticated, confirmed deletion flow and webhook-driven local cleanup.
+- [~] Hand external GitHub App cleanup to the user during account deletion — Camino-owned delete flow plus a link to uninstall or revoke. Local cleanup already runs from the verified `user.deleted` webhook; Camino does not uninstall the app itself, so repository access persists until the user acts.
 - [ ] Add a production backend Dockerfile and pinned production start command.
 - [ ] Add `/health` and readiness behavior for the ALB.
 - [ ] Add Alembic and commit an initial schema migration, including `vector` and indexes.
@@ -234,13 +234,15 @@ embeddings only when no other Camino connection references the same GitHub insta
 so a shared installation is preserved. Failures roll back and return `500` so Clerk can
 retry safely.
 
-Camino does not need a separate delete endpoint or confirmation UI for this Clerk-driven
-flow. The remaining deletion work is to uninstall or revoke the external GitHub App
-authorization; removing Camino's encrypted connection prevents further local use but
-does not revoke access at GitHub. Repository-level ownership within an installation also
-needs an explicit policy before shared repositories are supported. Webhook cleanup and
-retry behavior are covered by backend tests. Any retained deletion audit record must be
-minimal and non-identifying.
+Camino will replace that entry point with its own delete-account flow, so deletion has a
+moment we control in which to hand GitHub cleanup back to the user. Clerk's built-in
+delete has to be disabled at the same time, or the `UserButton` modal keeps offering a
+path that skips the handoff. Removing Camino's encrypted connection prevents further
+local use but does not revoke access at GitHub, and Camino will not uninstall the app
+itself, so installation-level repository access persists until the user acts.
+Repository-level ownership within an installation also needs an explicit policy before
+shared repositories are supported. Webhook cleanup and retry behavior are covered by
+backend tests. Any retained deletion audit record must be minimal and non-identifying.
 
 The first alpha may use Single-AZ RDS and one ECS task. Multi-AZ RDS, private Fargate
 tasks with managed egress, autoscaling, SQS workers, and S3 artifact storage are
@@ -308,6 +310,19 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 
 - [~] Shared BFF proxy/auth wrapper — `forwardBackendResponse` centralizes JSON/error fallback, preserves bodyless successful responses and backend statuses, and forwards `Retry-After` for agent ask, ingest, search, and journey collection routes; shared auth and remaining proxies are still pending (tour doc §13)
 - [x] Per-user PostgreSQL fixed-window rate limiting for agent Q&A, ingest, direct search, and journey creation; proxies preserve `429` and `Retry-After`
+
+### GitHub App lifecycle
+
+Authorization and installation are separate on GitHub, and ending one does not end the
+other. Camino handles both lifecycle events independently.
+
+- [x] Handle `github_app_authorization` `revoked` — match the immutable `sender.id` to stored GitHub user IDs and delete every associated Camino connection. Replays are safe; indexed chunks and tours are preserved so reconnecting does not require re-ingest
+- [ ] Replace Clerk's built-in delete-account button with a Camino-owned flow, so account deletion has a moment we control in which to hand GitHub cleanup back to the user
+- [ ] Disable Clerk's built-in delete in the dashboard once that flow exists, or the `<UserButton />` modal keeps offering a path that bypasses it
+- [ ] Link users to `https://github.com/apps/camino-onboarder` from both the deletion confirm step and the post-deletion page. Camino does not uninstall the app itself, so installation-level repository access persists until the user acts
+- [ ] Drop the unused encrypted user tokens — `decrypt_token` is never called anywhere, so `encryptedAccessToken` and `encryptedRefreshToken` are written once at `/connect` and never read
+- [ ] Sweep indexed chunks whose `installation_id` no connection row references; after a revocation a user's indexed code lingers until they reconnect or uninstall
+- [ ] Handle `installation.suspend` / `installation.unsuspend` — a suspended installation currently surfaces as generic GitHub `403`s during ingest rather than a clear state
 
 ### CLI (stretch)
 

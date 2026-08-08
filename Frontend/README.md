@@ -21,6 +21,11 @@ identity, and sends the backend a verified `user.deleted` webhook that removes l
 Camino data. This flow does not currently uninstall or revoke the external GitHub App
 authorization.
 
+If a user revokes Camino under GitHub's **Authorized GitHub Apps**, the signed GitHub
+webhook removes the backend connection. The next `/settings` status check reports the
+account as disconnected; revocation does not uninstall the separate GitHub App
+installation.
+
 ---
 
 ## Run locally

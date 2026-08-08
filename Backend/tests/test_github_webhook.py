@@ -11,21 +11,23 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.config import settings
 from app.db import get_session
 from app.main import app
+from app.services.authorization_revocation import AuthorizationRevocationError
 from app.services.installation_deletion import InstallationDeletionError
 
 
 WEBHOOK_URL = "/webhooks/github"
 INSTALLATION_ID = 101
+GITHUB_USER_ID = 202
 
 
-def _signed(body: bytes) -> dict[str, str]:
+def _signed(body: bytes, event: str = "installation") -> dict[str, str]:
     digest = hmac.new(
         settings.gh_webhook_secret.encode(),
         body,
         hashlib.sha256,
     ).hexdigest()
     return {
-        "x-github-event": "installation",
+        "x-github-event": event,
         "x-hub-signature-256": f"sha256={digest}",
         "content-type": "application/json",
     }
@@ -94,6 +96,94 @@ def test_database_failure_is_retryable(delete_local, client_and_session, caplog)
     assert response.status_code == 500
     assert response.json() == {"detail": "Failed to delete installation"}
     assert f"Installation deletion failed for installation {INSTALLATION_ID}" in caplog.text
+
+
+@patch("app.webhooks.github.delete_revoked_user_connections")
+def test_authorization_revoked_deletes_user_connections(
+    delete_connections, client_and_session
+):
+    client, session = client_and_session
+    body = json.dumps(
+        {"action": "revoked", "sender": {"id": GITHUB_USER_ID}}
+    ).encode()
+
+    response = client.post(
+        WEBHOOK_URL,
+        content=body,
+        headers=_signed(body, "github_app_authorization"),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == "github authorization revoked"
+    delete_connections.assert_called_once_with(session, GITHUB_USER_ID)
+
+
+@patch("app.webhooks.github.delete_revoked_user_connections")
+def test_authorization_revocation_replay_is_successful(
+    delete_connections, client_and_session
+):
+    client, _ = client_and_session
+    body = json.dumps(
+        {"action": "revoked", "sender": {"id": GITHUB_USER_ID}}
+    ).encode()
+    headers = _signed(body, "github_app_authorization")
+
+    first = client.post(WEBHOOK_URL, content=body, headers=headers)
+    second = client.post(WEBHOOK_URL, content=body, headers=headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert delete_connections.call_count == 2
+
+
+@patch("app.webhooks.github.delete_revoked_user_connections")
+def test_authorization_revocation_failure_is_retryable(
+    delete_connections, client_and_session, caplog
+):
+    client, _ = client_and_session
+    body = json.dumps(
+        {"action": "revoked", "sender": {"id": GITHUB_USER_ID}}
+    ).encode()
+
+    def fail_deletion(*_args):
+        try:
+            raise SQLAlchemyError("database unavailable")
+        except SQLAlchemyError as error:
+            raise AuthorizationRevocationError() from error
+
+    delete_connections.side_effect = fail_deletion
+
+    with caplog.at_level(logging.ERROR, logger="app.webhooks.github"):
+        response = client.post(
+            WEBHOOK_URL,
+            content=body,
+            headers=_signed(body, "github_app_authorization"),
+        )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Failed to revoke authorization"}
+    assert (
+        f"Authorization revocation failed for GitHub user {GITHUB_USER_ID}"
+        in caplog.text
+    )
+
+
+@patch("app.webhooks.github.delete_revoked_user_connections")
+def test_authorization_revocation_without_sender_is_rejected(
+    delete_connections, client_and_session
+):
+    client, _ = client_and_session
+    body = json.dumps({"action": "revoked"}).encode()
+
+    response = client.post(
+        WEBHOOK_URL,
+        content=body,
+        headers=_signed(body, "github_app_authorization"),
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Invalid request"}
+    delete_connections.assert_not_called()
 
 
 def test_invalid_signature_is_rejected(client_and_session):

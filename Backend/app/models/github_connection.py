@@ -6,6 +6,7 @@ class GithubConnections(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     userId: str = Field(unique=True)
     githubUsername: str
+    githubUserId: int = Field(index=True)
     installationId: int
     encryptedAccessToken: str
     encryptedRefreshToken: str
