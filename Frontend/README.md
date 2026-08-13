@@ -116,3 +116,37 @@ rate-limit responses can reach clients without being collapsed into a generic `5
 Completed tour artifacts render directly from the backend `TourArtifact` shape:
 `title`, `topic`, `repo_name`, and ordered `steps` with file paths, line ranges,
 snippets, explanations, and optional "why" notes.
+
+---
+
+## Planned migration: direct browser → FastAPI calls
+
+The proxy layer above is scheduled for removal. Because the frontend deploys to Vercel
+and the backend to AWS, the proxies provide no network isolation — the backend must
+verify Clerk JWTs regardless — and they force a second error-translation step
+(FastAPI `{detail}` → proxy `{error}` → client strings). The plan, not yet implemented:
+
+- **New shared client helper** `src/lib/api.ts`: `backendFetch<T>(getToken, path, init?)`
+  attaches the Clerk bearer token from `useAuth().getToken` and targets
+  `NEXT_PUBLIC_BACKEND_URL`; a typed `ApiError` (message, status, body) carries the
+  backend's `detail` string so pages show real error causes instead of hardcoded text.
+  `src/lib/backend-response.ts` (`forwardBackendResponse`) is deleted.
+- **Pages migrate to direct calls** (`/`, `/explore`, `/tours`, `/tours/{id}`,
+  `/generate`, `/settings`), keeping the existing 401/403/404 special-casing via
+  `ApiError.status`. Request bodies stop sending `userId`; the backend derives the
+  user from the verified token.
+- **8 proxy routes are deleted**: `repositories`, `repositories/processed`,
+  `repositories/search`, `repositories/ingest`, `agent/ask`, `journeys`,
+  `journeys/[id]`, `github/status` (settings calls `GET /api/v1/github/connection`
+  directly).
+- **The GitHub OAuth trio stays**: `github/install` (httpOnly CSRF cookie),
+  `github/authorize` (GitHub App callback — needs the Clerk session cookie on this
+  domain), and `github/setup` (update landing). `authorize` keeps its server-side
+  `BACKEND_URL` call to `/github/connect` but stops sending `userId`.
+- **Env changes**: add `NEXT_PUBLIC_BACKEND_URL` (browser-visible by design — the
+  security boundary is JWT verification on the backend, not URL secrecy). `BACKEND_URL`
+  remains for the authorize route. In production, the backend's `CORS_ORIGINS` must
+  include this app's Vercel origin, and the "do not expose `BACKEND_URL`" guidance
+  below no longer applies once migrated.
+
+Until the migration lands, the proxy documentation above reflects reality.

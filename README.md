@@ -33,7 +33,7 @@ What works today:
 | LLM-as-judge tour eval                      | ✅ faithfulness/relevance/completeness/ordering + baseline |
 | ReAct Q&A agent                             | ✅ `/explore` + `/api/v1/agent/ask`                        |
 | Guided tour generation                      | ✅ backend pipeline + jobs/API + frontend flow             |
-| Backend response forwarding                 | 🟡 shared status/body helper adopted by core proxy routes  |
+| Backend response forwarding                 | 🟡 shared status/body helper adopted by core proxy routes; planned: replace proxies with direct browser → FastAPI calls |
 | Per-user API rate limiting                  | ✅ PostgreSQL fixed windows on costly POST routes           |
 | Clerk account-deletion webhook cleanup      | ✅ idempotent, transactional local-data cleanup             |
 | Production deploy                           | ❌ local dev only                                          |
@@ -130,7 +130,34 @@ flowchart TB
   Search --> Vectors
 ```
 
+### Planned: direct browser → FastAPI calls
 
+**Decision:** retire the Next.js `/api/*` proxy layer and have the browser call
+FastAPI directly with the Clerk session JWT. With the frontend on Vercel and the
+backend on AWS, the proxy provides no network isolation — the backend is publicly
+reachable and must verify JWTs regardless — so the extra hop only adds a second
+error-translation layer and Vercel function invocations per API call.
+
+```mermaid
+flowchart LR
+  Browser[Browser React pages] -->|"Bearer Clerk JWT via backendFetch()"| FastAPI[FastAPI on AWS]
+  Browser -->|navigation only| GithubRoutes["Kept Next routes: github install / authorize / setup"]
+  GithubRoutes -->|"server-to-server github/connect"| FastAPI
+  GitHubOAuth[GitHub OAuth] -->|redirect| GithubRoutes
+```
+
+Scope of the migration (not yet implemented):
+
+- Backend: add CORS (exact origins, `Retry-After` exposed) and drop `userId` from all
+  paths/bodies — identity comes solely from the verified token's `sub` claim.
+- Frontend: one shared `backendFetch()` helper with a typed `ApiError` that surfaces
+  FastAPI `detail` strings; migrate all page call sites; delete the 8 proxy routes and
+  `forwardBackendResponse`.
+- Keep only the three GitHub OAuth redirect routes in Next.js (cookie/CSRF handling
+  and the Clerk session live on the app's domain).
+
+Per-app specifics are in [Frontend/README.md](Frontend/README.md) and
+[Backend/README.md](Backend/README.md).
 
 ---
 
@@ -306,7 +333,8 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 
 - [~] Error handling — tour flow (`/`, `/generate`, `/tours`, `/tours/{id}`) surfaces expired-session (401/403), not-found (404), and backend errors distinctly; still needs clone-fail / repo-too-large / bad-LLM paths
 
-- [~] Shared BFF proxy/auth wrapper — `forwardBackendResponse` centralizes JSON/error fallback, preserves bodyless successful responses and backend statuses, and forwards `Retry-After` for agent ask, ingest, search, and journey collection routes; shared auth and remaining proxies are still pending (tour doc §13)
+- [~] Shared BFF proxy/auth wrapper — superseded by the planned direct browser → FastAPI migration; `forwardBackendResponse` and the proxy routes will be removed rather than extended (see Architecture → Planned)
+- [ ] Direct browser → FastAPI migration — backend CORS + token-derived identity (drop `userId` params), shared `backendFetch`/`ApiError` client helper, migrate 6 pages, delete 8 proxy routes; keep GitHub OAuth redirect routes
 - [x] Per-user PostgreSQL fixed-window rate limiting for agent Q&A, ingest, direct search, and journey creation; proxies preserve `429` and `Retry-After`
 
 ### CLI (stretch)

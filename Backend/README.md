@@ -200,6 +200,31 @@ Core frontend proxies use a shared response helper to preserve this API's JSON b
 bodyless successful responses, and HTTP status; it also forwards `Retry-After` when the
 backend rate-limits a request.
 
+### Planned API changes: direct browser calls
+
+The Next.js proxy layer is scheduled for removal; the browser will call this API
+directly with the Clerk session JWT. Two backend changes are planned (not yet
+implemented):
+
+1. **CORS** — add `CORSMiddleware` in `app/main.py` with origins from a new
+   `CORS_ORIGINS` setting (comma-separated, default `http://localhost:3000`;
+   production adds the Vercel frontend origin). Exact origins only, bearer-header
+   auth (`allow_credentials=False`), and `expose_headers=["Retry-After"]` so browser
+   JavaScript can read rate-limit headers on `429` responses.
+2. **Token-derived identity** — drop `userId` from every path and request body and use
+   only `auth_user_id` from `get_authenticated_user_id` (the verified token's `sub`).
+   The existing 403 mismatch checks become dead code and are removed. Planned surface:
+   - `GET /api/v1/repositories/{userId}` → `GET /api/v1/repositories`
+   - `GET /api/v1/repositories/{userId}/processed` → `GET /api/v1/repositories/processed`
+   - `GET /api/v1/github/connection/{userId}` → `GET /api/v1/github/connection`
+   - `POST` bodies for `ingest`, `search`, `agent/ask`, `journeys`, and
+     `github/connect` lose their `userId` field
+   Route tests that build `userId` paths/bodies are updated in the same change.
+
+The error contract stays `HTTPException` → `{"detail": "..."}`; the frontend's shared
+fetch helper will surface `detail` strings directly in the UI. The routes table above
+reflects the current, pre-migration surface.
+
 ### Rate limiting
 
 The authenticated Clerk user ID keys atomic fixed-window counters in the `rate_limits`
