@@ -1,4 +1,4 @@
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,7 +25,15 @@ class Settings(BaseSettings):
     rate_limit_repository_search_window_seconds: int = 60
     rate_limit_journey_create_requests: int = 5
     rate_limit_journey_create_window_seconds: int = 3600
+    cors_origins: list[str] = ["http://localhost:3000"]
     model_config = SettingsConfigDict(env_file=".env")
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def split_cors_origins(cls, value: str | list[str]) -> list[str]:
+        if isinstance(value, str):
+            return [origin.strip() for origin in value.split(",") if origin.strip()]
+        return value
 
 
 settings = Settings()

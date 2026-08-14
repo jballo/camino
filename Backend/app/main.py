@@ -1,9 +1,11 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import SQLModel
 from sqlalchemy import text
 
+from app.config import settings
 from app.db import engine
 
 from app.api import agent, github, journeys, repositories
@@ -36,6 +38,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Retry-After"],
+)
 
 app.include_router(github.router, prefix="/api/v1/github", tags=["github"])
 app.include_router(repositories.router, prefix="/api/v1/repositories", tags=["repositories"])

@@ -49,6 +49,7 @@ API docs: http://127.0.0.1:8000/docs
 | `DATABASE_MAX_OVERFLOW` | Temporary overflow connections per backend process (default `10`) |
 | `OPENAI_API_KEY` | Embeddings + agent chat |
 | `AGENT_MODEL` | Chat model (default `gpt-4o-mini`) |
+| `CORS_ORIGINS` | Allowed browser origins, comma-separated (default `http://localhost:3000`) |
 | `CLERK_SECRET_KEY` | Clerk backend API |
 | `CLERK_WH_KEY` | Clerk webhook signing secret |
 | `CLERK_JWT_KEY` | Optional — local JWT verification |
@@ -119,9 +120,10 @@ Inject these values from Secrets Manager into the task definition:
   `GH_WEBHOOK_SECRET`
 - `ENCRYPTION_KEY`
 
-Non-secret settings such as `AGENT_MODEL`, pool sizes, and rate-limit thresholds can be
-plain task-definition environment variables. Secret values must not be embedded in the
-Docker image, CDK source, CloudFormation outputs, or committed `.env` files.
+Non-secret settings such as `AGENT_MODEL`, `CORS_ORIGINS`, pool sizes, and rate-limit
+thresholds can be plain task-definition environment variables. Secret values must not
+be embedded in the Docker image, CDK source, CloudFormation outputs, or committed
+`.env` files. Production `CORS_ORIGINS` must include the Vercel frontend origin.
 
 ### Current job limitation
 
@@ -203,15 +205,17 @@ backend rate-limits a request.
 ### Planned API changes: direct browser calls
 
 The Next.js proxy layer is scheduled for removal; the browser will call this API
-directly with the Clerk session JWT. Two backend changes are planned (not yet
-implemented):
+directly with the Clerk session JWT.
 
-1. **CORS** — add `CORSMiddleware` in `app/main.py` with origins from a new
-   `CORS_ORIGINS` setting (comma-separated, default `http://localhost:3000`;
-   production adds the Vercel frontend origin). Exact origins only, bearer-header
-   auth (`allow_credentials=False`), and `expose_headers=["Retry-After"]` so browser
-   JavaScript can read rate-limit headers on `429` responses.
-2. **Token-derived identity** — drop `userId` from every path and request body and use
+**CORS** is in place: `CORSMiddleware` in `app/main.py` reads `CORS_ORIGINS`
+(comma-separated, default `http://localhost:3000`; production adds the Vercel frontend
+origin). Exact origins only, bearer-header auth (`allow_credentials=False`), and
+`expose_headers=["Retry-After"]` so browser JavaScript can read rate-limit headers on
+`429` responses.
+
+One remaining backend change is planned (not yet implemented):
+
+1. **Token-derived identity** — drop `userId` from every path and request body and use
    only `auth_user_id` from `get_authenticated_user_id` (the verified token's `sub`).
    The existing 403 mismatch checks become dead code and are removed. Planned surface:
    - `GET /api/v1/repositories/{userId}` → `GET /api/v1/repositories`
@@ -293,6 +297,7 @@ uv run pytest
 ```
 
 Current focused coverage includes retrieval/search tests, agent smoke helpers,
-structural tour validation, tour generation helpers, journeys route tests, and
-fixed-window rate-limit behavior. Account-deletion tests cover full and shared-installation
+structural tour validation, tour generation helpers, journeys route tests,
+CORS origin/preflight/`Retry-After` exposure, and fixed-window rate-limit behavior.
+Account-deletion tests cover full and shared-installation
 cleanup, idempotent webhook replay, rollback, retryable failures, and signature rejection.
