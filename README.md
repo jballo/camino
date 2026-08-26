@@ -16,8 +16,8 @@ Built for new hires, OSS contributors, and anyone who's opened a repo and though
 The core indexing and hybrid-search pipeline is **built and tuned**. A LangGraph ReAct
 agent can answer natural-language questions about an ingested repo, grounded in retrieved
 code chunks. Phase 2 now has the full guided-tour path: a Plan → Retrieve → Draft →
-Review generator, persisted journey jobs, polling/list APIs, authenticated Next.js proxies,
-the `/generate` polling page, the `/tours` library, and the `/tours/{id}` reader UI.
+Review generator, persisted journey jobs, polling/list APIs, authenticated direct browser
+calls, the `/generate` polling page, the `/tours` library, and the `/tours/{id}` reader UI.
 
 What works today:
 
@@ -33,7 +33,7 @@ What works today:
 | LLM-as-judge tour eval                      | ✅ faithfulness/relevance/completeness/ordering + baseline |
 | ReAct Q&A agent                             | ✅ `/explore` + `/api/v1/agent/ask`                        |
 | Guided tour generation                      | ✅ backend pipeline + jobs/API + frontend flow             |
-| Backend response forwarding                 | 🟡 shared status/body helper adopted by core proxy routes; planned: replace proxies with direct browser → FastAPI calls |
+| Direct browser API access                   | ✅ Clerk JWT calls from React pages to FastAPI              |
 | Per-user API rate limiting                  | ✅ PostgreSQL fixed windows on costly POST routes           |
 | Clerk account-deletion webhook cleanup      | ✅ idempotent, transactional local-data cleanup             |
 | Production deploy                           | ❌ local dev only                                          |
@@ -84,10 +84,11 @@ flowchart TB
     Explore["/explore — ingest + Q&A"]
     Home["/ — guided tour request form"]
     TourUI["/generate + /tours — tour polling + reader"]
-    Proxy["/api/* — Clerk-auth proxies<br/>shared status/body forwarding"]
+    GithubRoutes["/api/github/* — install/OAuth redirects"]
   end
 
   subgraph backend [Backend — FastAPI]
+    API["/api/v1/* — Clerk JWT verification"]
     GH[GitHub App API]
     Ingest[Ingest pipeline]
     Parser[tree-sitter parser]
@@ -109,16 +110,19 @@ flowchart TB
   Clerk --> Settings
   Clerk --> Explore
   Clerk --> Home
-  Explore --> Proxy
-  Home --> Proxy
-  TourUI --> Proxy
-  Proxy --> GH
-  Proxy --> Limits
+  Settings -->|"Bearer JWT"| API
+  Explore -->|"Bearer JWT"| API
+  Home -->|"Bearer JWT"| API
+  TourUI -->|"Bearer JWT"| API
+  Settings --> GithubRoutes
+  GithubRoutes -->|github/connect| API
+  API --> GH
+  API --> Limits
   Limits --> Agent
   Limits --> Ingest
   Limits --> Search
   Limits -->|create| Journeys
-  Proxy -->|poll/list| Journeys
+  API -->|poll/list| Journeys
   Limits --> Counters
   Journeys --> TourGraph
   Ingest --> Parser --> Embed --> Chunks
@@ -130,9 +134,9 @@ flowchart TB
   Search --> Vectors
 ```
 
-### Planned: direct browser → FastAPI calls
+### Direct browser → FastAPI calls
 
-**Decision:** retire the Next.js `/api/*` proxy layer and have the browser call
+The Next.js data proxy layer has been retired. The browser calls
 FastAPI directly with the Clerk session JWT. With the frontend on Vercel and the
 backend on AWS, the proxy provides no network isolation — the backend is publicly
 reachable and must verify JWTs regardless — so the extra hop only adds a second
@@ -146,15 +150,14 @@ flowchart LR
   GitHubOAuth[GitHub OAuth] -->|redirect| GithubRoutes
 ```
 
-Migration status:
+Implementation status:
 
-- Backend: complete. CORS is configured, and `userId` has been removed from every API
+- Backend: CORS is configured, and `userId` has been removed from every API
   path/body; identity comes solely from the verified token's `sub` claim. Legacy paths
   return `404`, and legacy body fields return `422`.
-- Frontend: one shared `backendFetch()` helper with a typed `ApiError` that surfaces
-  FastAPI `detail` strings is still needed, along with migrating all page call sites and
-  deleting the 8 proxy routes plus `forwardBackendResponse`.
-- Keep only the three GitHub OAuth redirect routes in Next.js (cookie/CSRF handling
+- Frontend: `backendFetch()` and `ApiError` attach the Clerk token and surface FastAPI
+  `detail` strings; all six pages call FastAPI directly.
+- Only the three GitHub OAuth redirect routes remain in Next.js (cookie/CSRF handling
   and the Clerk session live on the app's domain).
 
 Per-app specifics are in [Frontend/README.md](Frontend/README.md) and
@@ -334,9 +337,8 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 
 - [~] Error handling — tour flow (`/`, `/generate`, `/tours`, `/tours/{id}`) surfaces expired-session (401/403), not-found (404), and backend errors distinctly; still needs clone-fail / repo-too-large / bad-LLM paths
 
-- [~] Shared BFF proxy/auth wrapper — superseded by the planned direct browser → FastAPI migration; `forwardBackendResponse` and the proxy routes will be removed rather than extended (see Architecture → Planned)
-- [~] Direct browser → FastAPI migration — backend CORS and token-derived identity are complete; remaining: shared `backendFetch`/`ApiError` client helper, migrate 6 pages, delete 8 proxy routes, and update the kept GitHub authorize route
-- [x] Per-user PostgreSQL fixed-window rate limiting for agent Q&A, ingest, direct search, and journey creation; proxies preserve `429` and `Retry-After`
+- [x] Direct browser → FastAPI integration — shared `backendFetch`/`ApiError`, six migrated pages, JWT-derived identity, CORS, and only the three GitHub OAuth redirect routes retained in Next.js
+- [x] Per-user PostgreSQL fixed-window rate limiting for agent Q&A, ingest, direct search, and journey creation; the backend returns `429` and `Retry-After`
 
 ### CLI (stretch)
 

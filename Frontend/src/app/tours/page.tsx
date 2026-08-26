@@ -1,6 +1,8 @@
 "use client";
 
 import type { JourneyStatus, JourneySummary } from "@/types/tour";
+import { ApiError, backendFetch } from "@/lib/api";
+import { useAuth } from "@clerk/nextjs";
 import { Button } from "@headlessui/react";
 import {
   AlertTriangle,
@@ -50,6 +52,7 @@ function StatusBadge({ status }: { status: JourneyStatus }) {
 }
 
 export default function ToursList() {
+  const { getToken } = useAuth();
   const [tours, setTours] = useState<JourneySummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -58,29 +61,30 @@ export default function ToursList() {
     setLoading(true);
     setError(undefined);
     try {
-      const response = await fetch("/api/journeys", { method: "GET" });
-      if (!response.ok) {
-        const errBody = (await response.json().catch(() => null)) as
-          | { error?: string }
-          | null;
-        if (response.status === 401 || response.status === 403) {
-          setError(
-            "Your session expired. Please refresh the page and log in again.",
-          );
-        } else {
-          setError(errBody?.error ?? "Failed to load tours.");
-        }
-        return;
-      }
-      const result = (await response.json()) as JourneySummary[];
+      const token = await getToken();
+      if (!token) throw new ApiError(401, "Not authenticated");
+
+      const result = await backendFetch<JourneySummary[]>(
+        "/api/v1/journeys",
+        token,
+      );
       setTours(Array.isArray(result) ? result : []);
     } catch (err) {
       console.log("Error: ", err);
-      setError("Failed to load tours.");
+      if (
+        err instanceof ApiError &&
+        (err.status === 401 || err.status === 403)
+      ) {
+        setError(
+          "Your session expired. Please refresh the page and log in again.",
+        );
+      } else {
+        setError(err instanceof ApiError ? err.message : "Failed to load tours.");
+      }
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [getToken]);
 
   useEffect(() => {
     loadTours();

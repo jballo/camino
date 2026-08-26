@@ -1,6 +1,8 @@
 "use client";
 
 import type { JourneyResponse, TourStep } from "@/types/tour";
+import { ApiError, backendFetch } from "@/lib/api";
+import { useAuth } from "@clerk/nextjs";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -21,6 +23,7 @@ export default function TourReader({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
+  const { getToken } = useAuth();
 
   const [journey, setJourney] = useState<JourneyResponse | undefined>(undefined);
   const [loading, setLoading] = useState(true);
@@ -32,30 +35,32 @@ export default function TourReader({
       setLoading(true);
       setError(undefined);
       try {
-        const response = await fetch(`/api/journeys/${id}`, { method: "GET" });
-        if (!response.ok) {
-          if (cancelled) return;
-          const errBody = (await response.json().catch(() => null)) as
-            | { error?: string }
-            | null;
-          if (response.status === 401 || response.status === 403) {
-            setError(
-              "Your session expired. Please refresh the page and log in again.",
-            );
-          } else if (response.status === 404) {
-            setError("We couldn't find this tour. It may have been removed.");
-          } else {
-            setError(errBody?.error ?? "Failed to load this tour.");
-          }
-          return;
-        }
-        const result = (await response.json()) as JourneyResponse;
+        const token = await getToken();
+        if (!token) throw new ApiError(401, "Not authenticated");
+
+        const result = await backendFetch<JourneyResponse>(
+          `/api/v1/journeys/${encodeURIComponent(id)}`,
+          token,
+        );
         if (cancelled) return;
         setJourney(result);
       } catch (err) {
         if (cancelled) return;
         console.log("Error: ", err);
-        setError("Failed to load this tour.");
+        if (
+          err instanceof ApiError &&
+          (err.status === 401 || err.status === 403)
+        ) {
+          setError(
+            "Your session expired. Please refresh the page and log in again.",
+          );
+        } else if (err instanceof ApiError && err.status === 404) {
+          setError("We couldn't find this tour. It may have been removed.");
+        } else {
+          setError(
+            err instanceof ApiError ? err.message : "Failed to load this tour.",
+          );
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -63,7 +68,7 @@ export default function TourReader({
     return () => {
       cancelled = true;
     };
-  }, [id]);
+  }, [getToken, id]);
 
   const artifact = journey?.artifact ?? undefined;
 

@@ -1,7 +1,8 @@
 "use client";
 
 import { GitHub } from "@/icons/Github";
-import { Show, SignInButton } from "@clerk/nextjs";
+import { ApiError, backendFetch } from "@/lib/api";
+import { Show, SignInButton, useAuth } from "@clerk/nextjs";
 import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
@@ -11,6 +12,7 @@ type ConnectionStatus = {
 };
 
 export default function Settings() {
+  const { getToken } = useAuth();
   const [status, setStatus] = useState<ConnectionStatus | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -22,32 +24,29 @@ export default function Settings() {
     setLoading(true);
     setError(undefined);
     try {
-      const response = await fetch("/api/github/status", { method: "GET" });
-      const body = (await response.json().catch(() => null)) as
-        | (ConnectionStatus & { error?: string; detail?: string })
-        | null;
+      const token = await getToken();
+      if (!token) throw new ApiError(401, "Not authenticated");
 
-      if (!response.ok) {
-        if (response.status === 401) {
-          setError("Your session expired. Refresh the page and sign in again.");
-        } else {
-          setError(
-            body?.error
-              ? `Couldn't check your GitHub connection — ${body.error}.`
-              : "Couldn't check your GitHub connection.",
-          );
-        }
-        return;
-      }
-
-      setStatus(body ?? { connected: false });
+      const body = await backendFetch<ConnectionStatus>(
+        "/api/v1/github/connection",
+        token,
+      );
+      setStatus(body);
     } catch (err) {
       console.log("Error: ", err);
-      setError("Couldn't reach the app to check your GitHub connection.");
+      if (err instanceof ApiError && err.status === 401) {
+        setError("Your session expired. Refresh the page and sign in again.");
+      } else {
+        setError(
+          err instanceof ApiError
+            ? `Couldn't check your GitHub connection — ${err.message}.`
+            : "Couldn't reach the backend to check your GitHub connection.",
+        );
+      }
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [getToken]);
 
   useEffect(() => {
     loadStatus();

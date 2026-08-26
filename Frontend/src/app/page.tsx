@@ -15,6 +15,9 @@ import {
   DialogPanel,
   DialogTitle,
 } from "@headlessui/react";
+import { useAuth } from "@clerk/nextjs";
+
+import { ApiError, backendFetch } from "@/lib/api";
 
 const EXAMPLE_TOPICS = [
   "Authentication flow",
@@ -24,6 +27,7 @@ const EXAMPLE_TOPICS = [
 
 export default function Home() {
   const router = useRouter();
+  const { getToken } = useAuth();
   const [prompt, setPrompt] = useState("");
   const [repoSelectionDialog, setRepoSelectionDialog] = useState(false);
   const [repoSelected, setRepoSelected] = useState<undefined | string>(
@@ -52,56 +56,53 @@ export default function Home() {
 
       setSubmitting(true);
 
-      const response = await fetch("/api/journeys", {
+      const token = await getToken();
+      if (!token) throw new ApiError(401, "Not authenticated");
+
+      const result = await backendFetch<{ id: number; status: string }>(
+        "/api/v1/journeys",
+        token,
+        {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+        body: {
           repoName: repoSelected,
           topic: prompt,
-        }),
-      });
-
-      if (!response.ok) {
-        const errBody = (await response.json().catch(() => null)) as
-          | { error?: string }
-          | null;
-        if (response.status === 401 || response.status === 403) {
-          setSubmitError(
-            "Your session expired. Please refresh the page and log in again.",
-          );
-        } else {
-          setSubmitError(
-            errBody?.error ??
-              "Failed to start tour generation. Select a repo and try again.",
-          );
         }
-        setSubmitting(false);
-        return;
-      }
-
-      const result = (await response.json()) as { id: number; status: string };
+      });
       router.push(`/generate?id=${result.id}`);
     } catch (error) {
       console.log("error: ", error);
-      setSubmitError("Failed to start tour generation. Select a repo and try again.");
+      if (
+        error instanceof ApiError &&
+        (error.status === 401 || error.status === 403)
+      ) {
+        setSubmitError(
+          "Your session expired. Please refresh the page and log in again.",
+        );
+      } else {
+        setSubmitError(
+          error instanceof ApiError
+            ? error.message
+            : "Failed to start tour generation. Select a repo and try again.",
+        );
+      }
+    } finally {
       setSubmitting(false);
     }
-  }, [repoSelected, prompt, router]);
+  }, [getToken, repoSelected, prompt, router]);
 
   const openDialog = async () => {
     setRepoSelectionDialog(true);
     setRepoRetrievalError(undefined);
     startTransition(async () => {
       try {
-        const response = await fetch("/api/repositories", {
-          method: "GET",
-        });
+        const token = await getToken();
+        if (!token) throw new ApiError(401, "Not authenticated");
 
-        if (!response.ok) throw new Error("Failed to get repos");
-        const result = await response.json();
-
+        const result = await backendFetch<string[]>(
+          "/api/v1/repositories",
+          token,
+        );
         setRepos(result);
       } catch (error) {
         console.log("Error: ", error);
@@ -115,19 +116,19 @@ export default function Home() {
 
     setProcessing(true);
     try {
-      const response = await fetch("/api/repositories/ingest", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+      const token = await getToken();
+      if (!token) throw new ApiError(401, "Not authenticated");
+
+      const result = await backendFetch<unknown>(
+        "/api/v1/repositories/ingest",
+        token,
+        {
+          method: "POST",
+          body: {
           repoName: repoSelected,
-        }),
-      });
-
-      if (!response.ok) throw new Error("Failed to process repo");
-
-      const result = await response.text();
+          },
+        },
+      );
       console.log("Result: ", result);
       setRepoSelectionDialog(false);
     } catch (error) {
@@ -135,7 +136,7 @@ export default function Home() {
     } finally {
       setProcessing(false);
     }
-  }, [repoSelected]);
+  }, [getToken, repoSelected]);
 
   return (
     <div className="flex flex-col justify-center items-center w-full min-h-full">

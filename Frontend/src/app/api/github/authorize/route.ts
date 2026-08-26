@@ -1,4 +1,4 @@
-import { auth, currentUser } from "@clerk/nextjs/server";
+import { auth } from "@clerk/nextjs/server";
 import { NextResponse, type NextRequest } from "next/server";
 
 export async function GET(req: NextRequest) {
@@ -19,10 +19,9 @@ export async function GET(req: NextRequest) {
     return res;
   };
 
-  const { isAuthenticated, userId, getToken } = await auth();
-  const user = await currentUser();
+  const { isAuthenticated, getToken } = await auth();
 
-  if (!isAuthenticated || userId === null || user === null) {
+  if (!isAuthenticated) {
     const signInUrl = new URL("/sign-in", appUrl);
     signInUrl.searchParams.set("redirect_url", "/settings");
     return NextResponse.redirect(signInUrl);
@@ -60,7 +59,6 @@ export async function GET(req: NextRequest) {
       },
       body: JSON.stringify({
         code,
-        userId,
         installationId,
       }),
     });

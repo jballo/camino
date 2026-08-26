@@ -9,7 +9,7 @@ optional exp6 cross-encoder reranker (BGE blend → 0.950). See
 [eval/EXPERIMENTS.md](eval/EXPERIMENTS.md).
 **Phase 2 status:** the guided-tour backend is wired end-to-end with the frontend.
 The Plan → Retrieve → Draft → Review graph, `TourJob` persistence, and
-`/api/v1/journeys` create/poll/list routes back the Next.js `/api/journeys` proxy,
+`/api/v1/journeys` create/poll/list routes back the frontend's direct API calls from the
 `/generate` polling page, `/tours` library, and `/tours/{id}` reader UI.
 
 ---
@@ -200,14 +200,11 @@ paths and request bodies do not accept `userId`. Legacy user-ID paths return `40
 body models reject a legacy `userId` field with `422`.
 The Clerk webhook instead requires a valid Svix signature.
 Journey creation expects `{ repoName, topic }`.
-Core frontend proxies use a shared response helper to preserve this API's JSON body,
-bodyless successful responses, and HTTP status; it also forwards `Retry-After` when the
-backend rate-limits a request.
 
-### Planned frontend change: direct browser calls
+### Direct browser calls
 
-The Next.js proxy layer is scheduled for removal; the browser will call this API
-directly with the Clerk session JWT.
+The browser calls this API directly with the Clerk session JWT. The Next.js routes that
+remain are limited to the GitHub App installation and OAuth redirect flow.
 
 **CORS** is in place: `CORSMiddleware` in `app/main.py` reads `CORS_ORIGINS`
 (comma-separated, default `http://localhost:3000`; production adds the Vercel frontend
@@ -216,9 +213,8 @@ origin). Exact origins only, bearer-header auth (`allow_credentials=False`), and
 `429` responses. Token-derived identity is also complete: repository, GitHub, agent,
 search, ingest, and journey routes use only the verified JWT `sub`.
 
-The error contract stays `HTTPException` → `{"detail": "..."}`; the frontend's shared
-fetch helper will surface `detail` strings directly in the UI. The remaining migration
-work is frontend-only.
+The error contract is `HTTPException` → `{"detail": "..."}`; the frontend's shared
+fetch helper surfaces `detail` strings directly in the UI.
 
 ### Rate limiting
 
