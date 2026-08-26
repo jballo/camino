@@ -23,6 +23,10 @@ identity, and sends the backend a verified `user.deleted` webhook that removes l
 Camino data. This flow does not currently uninstall or revoke the external GitHub App
 authorization.
 
+Removing the GitHub App from a GitHub account or organization is separate from Clerk
+account deletion. Its `installation.deleted` webhook removes Camino's connections,
+indexed repositories, tours, and embeddings for that installation.
+
 ---
 
 ## Run locally
@@ -35,6 +39,19 @@ npm run dev        # http://localhost:3000
 ```
 
 The backend must be running on port 8000 (see [Backend/README.md](../Backend/README.md)).
+Open the frontend at `http://localhost:3000` to match the backend's default
+`CORS_ORIGINS`; `http://127.0.0.1:3000` is a different origin and must be added
+explicitly.
+
+For the local GitHub App flow, configure:
+
+- Callback URL: `http://localhost:3000/api/github/authorize`
+- Setup URL: `http://localhost:3000/api/github/setup`, with **Redirect on update**
+  enabled
+
+The install route currently redirects to the `camino-onboarder` GitHub App. Use that App
+for local development or change `src/app/api/github/install/route.ts` until
+`GITHUB_APP_SLUG` is implemented.
 
 ### Environment variables
 
@@ -91,8 +108,12 @@ and ingest a repository, ask a question, generate a tour, and poll it to complet
 Pages obtain a current token with Clerk's `useAuth().getToken()`, pass it explicitly to
 the helper, and call `/api/v1/*` on `NEXT_PUBLIC_BACKEND_URL`. The helper attaches
 `Authorization: Bearer …`, serializes JSON bodies, and throws an `ApiError` containing
-the backend status and FastAPI `detail` message when a response fails. It does not
-automatically retry requests.
+the backend status and string FastAPI `detail` message when a response fails. Missing,
+malformed, non-JSON, and non-string error bodies fall back to
+`Request failed (<status>)`. The helper does not automatically retry requests.
+
+Rate-limited requests surface the backend's `detail` message through `ApiError`. Although
+FastAPI exposes `Retry-After`, the UI does not yet display a countdown.
 
 The browser never sends a `userId`. FastAPI verifies the JWT and derives identity from
 its `sub` claim.
@@ -107,3 +128,16 @@ The only remaining Next.js API routes are:
 Completed tour artifacts render directly from the backend `TourArtifact` shape:
 `title`, `topic`, `repo_name`, and ordered `steps` with file paths, line ranges,
 snippets, explanations, and optional "why" notes.
+
+---
+
+## Tests
+
+```bash
+npm test             # run Vitest once
+npm run test:watch   # watch mode
+npm run lint
+```
+
+`src/lib/api.test.ts` covers successful JSON responses, bearer-token requests, JSON
+POST bodies, FastAPI `detail` errors, unexpected error shapes, and non-JSON responses.

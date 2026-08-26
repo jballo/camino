@@ -51,6 +51,13 @@ fixture, delete `eval/.data/` and re-run.
 affects retrieval is a flag and is recorded in the output's `config` block, so a
 run is reproducible from its config alone.
 
+The optional exp6 cross-encoder reranker is not installed by the default dependency
+set. Install it before using `--rerank`:
+
+```bash
+uv sync --extra rerank
+```
+
 ```bash
 uv run python -m eval.run_eval --mode ablation        # vector vs fts vs hybrid
 uv run python -m eval.run_eval --fts-weight 1.5        # tune RRF weights
@@ -126,6 +133,23 @@ OpenAI key required.
 
 The live generation pipeline uses the same grounding contract before persisted tours
 are returned to the frontend.
+
+## Live tour smoke eval
+
+Runs the real Plan → Retrieve → Draft → Review pipeline against the indexed FastAPI
+fixture, then applies the structural grounding validator to every generated artifact.
+It requires Postgres with the fixture ingested and `OPENAI_API_KEY`.
+
+```bash
+cd Backend
+uv run python -m eval.ingest_local
+uv run python -m eval.run_tour_smoke_eval
+uv run python -m eval.run_tour_smoke_eval --topic "request lifecycle" --json
+uv run python -m eval.run_tour_smoke_eval --strict
+```
+
+Use `--model` to override the generator model, `--search-limit` to change candidates per
+step, and `--out` to save the full report.
 
 ## Tour judge eval (LLM-as-judge)
 

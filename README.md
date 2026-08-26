@@ -36,6 +36,7 @@ What works today:
 | Direct browser API access                   | ✅ Clerk JWT calls from React pages to FastAPI              |
 | Per-user API rate limiting                  | ✅ PostgreSQL fixed windows on costly POST routes           |
 | Clerk account-deletion webhook cleanup      | ✅ idempotent, transactional local-data cleanup             |
+| GitHub installation webhook cleanup         | ✅ removes local data when an installation is deleted       |
 | Production deploy                           | ❌ local dev only                                          |
 
 
@@ -167,8 +168,8 @@ Per-app specifics are in [Frontend/README.md](Frontend/README.md) and
 
 ## Quick start
 
-**Prerequisites:** Docker, [uv](https://docs.astral.sh/uv/), Node 20+, Clerk app,
-GitHub App, OpenAI API key.
+**Prerequisites:** Docker, [uv](https://docs.astral.sh/uv/), Python 3.14+, Node 20+,
+Clerk app, GitHub App, OpenAI API key.
 
 ```bash
 # 1. Postgres + pgvector
@@ -181,11 +182,35 @@ uv sync
 uv run fastapi dev app/main.py --port 8000
 
 # 3. Frontend
-cd Frontend
+cd ../Frontend
 cp .env.example .env.local
 npm install
 npm run dev            # http://localhost:3000
 ```
+
+The defaults expect the frontend at `http://localhost:3000` and FastAPI at
+`http://127.0.0.1:8000`. Browser origins are matched exactly: if you open the frontend
+at `http://127.0.0.1:3000` or another origin, add that exact value to the backend's
+`CORS_ORIGINS`.
+
+### Clerk and GitHub App configuration
+
+- GitHub App callback URL: `{NEXT_PUBLIC_APP_URL}/api/github/authorize`
+- GitHub App setup URL: `{NEXT_PUBLIC_APP_URL}/api/github/setup` with **Redirect on
+  update** enabled
+- GitHub App webhook URL: `{public-backend-origin}/webhooks/github`, subscribed to
+  installation events so `installation.deleted` cleanup is delivered
+- Clerk webhook URL: `{public-backend-origin}/webhooks/clerk`, subscribed to
+  `user.created`, `user.updated`, and `user.deleted` (the backend syncs local user
+  profiles from the first two and runs account cleanup on the third)
+
+Clerk and GitHub cannot reach localhost webhooks directly; use a tunnel such as ngrok
+or Cloudflare Tunnel when testing deletion flows locally. The install route currently
+targets the `camino-onboarder` GitHub App slug until `GITHUB_APP_SLUG` is configurable.
+
+When upgrading an existing local database, startup adds a nullable `githubUserId`
+compatibility column. Reconnect GitHub from **Settings** to populate it on a legacy
+connection.
 
 1. Sign in → open **Settings** → connect or manage the GitHub App.
 2. Open **Explore** → select a repo → **Process** (ingest). The repo must be indexed
@@ -198,6 +223,26 @@ npm run dev            # http://localhost:3000
 
 Details: [Backend/README.md](Backend/README.md) · [Frontend/README.md](Frontend/README.md) ·
 [Backend/eval/README.md](Backend/eval/README.md)
+
+---
+
+## Tests
+
+```bash
+# Backend
+cd Backend
+uv run pytest
+
+# Frontend
+cd ../Frontend
+npm test
+npm run lint
+```
+
+Backend coverage includes API/auth behavior, webhook cleanup, rate limiting, retrieval,
+tour generation, eval helpers, and startup schema compatibility. Frontend Vitest
+coverage exercises the shared direct-to-FastAPI client, including authenticated JSON
+requests and FastAPI/non-JSON error responses.
 
 ---
 
@@ -255,6 +300,9 @@ Before the first backend deployment:
 - [ ] Define recovery for tour jobs left `pending` or `generating` after a task restart.
 - [ ] Add CI checks for backend tests, frontend lint/build, CDK synthesis, and migrations.
 - [ ] Run a deployed smoke test: auth → GitHub connect → ingest → ask → generate tour.
+- [ ] Register `https://<backend>/webhooks/clerk` for Clerk user lifecycle events
+  (`user.created`, `user.updated`, `user.deleted`) and
+  `https://<backend>/webhooks/github` for GitHub installation events.
 
 Account deletion is initiated through Clerk's authenticated UserButton security UI,
 which requires the user to type `Delete account` before continuing. Clerk deletes the
@@ -272,6 +320,11 @@ does not revoke access at GitHub. Repository-level ownership within an installat
 needs an explicit policy before shared repositories are supported. Webhook cleanup and
 retry behavior are covered by backend tests. Any retained deletion audit record must be
 minimal and non-identifying.
+
+Uninstalling the GitHub App is a separate flow: GitHub sends `installation.deleted`,
+which removes every Camino connection, indexed repository, tour, and embedding for that
+installation. Clerk account deletion may instead preserve installation-scoped indexed
+data when another Camino user still references the same installation.
 
 The first alpha may use Single-AZ RDS and one ECS task. Multi-AZ RDS, private Fargate
 tasks with managed egress, autoscaling, SQS workers, and S3 artifact storage are
@@ -338,6 +391,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [~] Error handling — tour flow (`/`, `/generate`, `/tours`, `/tours/{id}`) surfaces expired-session (401/403), not-found (404), and backend errors distinctly; still needs clone-fail / repo-too-large / bad-LLM paths
 
 - [x] Direct browser → FastAPI integration — shared `backendFetch`/`ApiError`, six migrated pages, JWT-derived identity, CORS, and only the three GitHub OAuth redirect routes retained in Next.js
+- [x] Frontend API client tests — Vitest covers successful JSON requests, authenticated POST bodies, FastAPI `detail` errors, and malformed/non-JSON error responses
 - [x] Per-user PostgreSQL fixed-window rate limiting for agent Q&A, ingest, direct search, and journey creation; the backend returns `429` and `Retry-After`
 
 ### CLI (stretch)

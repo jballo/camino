@@ -2,7 +2,7 @@
 
 FastAPI service: GitHub App connection storage, repo ingest, hybrid code search,
 ask-the-codebase Q&A, backend guided-tour generation, per-user API rate limiting, and
-Clerk account-lifecycle webhook handling.
+Clerk account-lifecycle and GitHub installation webhook handling.
 
 **Retrieval loop:** paused at a tuned stack — exp1–5 shipped (hit@5 0.900), plus an
 optional exp6 cross-encoder reranker (BGE blend → 0.950). See
@@ -40,6 +40,11 @@ uv run fastapi dev app/main.py --port 8000
 
 API docs: http://127.0.0.1:8000/docs
 
+Clerk user sync and GitHub App uninstall cleanup arrive via webhooks, which need a
+publicly reachable backend. To exercise them locally, expose port 8000 with a tunnel and
+configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
+`/webhooks/clerk`, and GitHub to send installation events to `/webhooks/github`.
+
 ### Environment variables
 
 | Variable | Purpose |
@@ -62,14 +67,20 @@ API docs: http://127.0.0.1:8000/docs
 | `RATE_LIMIT_REPOSITORY_SEARCH_REQUESTS` / `RATE_LIMIT_REPOSITORY_SEARCH_WINDOW_SECONDS` | Direct-search limit (default 60 requests / 60 seconds) |
 | `RATE_LIMIT_JOURNEY_CREATE_REQUESTS` / `RATE_LIMIT_JOURNEY_CREATE_WINDOW_SECONDS` | Journey creation limit (default 5 requests / 3600 seconds) |
 
+Generate `ENCRYPTION_KEY` with:
+
+```bash
+uv run python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+```
+
 ---
 
 ## AWS deployment target
 
 The backend will run on **ECS Fargate**, provisioned by the TypeScript CDK app in the
 planned `Infrastructure/` directory. PostgreSQL will run on **Amazon RDS** in isolated
-subnets. See the root [AWS deployment plan](../README.md#aws-deployment-plan) for stack
-boundaries and deployment order.
+subnets. See the "AWS deployment plan" section of the root [README](../README.md) for
+stack boundaries and deployment order.
 
 ### Backend work required before Fargate
 
@@ -90,8 +101,12 @@ boundaries and deployment order.
 ### RDS and migrations
 
 The current lifespan hook in `app/main.py` runs `CREATE EXTENSION`,
-`SQLModel.metadata.create_all()`, and index creation. That is acceptable for local
-development but must not be the production migration mechanism.
+`SQLModel.metadata.create_all()`, an idempotent compatibility migration for the
+`GithubConnections.githubUserId` column, and index creation. The compatibility
+migration keeps the new column nullable on an existing database because a trustworthy
+numeric GitHub ID cannot be derived from legacy rows; reconnecting the GitHub account
+fills it in, while all new application writes require it. This startup mutation is
+acceptable for local development but must not be the production migration mechanism.
 
 Before connecting ECS to RDS:
 
@@ -138,7 +153,7 @@ worker and add a sweep that retries or fails stale jobs.
 
 ```
 app/
-├── main.py              # FastAPI app, DB init, HNSW + GIN indexes
+├── main.py              # FastAPI app, local DB init/compatibility migration, indexes
 ├── rate_limit.py        # PostgreSQL fixed-window limiter dependencies
 ├── api/
 │   ├── repositories.py  # list repos, ingest, hybrid search
@@ -156,6 +171,7 @@ app/
 │   └── review.py        # structural + coverage checks
 ├── services/
 │   ├── account_deletion.py # transactional, idempotent local account cleanup
+│   ├── installation_deletion.py # installation-scoped GitHub webhook cleanup
 │   ├── parser.py        # tree-sitter chunk extraction
 │   ├── embeddings.py    # build_embedding_text + OpenAI embed
 │   ├── search.py        # hybrid search (vector + FTS + RRF)
@@ -183,7 +199,7 @@ eval/
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/v1/github/connection` | Return the authenticated user's GitHub connection status |
-| `POST` | `/api/v1/github/connect` | Exchange GitHub OAuth code and persist encrypted installation credentials |
+| `POST` | `/api/v1/github/connect` | Exchange GitHub OAuth code and persist encrypted, expiring user-to-server credentials |
 | `GET` | `/api/v1/repositories` | List repos for the authenticated user's GitHub installation |
 | `GET` | `/api/v1/repositories/processed` | List indexed repos and chunk counts for the authenticated user's installation |
 | `POST` | `/api/v1/repositories/ingest` | Clone + parse + embed a repo |
@@ -193,13 +209,25 @@ eval/
 | `GET` | `/api/v1/journeys/{id}` | Poll a journey job; returns artifact/error when available |
 | `GET` | `/api/v1/journeys?repo=` | List the authenticated user's journey jobs |
 | `POST` | `/webhooks/clerk` | Process signed Clerk lifecycle events, including account cleanup |
+| `POST` | `/webhooks/github` | Process signed GitHub installation events and clean up deleted installations |
 
 All `/api/v1/*` routes require `Authorization: Bearer <clerk_session_jwt>`. The backend
 verifies the token and uses its `sub` claim as the sole source of user identity; API
 paths and request bodies do not accept `userId`. Legacy user-ID paths return `404`, and
 body models reject a legacy `userId` field with `422`.
 The Clerk webhook instead requires a valid Svix signature.
-Journey creation expects `{ repoName, topic }`.
+
+POST request bodies:
+
+- GitHub connect: `{ code, installationId }`
+- Repository ingest: `{ repoName }`
+- Repository search: `{ query, repoName, limit? }` (`limit` defaults to `10`, maximum
+  `100`)
+- Agent Q&A: `{ question, repoName }`
+- Journey creation: `{ repoName, topic }`
+
+GitHub connect requires expiring user-to-server OAuth credentials with a refresh token;
+non-expiring or already-expired tokens are rejected.
 
 ### Direct browser calls
 
@@ -214,7 +242,8 @@ origin). Exact origins only, bearer-header auth (`allow_credentials=False`), and
 search, ingest, and journey routes use only the verified JWT `sub`.
 
 The error contract is `HTTPException` → `{"detail": "..."}`; the frontend's shared
-fetch helper surfaces `detail` strings directly in the UI.
+fetch helper surfaces string `detail` values directly in the UI and falls back to the
+HTTP status when the error body is missing, malformed, non-JSON, or uses another shape.
 
 ### Rate limiting
 
@@ -252,6 +281,18 @@ Camino does not need a separate delete endpoint or confirmation UI for that flow
 cleanup removes Camino's stored encrypted GitHub connection, but it does not uninstall
 or revoke the external GitHub App authorization.
 
+### GitHub installation deletion
+
+A signed GitHub `installation.deleted` webhook removes every local connection, tour job,
+code chunk, and cascading embedding associated with that installation. Cleanup is
+set-based and transactional, so shared organization installations and webhook retries
+are handled safely. Failures roll back and return `500` so GitHub can retry; invalid
+signatures return `401`.
+
+Configure the GitHub App to deliver installation events to `POST /webhooks/github`.
+Requests are verified with the HMAC secret in `GH_WEBHOOK_SECRET`; this handler currently
+acts only on the `deleted` action.
+
 ---
 
 ## Eval Harnesses
@@ -287,6 +328,9 @@ Current focused coverage includes retrieval/search tests, agent smoke helpers,
 structural tour validation, tour generation helpers, journeys route tests,
 CORS origin/preflight/`Retry-After` exposure, fixed-window rate-limit behavior, Clerk
 JWT validation, token-derived query scoping, and rejection of legacy `userId`
-paths/body fields.
+paths/body fields. Startup coverage verifies that the compatibility DDL for the
+`githubUserId` column and index is emitted.
 Account-deletion tests cover full and shared-installation
 cleanup, idempotent webhook replay, rollback, retryable failures, and signature rejection.
+GitHub installation tests cover set-based cleanup, idempotent replay, rollback,
+retryable failures, and signature rejection.
