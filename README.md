@@ -146,13 +146,14 @@ flowchart LR
   GitHubOAuth[GitHub OAuth] -->|redirect| GithubRoutes
 ```
 
-Scope of the migration (not yet implemented):
+Migration status:
 
-- Backend: CORS is in (exact origins, `Retry-After` exposed). Drop `userId` from all
-  paths/bodies — identity comes solely from the verified token's `sub` claim.
+- Backend: complete. CORS is configured, and `userId` has been removed from every API
+  path/body; identity comes solely from the verified token's `sub` claim. Legacy paths
+  return `404`, and legacy body fields return `422`.
 - Frontend: one shared `backendFetch()` helper with a typed `ApiError` that surfaces
-  FastAPI `detail` strings; migrate all page call sites; delete the 8 proxy routes and
-  `forwardBackendResponse`.
+  FastAPI `detail` strings is still needed, along with migrating all page call sites and
+  deleting the 8 proxy routes plus `forwardBackendResponse`.
 - Keep only the three GitHub OAuth redirect routes in Next.js (cookie/CSRF handling
   and the Clerk session live on the app's domain).
 
@@ -334,7 +335,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [~] Error handling — tour flow (`/`, `/generate`, `/tours`, `/tours/{id}`) surfaces expired-session (401/403), not-found (404), and backend errors distinctly; still needs clone-fail / repo-too-large / bad-LLM paths
 
 - [~] Shared BFF proxy/auth wrapper — superseded by the planned direct browser → FastAPI migration; `forwardBackendResponse` and the proxy routes will be removed rather than extended (see Architecture → Planned)
-- [ ] Direct browser → FastAPI migration — backend CORS is in; remaining: token-derived identity (drop `userId` params), shared `backendFetch`/`ApiError` client helper, migrate 6 pages, delete 8 proxy routes; keep GitHub OAuth redirect routes
+- [~] Direct browser → FastAPI migration — backend CORS and token-derived identity are complete; remaining: shared `backendFetch`/`ApiError` client helper, migrate 6 pages, delete 8 proxy routes, and update the kept GitHub authorize route
 - [x] Per-user PostgreSQL fixed-window rate limiting for agent Q&A, ingest, direct search, and journey creation; proxies preserve `429` and `Retry-After`
 
 ### CLI (stretch)

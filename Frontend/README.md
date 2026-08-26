@@ -7,6 +7,11 @@ management, repo ingest/reprocess, processed-repo status, ask-the-codebase on `/
 and guided-tour generation from the home page through `/generate` and `/tours/{id}`.
 Costly backend POST routes are protected by per-user rate limits.
 
+**Current compatibility:** the backend has moved to token-derived identity, but these
+frontend proxies have not yet migrated. They still send `userId` in POST bodies and use
+legacy user-ID paths, so affected calls intentionally fail (`422` for legacy body fields,
+`404` for legacy paths) until the direct-call migration below lands.
+
 **Tour flow:** select a repo, make sure it has been processed, enter a topic, and click
 **Generate tour**. The app creates a journey through `/api/journeys`, polls progress on
 `/generate?id=...`, then opens the completed reader at `/tours/{id}`.
@@ -85,8 +90,9 @@ it to completion.
 ## API routes (Next.js → Backend proxy)
 
 Authenticated proxy routes forward the Clerk session JWT as
-`Authorization: Bearer …`. Journey creation also injects `userId` from Clerk before
-calling FastAPI.
+`Authorization: Bearer …`. The current proxy implementations also inject `userId` from
+Clerk or place it in backend paths. That request shape is now obsolete: FastAPI derives
+identity only from the verified JWT's `sub` claim and rejects the old contract.
 
 `src/lib/backend-response.ts` provides the shared `forwardBackendResponse` helper. It
 parses the backend JSON body, supplies a fallback for malformed error responses, and
@@ -99,19 +105,19 @@ still have route-specific response handling.
 This means backend validation, authentication, not-found, service-unavailable, and
 rate-limit responses can reach clients without being collapsed into a generic `500`.
 
-| Route | Backend |
-|---|---|
-| `/api/repositories` | `GET /api/v1/repositories/{userId}` |
-| `/api/repositories/ingest` | `POST …/ingest` |
-| `/api/repositories/processed` | `GET /api/v1/repositories/{userId}/processed` |
-| `/api/repositories/search` | `POST /api/v1/repositories/search` |
-| `/api/agent/ask` | `POST /api/v1/agent/ask` |
-| `/api/github/install` | GitHub App install redirect |
-| `/api/github/authorize` | OAuth callback |
-| `/api/github/setup` | GitHub App setup/update landing redirect |
-| `/api/github/status` | `GET /api/v1/github/connection/{userId}` |
-| `/api/journeys` | `POST /api/v1/journeys`, `GET /api/v1/journeys?repo=` |
-| `/api/journeys/{id}` | `GET /api/v1/journeys/{id}` |
+| Route | Current proxy request | Required backend request |
+|---|---|---|
+| `/api/repositories` | `GET /api/v1/repositories/{userId}` | `GET /api/v1/repositories` |
+| `/api/repositories/ingest` | `POST …/ingest` with `userId` | `POST …/ingest` without `userId` |
+| `/api/repositories/processed` | `GET /api/v1/repositories/{userId}/processed` | `GET /api/v1/repositories/processed` |
+| `/api/repositories/search` | `POST …/search` with `userId` | `POST …/search` without `userId` |
+| `/api/agent/ask` | `POST …/ask` with `userId` | `POST …/ask` without `userId` |
+| `/api/github/install` | GitHub App install redirect | Unchanged |
+| `/api/github/authorize` | OAuth callback sending `userId` | OAuth callback without `userId` |
+| `/api/github/setup` | GitHub App setup/update landing redirect | Unchanged |
+| `/api/github/status` | `GET /api/v1/github/connection/{userId}` | `GET /api/v1/github/connection` |
+| `/api/journeys` | `POST` with `userId`; `GET /api/v1/journeys?repo=` | `POST` without `userId`; unchanged `GET` |
+| `/api/journeys/{id}` | `GET /api/v1/journeys/{id}` | Unchanged |
 
 Completed tour artifacts render directly from the backend `TourArtifact` shape:
 `title`, `topic`, `repo_name`, and ordered `steps` with file paths, line ranges,
@@ -121,7 +127,8 @@ snippets, explanations, and optional "why" notes.
 
 ## Planned migration: direct browser → FastAPI calls
 
-The proxy layer above is scheduled for removal. Because the frontend deploys to Vercel
+The proxy layer above is scheduled for removal. The backend prerequisites—CORS and
+JWT-derived identity—are complete. Because the frontend deploys to Vercel
 and the backend to AWS, the proxies provide no network isolation — the backend must
 verify Clerk JWTs regardless — and they force a second error-translation step
 (FastAPI `{detail}` → proxy `{error}` → client strings). The plan, not yet implemented:
@@ -149,4 +156,5 @@ verify Clerk JWTs regardless — and they force a second error-translation step
   include this app's Vercel origin, and the "do not expose `BACKEND_URL`" guidance
   below no longer applies once migrated.
 
-Until the migration lands, the proxy documentation above reflects reality.
+Until the migration lands, the compatibility warning and request comparison above
+describe the intentional frontend/backend mismatch.

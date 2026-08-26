@@ -182,10 +182,10 @@ eval/
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/github/connection/{userId}` | Return GitHub connection status for settings UI |
+| `GET` | `/api/v1/github/connection` | Return the authenticated user's GitHub connection status |
 | `POST` | `/api/v1/github/connect` | Exchange GitHub OAuth code and persist encrypted installation credentials |
-| `GET` | `/api/v1/repositories/{userId}` | List repos for GitHub installation |
-| `GET` | `/api/v1/repositories/{userId}/processed` | List indexed repos and chunk counts for the installation |
+| `GET` | `/api/v1/repositories` | List repos for the authenticated user's GitHub installation |
+| `GET` | `/api/v1/repositories/processed` | List indexed repos and chunk counts for the authenticated user's installation |
 | `POST` | `/api/v1/repositories/ingest` | Clone + parse + embed a repo |
 | `POST` | `/api/v1/repositories/search` | Direct hybrid search (no agent) |
 | `POST` | `/api/v1/agent/ask` | Ask the codebase (ReAct agent) |
@@ -194,15 +194,17 @@ eval/
 | `GET` | `/api/v1/journeys?repo=` | List the authenticated user's journey jobs |
 | `POST` | `/webhooks/clerk` | Process signed Clerk lifecycle events, including account cleanup |
 
-All `/api/v1/*` routes require `Authorization: Bearer <clerk_session_jwt>`.
+All `/api/v1/*` routes require `Authorization: Bearer <clerk_session_jwt>`. The backend
+verifies the token and uses its `sub` claim as the sole source of user identity; API
+paths and request bodies do not accept `userId`. Legacy user-ID paths return `404`, and
+body models reject a legacy `userId` field with `422`.
 The Clerk webhook instead requires a valid Svix signature.
-Journey creation expects `{ repoName, topic, userId }`; the frontend injects `userId`
-from the Clerk session and redirects users to `/generate?id=<job_id>` for polling.
+Journey creation expects `{ repoName, topic }`.
 Core frontend proxies use a shared response helper to preserve this API's JSON body,
 bodyless successful responses, and HTTP status; it also forwards `Retry-After` when the
 backend rate-limits a request.
 
-### Planned API changes: direct browser calls
+### Planned frontend change: direct browser calls
 
 The Next.js proxy layer is scheduled for removal; the browser will call this API
 directly with the Clerk session JWT.
@@ -211,23 +213,12 @@ directly with the Clerk session JWT.
 (comma-separated, default `http://localhost:3000`; production adds the Vercel frontend
 origin). Exact origins only, bearer-header auth (`allow_credentials=False`), and
 `expose_headers=["Retry-After"]` so browser JavaScript can read rate-limit headers on
-`429` responses.
-
-One remaining backend change is planned (not yet implemented):
-
-1. **Token-derived identity** — drop `userId` from every path and request body and use
-   only `auth_user_id` from `get_authenticated_user_id` (the verified token's `sub`).
-   The existing 403 mismatch checks become dead code and are removed. Planned surface:
-   - `GET /api/v1/repositories/{userId}` → `GET /api/v1/repositories`
-   - `GET /api/v1/repositories/{userId}/processed` → `GET /api/v1/repositories/processed`
-   - `GET /api/v1/github/connection/{userId}` → `GET /api/v1/github/connection`
-   - `POST` bodies for `ingest`, `search`, `agent/ask`, `journeys`, and
-     `github/connect` lose their `userId` field
-   Route tests that build `userId` paths/bodies are updated in the same change.
+`429` responses. Token-derived identity is also complete: repository, GitHub, agent,
+search, ingest, and journey routes use only the verified JWT `sub`.
 
 The error contract stays `HTTPException` → `{"detail": "..."}`; the frontend's shared
-fetch helper will surface `detail` strings directly in the UI. The routes table above
-reflects the current, pre-migration surface.
+fetch helper will surface `detail` strings directly in the UI. The remaining migration
+work is frontend-only.
 
 ### Rate limiting
 
@@ -298,6 +289,8 @@ uv run pytest
 
 Current focused coverage includes retrieval/search tests, agent smoke helpers,
 structural tour validation, tour generation helpers, journeys route tests,
-CORS origin/preflight/`Retry-After` exposure, and fixed-window rate-limit behavior.
+CORS origin/preflight/`Retry-After` exposure, fixed-window rate-limit behavior, Clerk
+JWT validation, token-derived query scoping, and rejection of legacy `userId`
+paths/body fields.
 Account-deletion tests cover full and shared-installation
 cleanup, idempotent webhook replay, rollback, retryable failures, and signature rejection.
