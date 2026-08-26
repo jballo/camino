@@ -24,6 +24,17 @@ async def lifespan(app: FastAPI):
     SQLModel.metadata.create_all(engine)
 
     with engine.connect() as conn:
+        # create_all() does not evolve existing tables. Keep this nullable for
+        # legacy connections because a numeric GitHub user ID cannot be derived
+        # reliably from the data already stored; reconnecting fills it in.
+        conn.execute(text("""
+            ALTER TABLE githubconnections
+            ADD COLUMN IF NOT EXISTS "githubUserId" INTEGER
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS "ix_githubconnections_githubUserId"
+            ON githubconnections ("githubUserId")
+        """))
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS ix_embeddings_hnsw
             ON code_chunk_embeddings USING hnsw (embedding vector_cosine_ops)
