@@ -9,7 +9,7 @@ from github import (
     GithubException,
     RateLimitExceededException,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import exc
 from sqlmodel import select
 
@@ -23,8 +23,9 @@ router = APIRouter()
 
 
 class GithubConnectBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     code: str
-    userId: str
     installationId: int
 
 
@@ -33,17 +34,14 @@ class GithubConnectionStatus(BaseModel):
     githubUsername: str | None = None
 
 
-@router.get("/connection/{userId}")
+@router.get("/connection")
 async def get_github_connection(
-    userId: str,
     session: SessionDep,
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> GithubConnectionStatus:
-    if auth_user_id != userId:
-        raise HTTPException(status_code=403, detail="Forbidden")
     try:
         statement = select(GithubConnections).where(
-            GithubConnections.userId == userId
+            GithubConnections.userId == auth_user_id
         )
         connection = session.exec(statement).one_or_none()
     except exc.OperationalError:
@@ -63,8 +61,6 @@ async def add_github_connection(
     session: SessionDep,
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> str:
-    if auth_user_id != payload.userId:
-        raise HTTPException(status_code=403, detail="Forbidden")
     try:
         g = Github()
         oauth_app = g.get_oauth_application(
@@ -114,7 +110,7 @@ async def add_github_connection(
 
         existing = session.exec(
             select(GithubConnections).where(
-                GithubConnections.userId == payload.userId
+                GithubConnections.userId == auth_user_id
             )
         ).one_or_none()
 
@@ -130,7 +126,7 @@ async def add_github_connection(
             return "Successfully updated github connection"
 
         connection = GithubConnections(
-            userId=payload.userId,
+            userId=auth_user_id,
             githubUsername=username,
             installationId=payload.installationId,
             encryptedAccessToken=encrypted_access_token,

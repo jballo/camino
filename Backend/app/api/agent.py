@@ -1,7 +1,7 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import exc
 from sqlmodel import select
 
@@ -18,9 +18,10 @@ router = APIRouter()
 
 
 class AskBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     question: str = Field(min_length=1, max_length=4000)
     repoName: str
-    userId: str
 
 
 class SourceResponse(BaseModel):
@@ -46,12 +47,9 @@ async def ask_agent(
     session: SessionDep,
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> AskResponse:
-    if auth_user_id != payload.userId:
-        raise HTTPException(status_code=403, detail="Forbidden")
-
     try:
         statement = select(GithubConnections).where(
-            GithubConnections.userId == payload.userId
+            GithubConnections.userId == auth_user_id
         )
         gh_connection = session.exec(statement).one()
     except exc.NoResultFound:

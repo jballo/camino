@@ -2,7 +2,7 @@ import datetime as dt
 import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import exc
 from sqlmodel import Session, select
 
@@ -19,9 +19,10 @@ router = APIRouter()
 
 
 class CreateJourneyBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     repoName: str
     topic: str = Field(min_length=1, max_length=500)
-    userId: str
 
 
 class JourneyCreatedResponse(BaseModel):
@@ -136,12 +137,11 @@ async def create_journey(
     background_tasks: BackgroundTasks,
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> JourneyCreatedResponse:
-    if auth_user_id != payload.userId:
-        raise HTTPException(status_code=403, detail="Forbidden")
-
     try:
         gh_connection = session.exec(
-            select(GithubConnections).where(GithubConnections.userId == payload.userId)
+            select(GithubConnections).where(
+                GithubConnections.userId == auth_user_id
+            )
         ).one()
     except exc.NoResultFound:
         raise HTTPException(status_code=404, detail="Github connection not found for user")
@@ -151,7 +151,7 @@ async def create_journey(
 
     try:
         job = TourJob(
-            userId=payload.userId,
+            userId=auth_user_id,
             installation_id=gh_connection.installationId,
             repo_name=payload.repoName,
             topic=payload.topic,

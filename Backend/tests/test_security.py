@@ -13,6 +13,12 @@ from fastapi.testclient import TestClient
 from app.config import settings
 from app.db import get_session
 from app.main import app
+from app.rate_limit import (
+    AGENT_ASK_RATE_LIMIT,
+    JOURNEY_CREATE_RATE_LIMIT,
+    REPOSITORY_INGEST_RATE_LIMIT,
+    REPOSITORY_SEARCH_RATE_LIMIT,
+)
 from app.security import get_authenticated_user_id
 
 
@@ -234,8 +240,31 @@ def real_app_client():
         yield session
 
     app.dependency_overrides[get_session] = _fake_session
+    app.dependency_overrides[AGENT_ASK_RATE_LIMIT] = lambda: None
+    app.dependency_overrides[JOURNEY_CREATE_RATE_LIMIT] = lambda: None
+    app.dependency_overrides[REPOSITORY_INGEST_RATE_LIMIT] = lambda: None
+    app.dependency_overrides[REPOSITORY_SEARCH_RATE_LIMIT] = lambda: None
     try:
         yield TestClient(app)
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def real_app_client_with_session():
+    session = MagicMock()
+    session.exec.return_value.all.return_value = []
+
+    def _fake_session():
+        yield session
+
+    app.dependency_overrides[get_session] = _fake_session
+    app.dependency_overrides[AGENT_ASK_RATE_LIMIT] = lambda: None
+    app.dependency_overrides[JOURNEY_CREATE_RATE_LIMIT] = lambda: None
+    app.dependency_overrides[REPOSITORY_INGEST_RATE_LIMIT] = lambda: None
+    app.dependency_overrides[REPOSITORY_SEARCH_RATE_LIMIT] = lambda: None
+    try:
+        yield TestClient(app), session
     finally:
         app.dependency_overrides.clear()
 
@@ -258,14 +287,119 @@ def test_real_app_route_enforces_clerk_session_jwt(
     assert authenticated_response.json() == []
 
 
-def test_real_app_route_forbids_verified_user_from_another_users_resource(
+@pytest.mark.parametrize(
+    "url",
+    [
+        "/api/v1/github/connection/another_user",
+        "/api/v1/repositories/another_user",
+        "/api/v1/repositories/another_user/processed",
+    ],
+)
+def test_real_app_rejects_legacy_user_id_paths(
     clerk_signing_key,
     real_app_client,
+    url,
 ):
     token = _session_jwt(clerk_signing_key)
 
     response = real_app_client.get(
-        "/api/v1/github/connection/another_user",
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("url", "payload"),
+    [
+        (
+            "/api/v1/agent/ask",
+            {
+                "question": "How does authentication work?",
+                "repoName": "org/repo",
+                "userId": "another_user",
+            },
+        ),
+        (
+            "/api/v1/journeys",
+            {
+                "repoName": "org/repo",
+                "topic": "authentication",
+                "userId": "another_user",
+            },
+        ),
+        (
+            "/api/v1/repositories/ingest",
+            {
+                "repoName": "org/repo",
+                "userId": "another_user",
+            },
+        ),
+        (
+            "/api/v1/repositories/search",
+            {
+                "query": "authentication",
+                "repoName": "org/repo",
+                "userId": "another_user",
+            },
+        ),
+        (
+            "/api/v1/github/connect",
+            {
+                "code": "oauth-code",
+                "installationId": 123,
+                "userId": "another_user",
+            },
+        ),
+    ],
+)
+def test_real_app_rejects_legacy_user_id_body_fields(
+    clerk_signing_key,
+    real_app_client,
+    url,
+    payload,
+):
+    token = _session_jwt(clerk_signing_key)
+
+    response = real_app_client.post(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        json=payload,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["type"] == "extra_forbidden"
+    assert response.json()["detail"][0]["loc"] == ["body", "userId"]
+
+
+def test_list_journeys_scopes_query_to_session_jwt_user_id(
+    clerk_signing_key,
+    real_app_client_with_session,
+):
+    app_client, session = real_app_client_with_session
+    token = _session_jwt(clerk_signing_key)
+
+    response = app_client.get(
+        "/api/v1/journeys",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    statement = session.exec.call_args.args[0]
+    assert "user_frontend_123" in statement.compile().params.values()
+
+
+def test_get_journey_rejects_session_jwt_user_who_does_not_own_job(
+    clerk_signing_key,
+    real_app_client_with_session,
+):
+    app_client, session = real_app_client_with_session
+    session.get.return_value = MagicMock(userId="another_user")
+    token = _session_jwt(clerk_signing_key)
+
+    response = app_client.get(
+        "/api/v1/journeys/1",
         headers={"Authorization": f"Bearer {token}"},
     )
 

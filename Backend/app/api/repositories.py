@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from github import Auth, GithubException, GithubIntegration
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import RequestException, Timeout
 from sqlalchemy import exc, func, text
@@ -64,9 +64,10 @@ async def _gh_with_retry(fn, what, attempts=4, base_delay=0.5):
 router = APIRouter()
 
 class SearchBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     query: str
     repoName: str
-    userId: str
     limit: int = Field(default=10, ge=1, le=100)
 
 
@@ -87,20 +88,20 @@ class SearchResultResponse(BaseModel):
 
 
 class RepoIngestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     repoName: str
-    userId: str
 
 
-@router.get("/{userId}")
+@router.get("")
 async def list_repositories(
-    userId: str,
     session: SessionDep,
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> list[str]:
-    if auth_user_id != userId:
-        raise HTTPException(status_code=403, detail="Forbidden")
     try:
-        statement = select(GithubConnections).where(GithubConnections.userId == userId)
+        statement = select(GithubConnections).where(
+            GithubConnections.userId == auth_user_id
+        )
         result = session.exec(statement)
         gh_connection = result.one()
     except exc.NoResultFound:
@@ -121,16 +122,15 @@ async def list_repositories(
         raise HTTPException(status_code=500, detail="Github error")
 
 
-@router.get("/{userId}/processed")
+@router.get("/processed")
 async def list_processed_repositories(
-    userId: str,
     session: SessionDep,
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> list[dict]:
-    if auth_user_id != userId:
-        raise HTTPException(status_code=403, detail="Forbidden")
     try:
-        statement = select(GithubConnections).where(GithubConnections.userId == userId)
+        statement = select(GithubConnections).where(
+            GithubConnections.userId == auth_user_id
+        )
         result = session.exec(statement)
         gh_connection = result.one()
     except exc.NoResultFound:
@@ -161,11 +161,9 @@ async def process_repository(
     session: SessionDep,
     auth_user_id: str = Depends(get_authenticated_user_id),
 ):
-    if auth_user_id != payload.userId:
-        raise HTTPException(status_code=403, detail="Forbidden")
     try:
         statement = select(GithubConnections).where(
-            GithubConnections.userId == payload.userId
+            GithubConnections.userId == auth_user_id
         )
         result = session.exec(statement)
         gh_connection = result.one()
@@ -381,11 +379,9 @@ async def search_repository(
     session: SessionDep,
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> list[SearchResultResponse]:
-    if auth_user_id != payload.userId:
-        raise HTTPException(status_code=403, detail="Forbidden")
     try:
         statement = select(GithubConnections).where(
-            GithubConnections.userId == payload.userId
+            GithubConnections.userId == auth_user_id
         )
         result = session.exec(statement)
         gh_connection = result.one()

@@ -63,7 +63,6 @@ def test_search_returns_results(mock_search):
     resp = client.post(SEARCH_URL, json={
         "query": "login",
         "repoName": "org/repo",
-        "userId": "user_123",
     })
     assert resp.status_code == 200
     data = resp.json()
@@ -82,7 +81,6 @@ def test_search_passes_limit(mock_search):
     resp = client.post(SEARCH_URL, json={
         "query": "login",
         "repoName": "org/repo",
-        "userId": "user_123",
         "limit": 5,
     })
     assert resp.status_code == 200
@@ -99,7 +97,6 @@ def test_search_empty_results(mock_search):
     resp = client.post(SEARCH_URL, json={
         "query": "nonexistent",
         "repoName": "org/repo",
-        "userId": "user_123",
     })
     assert resp.status_code == 200
     assert resp.json() == []
@@ -108,7 +105,6 @@ def test_search_empty_results(mock_search):
 def test_search_missing_query_returns_422():
     resp = client.post(SEARCH_URL, json={
         "repoName": "org/repo",
-        "userId": "user_123",
     })
     assert resp.status_code == 422
 
@@ -116,15 +112,15 @@ def test_search_missing_query_returns_422():
 def test_search_missing_repo_returns_422():
     resp = client.post(SEARCH_URL, json={
         "query": "login",
-        "userId": "user_123",
     })
     assert resp.status_code == 422
 
 
-def test_search_missing_userId_returns_422():
+def test_search_rejects_deprecated_user_id_field():
     resp = client.post(SEARCH_URL, json={
         "query": "login",
         "repoName": "org/repo",
+        "userId": "user_123",
     })
     assert resp.status_code == 422
 
@@ -138,7 +134,6 @@ def test_search_default_limit_is_10(mock_search):
     resp = client.post(SEARCH_URL, json={
         "query": "login",
         "repoName": "org/repo",
-        "userId": "user_123",
     })
     assert resp.status_code == 200
     _, kwargs = mock_search.call_args
@@ -154,7 +149,6 @@ def test_search_response_has_all_fields(mock_search):
     resp = client.post(SEARCH_URL, json={
         "query": "login",
         "repoName": "org/repo",
-        "userId": "user_123",
     })
     data = resp.json()[0]
     expected_fields = {
