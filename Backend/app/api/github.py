@@ -1,4 +1,5 @@
 import datetime as dt
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from github import (
@@ -9,7 +10,8 @@ from github import (
     GithubException,
     RateLimitExceededException,
 )
-from pydantic import BaseModel
+from psycopg2.errorcodes import UNIQUE_VIOLATION
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import exc
 from sqlmodel import select
 
@@ -19,12 +21,14 @@ from app.models.github_connection import GithubConnections
 from app.security import encrypt_token, get_authenticated_user_id
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
 class GithubConnectBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     code: str
-    userId: str
     installationId: int
 
 
@@ -33,17 +37,14 @@ class GithubConnectionStatus(BaseModel):
     githubUsername: str | None = None
 
 
-@router.get("/connection/{userId}")
+@router.get("/connection")
 async def get_github_connection(
-    userId: str,
     session: SessionDep,
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> GithubConnectionStatus:
-    if auth_user_id != userId:
-        raise HTTPException(status_code=403, detail="Forbidden")
     try:
         statement = select(GithubConnections).where(
-            GithubConnections.userId == userId
+            GithubConnections.userId == auth_user_id
         )
         connection = session.exec(statement).one_or_none()
     except exc.OperationalError:
@@ -63,8 +64,6 @@ async def add_github_connection(
     session: SessionDep,
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> str:
-    if auth_user_id != payload.userId:
-        raise HTTPException(status_code=403, detail="Forbidden")
     try:
         g = Github()
         oauth_app = g.get_oauth_application(
@@ -78,7 +77,9 @@ async def add_github_connection(
                 token=access_token_obj.token,
             )
         )
-        username = g.get_user().login
+        github_user = g.get_user()
+        username = github_user.login
+        github_user_id = github_user.id
         access_token: str = access_token_obj.token
         expires_in: int | None = access_token_obj.expires_in
         refresh_token: str | None = access_token_obj.refresh_token
@@ -114,12 +115,13 @@ async def add_github_connection(
 
         existing = session.exec(
             select(GithubConnections).where(
-                GithubConnections.userId == payload.userId
+                GithubConnections.userId == auth_user_id
             )
         ).one_or_none()
 
         if existing is not None:
             existing.githubUsername = username
+            existing.githubUserId = github_user_id
             existing.installationId = payload.installationId
             existing.encryptedAccessToken = encrypted_access_token
             existing.encryptedRefreshToken = encrypted_refresh_token
@@ -130,8 +132,9 @@ async def add_github_connection(
             return "Successfully updated github connection"
 
         connection = GithubConnections(
-            userId=payload.userId,
+            userId=auth_user_id,
             githubUsername=username,
+            githubUserId=github_user_id,
             installationId=payload.installationId,
             encryptedAccessToken=encrypted_access_token,
             encryptedRefreshToken=encrypted_refresh_token,
@@ -142,9 +145,13 @@ async def add_github_connection(
         session.commit()
         session.refresh(connection)
         return "Successfully added github connection"
-    except exc.IntegrityError:
+    except exc.IntegrityError as e:
         session.rollback()
-        raise HTTPException(status_code=409, detail="Already connected")
+        pgcode = getattr(getattr(e, "orig", None), "pgcode", None)
+        if pgcode == UNIQUE_VIOLATION:
+            raise HTTPException(status_code=409, detail="Already connected")
+        logger.exception("Failed to persist GitHub connection")
+        raise HTTPException(status_code=500, detail="Database error")
     except exc.OperationalError:
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")

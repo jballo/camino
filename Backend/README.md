@@ -9,7 +9,7 @@ optional exp6 cross-encoder reranker (BGE blend → 0.950). See
 [eval/EXPERIMENTS.md](eval/EXPERIMENTS.md).
 **Phase 2 status:** the guided-tour backend is wired end-to-end with the frontend.
 The Plan → Retrieve → Draft → Review graph, `TourJob` persistence, and
-`/api/v1/journeys` create/poll/list routes back the Next.js `/api/journeys` proxy,
+`/api/v1/journeys` create/poll/list routes back the frontend's direct API calls from the
 `/generate` polling page, `/tours` library, and `/tours/{id}` reader UI.
 
 ---
@@ -49,6 +49,7 @@ API docs: http://127.0.0.1:8000/docs
 | `DATABASE_MAX_OVERFLOW` | Temporary overflow connections per backend process (default `10`) |
 | `OPENAI_API_KEY` | Embeddings + agent chat |
 | `AGENT_MODEL` | Chat model (default `gpt-4o-mini`) |
+| `CORS_ORIGINS` | Allowed browser origins, comma-separated (default `http://localhost:3000`) |
 | `CLERK_SECRET_KEY` | Clerk backend API |
 | `CLERK_WH_KEY` | Clerk webhook signing secret |
 | `CLERK_JWT_KEY` | Optional — local JWT verification |
@@ -119,9 +120,10 @@ Inject these values from Secrets Manager into the task definition:
   `GH_WEBHOOK_SECRET`
 - `ENCRYPTION_KEY`
 
-Non-secret settings such as `AGENT_MODEL`, pool sizes, and rate-limit thresholds can be
-plain task-definition environment variables. Secret values must not be embedded in the
-Docker image, CDK source, CloudFormation outputs, or committed `.env` files.
+Non-secret settings such as `AGENT_MODEL`, `CORS_ORIGINS`, pool sizes, and rate-limit
+thresholds can be plain task-definition environment variables. Secret values must not
+be embedded in the Docker image, CDK source, CloudFormation outputs, or committed
+`.env` files. Production `CORS_ORIGINS` must include the Vercel frontend origin.
 
 ### Current job limitation
 
@@ -180,10 +182,10 @@ eval/
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/github/connection/{userId}` | Return GitHub connection status for settings UI |
+| `GET` | `/api/v1/github/connection` | Return the authenticated user's GitHub connection status |
 | `POST` | `/api/v1/github/connect` | Exchange GitHub OAuth code and persist encrypted installation credentials |
-| `GET` | `/api/v1/repositories/{userId}` | List repos for GitHub installation |
-| `GET` | `/api/v1/repositories/{userId}/processed` | List indexed repos and chunk counts for the installation |
+| `GET` | `/api/v1/repositories` | List repos for the authenticated user's GitHub installation |
+| `GET` | `/api/v1/repositories/processed` | List indexed repos and chunk counts for the authenticated user's installation |
 | `POST` | `/api/v1/repositories/ingest` | Clone + parse + embed a repo |
 | `POST` | `/api/v1/repositories/search` | Direct hybrid search (no agent) |
 | `POST` | `/api/v1/agent/ask` | Ask the codebase (ReAct agent) |
@@ -192,13 +194,27 @@ eval/
 | `GET` | `/api/v1/journeys?repo=` | List the authenticated user's journey jobs |
 | `POST` | `/webhooks/clerk` | Process signed Clerk lifecycle events, including account cleanup |
 
-All `/api/v1/*` routes require `Authorization: Bearer <clerk_session_jwt>`.
+All `/api/v1/*` routes require `Authorization: Bearer <clerk_session_jwt>`. The backend
+verifies the token and uses its `sub` claim as the sole source of user identity; API
+paths and request bodies do not accept `userId`. Legacy user-ID paths return `404`, and
+body models reject a legacy `userId` field with `422`.
 The Clerk webhook instead requires a valid Svix signature.
-Journey creation expects `{ repoName, topic, userId }`; the frontend injects `userId`
-from the Clerk session and redirects users to `/generate?id=<job_id>` for polling.
-Core frontend proxies use a shared response helper to preserve this API's JSON body,
-bodyless successful responses, and HTTP status; it also forwards `Retry-After` when the
-backend rate-limits a request.
+Journey creation expects `{ repoName, topic }`.
+
+### Direct browser calls
+
+The browser calls this API directly with the Clerk session JWT. The Next.js routes that
+remain are limited to the GitHub App installation and OAuth redirect flow.
+
+**CORS** is in place: `CORSMiddleware` in `app/main.py` reads `CORS_ORIGINS`
+(comma-separated, default `http://localhost:3000`; production adds the Vercel frontend
+origin). Exact origins only, bearer-header auth (`allow_credentials=False`), and
+`expose_headers=["Retry-After"]` so browser JavaScript can read rate-limit headers on
+`429` responses. Token-derived identity is also complete: repository, GitHub, agent,
+search, ingest, and journey routes use only the verified JWT `sub`.
+
+The error contract is `HTTPException` → `{"detail": "..."}`; the frontend's shared
+fetch helper surfaces `detail` strings directly in the UI.
 
 ### Rate limiting
 
@@ -268,6 +284,9 @@ uv run pytest
 ```
 
 Current focused coverage includes retrieval/search tests, agent smoke helpers,
-structural tour validation, tour generation helpers, journeys route tests, and
-fixed-window rate-limit behavior. Account-deletion tests cover full and shared-installation
+structural tour validation, tour generation helpers, journeys route tests,
+CORS origin/preflight/`Retry-After` exposure, fixed-window rate-limit behavior, Clerk
+JWT validation, token-derived query scoping, and rejection of legacy `userId`
+paths/body fields.
+Account-deletion tests cover full and shared-installation
 cleanup, idempotent webhook replay, rollback, retryable failures, and signature rejection.

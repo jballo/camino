@@ -1,5 +1,7 @@
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Annotated
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -25,7 +27,22 @@ class Settings(BaseSettings):
     rate_limit_repository_search_window_seconds: int = 60
     rate_limit_journey_create_requests: int = 5
     rate_limit_journey_create_window_seconds: int = 3600
+    cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
     model_config = SettingsConfigDict(env_file=".env")
 
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def split_cors_origins(cls, value: str | list[str]) -> list[str]:
+        valid_origins: list[str] = []
+        raw_origins = value.split(',') if isinstance(value, str) else value
+
+        for origin in raw_origins:
+            stripped_origin = origin.strip()
+            if not stripped_origin:
+                continue
+            valid_origins.append(stripped_origin)
+        if len(valid_origins) < 1:
+            raise ValueError("CORS_ORIGINS must contain at least one origin")
+        return valid_origins
 
 settings = Settings()

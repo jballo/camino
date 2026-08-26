@@ -51,7 +51,6 @@ def _body(**overrides):
     base = {
         "repoName": "org/repo",
         "topic": "authentication flow",
-        "userId": "user_123",
     }
     base.update(overrides)
     return base
@@ -89,14 +88,14 @@ def test_create_schedules_generation(mock_run):
 
 
 @patch("app.api.journeys._run_generation")
-def test_create_forbidden_when_user_mismatch(mock_run):
-    resp = client.post(JOURNEYS_URL, json=_body(userId="someone_else"))
-    assert resp.status_code == 403
+def test_create_rejects_deprecated_user_id_field(mock_run):
+    resp = client.post(JOURNEYS_URL, json=_body(userId="user_123"))
+    assert resp.status_code == 422
     mock_run.assert_not_called()
 
 
 def test_create_missing_topic_returns_422():
-    resp = client.post(JOURNEYS_URL, json={"repoName": "org/repo", "userId": "user_123"})
+    resp = client.post(JOURNEYS_URL, json={"repoName": "org/repo"})
     assert resp.status_code == 422
 
 

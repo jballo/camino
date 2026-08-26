@@ -63,7 +63,6 @@ def _body(**overrides):
     base = {
         "question": "How does login work?",
         "repoName": "org/repo",
-        "userId": "user_123",
     }
     base.update(overrides)
     return base
@@ -117,16 +116,16 @@ def test_ask_source_has_expected_fields(mock_answer):
 # ── auth ────────────────────────────────────────────────────────────
 
 @patch("app.api.agent.answer_question", new_callable=AsyncMock, return_value=SAMPLE_ANSWER)
-def test_ask_forbidden_when_user_mismatch(mock_answer):
-    resp = client.post(ASK_URL, json=_body(userId="someone_else"))
-    assert resp.status_code == 403
+def test_ask_rejects_deprecated_user_id_field(mock_answer):
+    resp = client.post(ASK_URL, json=_body(userId="user_123"))
+    assert resp.status_code == 422
     mock_answer.assert_not_called()
 
 
 # ── validation ──────────────────────────────────────────────────────
 
 def test_ask_missing_question_returns_422():
-    resp = client.post(ASK_URL, json={"repoName": "org/repo", "userId": "user_123"})
+    resp = client.post(ASK_URL, json={"repoName": "org/repo"})
     assert resp.status_code == 422
 
 
@@ -141,7 +140,7 @@ def test_ask_question_too_long_returns_422():
 
 
 def test_ask_missing_repo_returns_422():
-    resp = client.post(ASK_URL, json={"question": "q", "userId": "user_123"})
+    resp = client.post(ASK_URL, json={"question": "q"})
     assert resp.status_code == 422
 
 

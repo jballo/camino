@@ -11,8 +11,11 @@ import {
   RefreshCw,
   Search,
 } from "lucide-react";
+import { useAuth } from "@clerk/nextjs";
 import { useCallback, useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
+
+import { ApiError, backendFetch } from "@/lib/api";
 
 type Source = {
   chunk_id: number;
@@ -38,6 +41,7 @@ type IngestResult = {
 };
 
 export default function Explore() {
+  const { getToken } = useAuth();
   const [repos, setRepos] = useState<string[]>([]);
   const [reposLoading, setReposLoading] = useState(false);
   const [reposError, setReposError] = useState<string | undefined>(undefined);
@@ -66,9 +70,13 @@ export default function Explore() {
     setReposLoading(true);
     setReposError(undefined);
     try {
-      const response = await fetch("/api/repositories", { method: "GET" });
-      if (!response.ok) throw new Error("Failed to get repos");
-      const result = await response.json();
+      const token = await getToken();
+      if (!token) throw new ApiError(401, "Not authenticated");
+
+      const result = await backendFetch<string[]>(
+        "/api/v1/repositories",
+        token,
+      );
       setRepos(Array.isArray(result) ? result : []);
     } catch (error) {
       console.log("Error: ", error);
@@ -76,19 +84,17 @@ export default function Explore() {
     } finally {
       setReposLoading(false);
     }
-  }, []);
+  }, [getToken]);
 
   const loadProcessed = useCallback(async () => {
     setProcessedLoading(true);
     try {
-      const response = await fetch("/api/repositories/processed", {
-        method: "GET",
-      });
-      if (!response.ok) throw new Error("Failed to get processed repos");
-      const result = (await response.json()) as {
-        repo_name: string;
-        chunk_count: number;
-      }[];
+      const token = await getToken();
+      if (!token) throw new ApiError(401, "Not authenticated");
+
+      const result = await backendFetch<
+        { repo_name: string; chunk_count: number }[]
+      >("/api/v1/repositories/processed", token);
       const map: Record<string, number> = {};
       if (Array.isArray(result)) {
         for (const row of result) map[row.repo_name] = row.chunk_count;
@@ -99,7 +105,7 @@ export default function Explore() {
     } finally {
       setProcessedLoading(false);
     }
-  }, []);
+  }, [getToken]);
 
   useEffect(() => {
     loadRepos();
@@ -112,14 +118,18 @@ export default function Explore() {
       setIngestResult(undefined);
       setProcessError(undefined);
       try {
-        const response = await fetch("/api/repositories/ingest", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ repoName }),
-        });
-        if (!response.ok) throw new Error("Failed to process repo");
-        const result = (await response.json()) as IngestResult;
-        setIngestResult(result);
+        const token = await getToken();
+        if (!token) throw new ApiError(401, "Not authenticated");
+
+        const result = await backendFetch<Omit<IngestResult, "repoName">>(
+          "/api/v1/repositories/ingest",
+          token,
+          {
+            method: "POST",
+            body: { repoName },
+          },
+        );
+        setIngestResult({ repoName, ...result });
         setProcessedMap((prev) => ({
           ...prev,
           [repoName]: result.chunks_inserted,
@@ -132,7 +142,7 @@ export default function Explore() {
         setProcessingRepo(undefined);
       }
     },
-    [loadProcessed],
+    [getToken, loadProcessed],
   );
 
   const askAgent = useCallback(async () => {
@@ -141,13 +151,17 @@ export default function Explore() {
     setAskError(undefined);
     setAnswer(undefined);
     try {
-      const response = await fetch("/api/agent/ask", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: query, repoName: selectedRepo }),
-      });
-      if (!response.ok) throw new Error("Failed to ask agent");
-      const result = (await response.json()) as AgentAnswer;
+      const token = await getToken();
+      if (!token) throw new ApiError(401, "Not authenticated");
+
+      const result = await backendFetch<AgentAnswer>(
+        "/api/v1/agent/ask",
+        token,
+        {
+          method: "POST",
+          body: { question: query, repoName: selectedRepo },
+        },
+      );
       setAnswer(result);
     } catch (error) {
       console.log("Error: ", error);
@@ -155,7 +169,7 @@ export default function Explore() {
     } finally {
       setAsking(false);
     }
-  }, [selectedRepo, query]);
+  }, [getToken, selectedRepo, query]);
 
   return (
     <div className="flex flex-col w-full min-h-full">

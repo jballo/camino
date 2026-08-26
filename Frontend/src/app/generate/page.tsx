@@ -1,6 +1,8 @@
 "use client";
 
 import type { JourneyResponse, JourneyStatus } from "@/types/tour";
+import { ApiError, backendFetch } from "@/lib/api";
+import { useAuth } from "@clerk/nextjs";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -35,6 +37,7 @@ function statusRank(status: JourneyStatus): number {
 function GenerateInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { getToken } = useAuth();
   const id = searchParams.get("id");
 
   const [journey, setJourney] = useState<JourneyResponse | undefined>(undefined);
@@ -51,24 +54,13 @@ function GenerateInner() {
 
     const poll = async () => {
       try {
-        const response = await fetch(`/api/journeys/${id}`, { method: "GET" });
-        if (!response.ok) {
-          if (cancelled) return;
-          const errBody = (await response.json().catch(() => null)) as
-            | { error?: string }
-            | null;
-          if (response.status === 401 || response.status === 403) {
-            setError(
-              "Your session expired. Please refresh the page and log in again.",
-            );
-          } else if (response.status === 404) {
-            setError("We couldn't find this tour. It may have been removed.");
-          } else {
-            setError(errBody?.error ?? "Failed to fetch journey status.");
-          }
-          return;
-        }
-        const result = (await response.json()) as JourneyResponse;
+        const token = await getToken();
+        if (!token) throw new ApiError(401, "Not authenticated");
+
+        const result = await backendFetch<JourneyResponse>(
+          `/api/v1/journeys/${encodeURIComponent(id)}`,
+          token,
+        );
         if (cancelled) return;
 
         setJourney(result);
@@ -86,7 +78,22 @@ function GenerateInner() {
       } catch (err) {
         if (cancelled) return;
         console.log("Error: ", err);
-        setError("Lost connection while checking progress.");
+        if (
+          err instanceof ApiError &&
+          (err.status === 401 || err.status === 403)
+        ) {
+          setError(
+            "Your session expired. Please refresh the page and log in again.",
+          );
+        } else if (err instanceof ApiError && err.status === 404) {
+          setError("We couldn't find this tour. It may have been removed.");
+        } else {
+          setError(
+            err instanceof ApiError
+              ? err.message
+              : "Lost connection while checking progress.",
+          );
+        }
       }
     };
 
@@ -96,7 +103,7 @@ function GenerateInner() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [id, router]);
+  }, [getToken, id, router]);
 
   const currentStatus = journey?.status ?? "pending";
   const currentRank = statusRank(currentStatus);
