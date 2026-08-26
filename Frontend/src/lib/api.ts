@@ -34,14 +34,21 @@ export async function backendFetch<T>(
   });
 
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as
-      | { detail?: string; error?: string }
-      | null;
+    const body: unknown = (await response.json().catch(() => null));
+
+    const message = 
+      typeof body === "object" &&
+      body !== null && 
+      "detail" in body &&
+      typeof body.detail === "string"
+        ? body.detail 
+        : `Request failed (${response.status})`;
 
     throw new ApiError(
       response.status,
-      body?.detail ?? body?.error ?? `Request failed (${response.status})`,
+      message,
     );
+
   }
 
   return (await response.json()) as T;
