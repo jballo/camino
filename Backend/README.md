@@ -8,9 +8,9 @@ Clerk account-lifecycle and GitHub installation webhook handling.
 optional exp6 cross-encoder reranker (BGE blend → 0.950). See
 [eval/EXPERIMENTS.md](eval/EXPERIMENTS.md).
 **Phase 2 status:** the guided-tour backend is wired end-to-end with the frontend.
-The Plan → Retrieve → Draft → Review graph, `TourJob` persistence, and
-`/api/v1/journeys` create/poll/list routes back the frontend's direct API calls from the
-`/generate` polling page, `/tours` library, and `/tours/{id}` reader UI.
+The Plan → Retrieve → Draft → Review graph, durable Postgres-backed `TourJob` queue,
+and `/api/v1/journeys` create/poll/list routes back the frontend's direct API calls
+from the `/generate` polling page, `/tours` library, and `/tours/{id}` reader UI.
 
 ---
 
@@ -66,6 +66,10 @@ configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
 | `RATE_LIMIT_REPOSITORY_INGEST_REQUESTS` / `RATE_LIMIT_REPOSITORY_INGEST_WINDOW_SECONDS` | Ingest limit (default 2 requests / 3600 seconds) |
 | `RATE_LIMIT_REPOSITORY_SEARCH_REQUESTS` / `RATE_LIMIT_REPOSITORY_SEARCH_WINDOW_SECONDS` | Direct-search limit (default 60 requests / 60 seconds) |
 | `RATE_LIMIT_JOURNEY_CREATE_REQUESTS` / `RATE_LIMIT_JOURNEY_CREATE_WINDOW_SECONDS` | Journey creation limit (default 5 requests / 3600 seconds) |
+| `RUN_WORKER` | Start the tour worker in the API process (default `true`) |
+| `WORKER_POLL_INTERVAL` | Seconds between empty-queue polls (default `1.5`) |
+| `WORKER_LEASE_TIMEOUT` | Seconds before a dead worker's claim is stale (default `1800`) |
+| `WORKER_MAX_ATTEMPTS` | Claims allowed before stale recovery marks a job failed (default `3`) |
 
 Generate `ENCRYPTION_KEY` with:
 
@@ -95,18 +99,20 @@ stack boundaries and deployment order.
   account-deletion flow triggers the existing local cleanup service.
 - Add explicit request/model deadlines and cap repository file count, total bytes, and
   generated chunks before cloning, embedding, or generating tours.
-- Handle `SIGTERM` gracefully and define recovery for `TourJob` rows left in
-  `pending`/`generating` when ECS replaces a task.
+- Handle `SIGTERM` so an in-flight `generate_tour` can finish or be cancelled cleanly;
+  stale `generating` rows are requeued or failed by the worker's lease recovery.
 
 ### RDS and migrations
 
 The current lifespan hook in `app/main.py` runs `CREATE EXTENSION`,
-`SQLModel.metadata.create_all()`, an idempotent compatibility migration for the
-`GithubConnections.githubUserId` column, and index creation. The compatibility
-migration keeps the new column nullable on an existing database because a trustworthy
-numeric GitHub ID cannot be derived from legacy rows; reconnecting the GitHub account
-fills it in, while all new application writes require it. This startup mutation is
-acceptable for local development but must not be the production migration mechanism.
+`SQLModel.metadata.create_all()`, idempotent compatibility migrations for
+`GithubConnections.githubUserId` and the tour-worker lease fields (`claimed_at`,
+`claimed_by`, `attempts`), and index creation including the partial pending-job index.
+The GitHub compatibility column stays nullable on an existing database because a
+trustworthy numeric GitHub ID cannot be derived from legacy rows; reconnecting the
+GitHub account fills it in, while all new application writes require it. This startup
+mutation is acceptable for local development but must not be the production migration
+mechanism.
 
 Before connecting ECS to RDS:
 
@@ -140,12 +146,19 @@ thresholds can be plain task-definition environment variables. Secret values mus
 be embedded in the Docker image, CDK source, CloudFormation outputs, or committed
 `.env` files. Production `CORS_ORIGINS` must include the Vercel frontend origin.
 
-### Current job limitation
+### Job queue
 
-Journey creation uses FastAPI `BackgroundTasks`; it is not a durable queue. Keep the
-private-alpha service at one desired task and expect deployments to interrupt active
-generation. Before autoscaling or public launch, move generation to SQS plus a separate
-worker and add a sweep that retries or fails stale jobs.
+`POST /api/v1/journeys` inserts a `pending` `tour_jobs` row. A polling worker
+(`app/worker.py`, started from the API lifespan when `RUN_WORKER=true`, or via
+`python -m app.worker`) claims the oldest pending job with `FOR UPDATE SKIP LOCKED`,
+runs generation, and requeues or fails leases that expire. Multiple processes can
+share the queue. In-flight generation is still lost if a worker is killed; the row
+returns to `pending` (or `failed` after `WORKER_MAX_ATTEMPTS`) once
+`WORKER_LEASE_TIMEOUT` elapses.
+
+Leave `RUN_WORKER=true` for normal local development. Set it to `false` in API
+processes when generation runs separately with `python -m app.worker`. Atomic claims
+make either topology—and multiple worker processes—safe.
 
 ---
 
@@ -154,6 +167,7 @@ worker and add a sweep that retries or fails stale jobs.
 ```
 app/
 ├── main.py              # FastAPI app, local DB init/compatibility migration, indexes
+├── worker.py            # Postgres-backed tour-job claim loop
 ├── rate_limit.py        # PostgreSQL fixed-window limiter dependencies
 ├── api/
 │   ├── repositories.py  # list repos, ingest, hybrid search
@@ -323,6 +337,16 @@ See [eval/README.md](eval/README.md) and [eval/EXPERIMENTS.md](eval/EXPERIMENTS.
 ```bash
 uv run pytest
 ```
+
+Postgres claim/recovery tests in `tests/test_worker_claim_pg.py` need a real
+database for `FOR UPDATE SKIP LOCKED`. With the docker-compose Postgres running
+they are included in a plain `uv run pytest`: the fixture creates a scratch
+`camino_worker_test` database on the `DATABASE_URL` server and drops it after the
+run. If Postgres is down, the module skips. Set `TEST_DATABASE_URL` to target an
+existing database instead (it gets `tour_jobs` truncated); the fixture refuses to
+run if its database name matches `DATABASE_URL`, including through a different host
+alias. The normal, recommended command is still only `uv run pytest`; no manual
+test-database setup is needed.
 
 Current focused coverage includes retrieval/search tests, agent smoke helpers,
 structural tour validation, tour generation helpers, journeys route tests,

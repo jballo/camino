@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     rate_limit_journey_create_requests: int = 5
     rate_limit_journey_create_window_seconds: int = 3600
     cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
+    run_worker: bool = True
+    worker_poll_interval: float = Field(default=1.5, gt=0)
+    worker_lease_timeout: float = Field(default=1800, gt=0)
+    worker_max_attempts: int = Field(default=3, gt=0)
     model_config = SettingsConfigDict(env_file=".env")
 
     @field_validator("cors_origins", mode="before")

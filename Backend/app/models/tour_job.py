@@ -25,6 +25,12 @@ class TourJob(SQLModel, table=True):
     status: str = Field(default=TourJobStatus.PENDING, index=True)
     artifact: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
     error: str | None = None
+    claimed_at: dt.datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    claimed_by: str | None = Field(default=None)
+    attempts: int = Field(default=0)
     createdAt: dt.datetime = Field(
         sa_column=Column[dt.datetime](
             DateTime(timezone=True),
