@@ -341,12 +341,13 @@ uv run pytest
 Postgres claim/recovery tests in `tests/test_worker_claim_pg.py` need a real
 database for `FOR UPDATE SKIP LOCKED`. With the docker-compose Postgres running
 they are included in a plain `uv run pytest`: the fixture creates a scratch
-`camino_worker_test` database on the `DATABASE_URL` server and drops it after the
-run. If Postgres is down, the module skips. Set `TEST_DATABASE_URL` to target an
-existing database instead (it gets `tour_jobs` truncated); the fixture refuses to
-run if its database name matches `DATABASE_URL`, including through a different host
-alias. The normal, recommended command is still only `uv run pytest`; no manual
-test-database setup is needed.
+database with a unique `camino_worker_test_*` name on the `DATABASE_URL` server
+and drops it after the run. It never drops a pre-existing database. If Postgres
+is down, the module skips. Set `TEST_DATABASE_URL` to target an existing database
+instead (it gets `tour_jobs` truncated); the fixture refuses to run if its database
+name matches `DATABASE_URL`, including through a different host alias. The normal,
+recommended command is still only `uv run pytest`; no manual test-database setup
+is needed.
 
 Current focused coverage includes retrieval/search tests, agent smoke helpers,
 structural tour validation, tour generation helpers, journeys route tests,

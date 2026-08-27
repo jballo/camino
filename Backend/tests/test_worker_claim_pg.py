@@ -1,11 +1,12 @@
 """Postgres integration tests for atomic claim and stale-lease recovery.
 
 These need a real Postgres (``FOR UPDATE SKIP LOCKED`` semantics can't be
-mocked). By default a scratch database named ``camino_worker_test`` is created
-on the same server as ``DATABASE_URL`` and dropped afterwards; if Postgres is
-unreachable the module skips. Set ``TEST_DATABASE_URL`` to use an existing
-database instead (it will have ``tour_jobs`` truncated); as a safety net the
-fixture fails fast if it resolves to the same database as ``DATABASE_URL``.
+mocked). By default a uniquely named ``camino_worker_test_*`` scratch database
+is created on the same server as ``DATABASE_URL`` and dropped afterwards; if
+Postgres is unreachable the module skips. Set ``TEST_DATABASE_URL`` to use an
+existing database instead (it will have ``tour_jobs`` truncated); as a safety
+net the fixture fails fast if it resolves to the same database as
+``DATABASE_URL``.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import asyncio
 import datetime as dt
 import os
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, patch
 
@@ -34,7 +36,7 @@ from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
 from app.security import get_authenticated_user_id
 from app.worker import claim_next_job, recover_stale_jobs, run_job
 
-SCRATCH_DB_NAME = "camino_worker_test"
+SCRATCH_DB_PREFIX = "camino_worker_test"
 
 WORKER_A = "host-a:1:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 WORKER_B = "host-b:2:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
@@ -44,6 +46,7 @@ WORKER_B = "host-b:2:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 def pg_engine():
     override = os.environ.get("TEST_DATABASE_URL")
     admin_engine = None
+    scratch_db_name = None
     if override:
         url = make_url(override)
         app_url = make_url(settings.database_url)
@@ -58,7 +61,10 @@ def pg_engine():
                 "to auto-provision a scratch one."
             )
     else:
-        # Auto-provision a scratch DB on the same server as DATABASE_URL.
+        # Auto-provision a uniquely named scratch DB on the same server as
+        # DATABASE_URL. Never drop a pre-existing database: if the extremely
+        # unlikely name collision occurs, CREATE DATABASE fails safely.
+        scratch_db_name = f"{SCRATCH_DB_PREFIX}_{uuid.uuid4().hex}"
         # CREATE/DROP DATABASE cannot run inside a transaction, hence AUTOCOMMIT.
         base = make_url(settings.database_url)
         admin_engine = create_engine(
@@ -66,13 +72,12 @@ def pg_engine():
         )
         try:
             with admin_engine.connect() as conn:
-                conn.execute(text(f"DROP DATABASE IF EXISTS {SCRATCH_DB_NAME}"))
-                conn.execute(text(f"CREATE DATABASE {SCRATCH_DB_NAME}"))
+                conn.execute(text(f"CREATE DATABASE {scratch_db_name}"))
         except OperationalError as e:
             admin_engine.dispose()
             pytest.skip(f"Postgres not reachable ({e}); skipping claim integration tests")
         # Keep the URL object: str() would mask the password as "***".
-        url = base.set(database=SCRATCH_DB_NAME)
+        url = base.set(database=scratch_db_name)
 
     engine = create_engine(url)
     try:
@@ -96,9 +101,9 @@ def pg_engine():
     yield engine
 
     engine.dispose()
-    if admin_engine is not None:
+    if admin_engine is not None and scratch_db_name is not None:
         with admin_engine.connect() as conn:
-            conn.execute(text(f"DROP DATABASE IF EXISTS {SCRATCH_DB_NAME}"))
+            conn.execute(text(f"DROP DATABASE IF EXISTS {scratch_db_name}"))
         admin_engine.dispose()
 
 

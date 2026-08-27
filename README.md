@@ -247,11 +247,12 @@ npm run lint
 Backend coverage includes API/auth behavior, webhook cleanup, rate limiting, retrieval,
 tour generation, eval helpers, worker lifecycle, and startup schema compatibility. When
 the docker-compose Postgres is available, the same command automatically creates and
-drops a `camino_worker_test` scratch database for real concurrent claim/recovery tests;
-it never truncates `onboarding_agent`, and rejects a `TEST_DATABASE_URL` whose database
-name matches `DATABASE_URL` (even through a different host alias). Frontend Vitest
-coverage exercises the shared direct-to-FastAPI client, including authenticated JSON
-requests and FastAPI/non-JSON error responses.
+drops a uniquely named `camino_worker_test_*` scratch database for real concurrent
+claim/recovery tests without deleting a pre-existing database; it never truncates
+`onboarding_agent`, and rejects a `TEST_DATABASE_URL` whose database name matches
+`DATABASE_URL` (even through a different host alias). Frontend Vitest coverage exercises
+the shared direct-to-FastAPI client, including authenticated JSON requests and
+FastAPI/non-JSON error responses.
 
 ---
 
