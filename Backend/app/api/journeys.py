@@ -1,17 +1,16 @@
 import datetime as dt
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import exc
-from sqlmodel import Session, select
+from sqlmodel import select
 
-from app.db import SessionDep, engine
+from app.db import SessionDep
 from app.models.github_connection import GithubConnections
 from app.models.tour_job import TourJob, TourJobStatus
 from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
 from app.security import get_authenticated_user_id
-from app.tour import TourGenerationError, generate_tour
 
 logger = logging.getLogger(__name__)
 
@@ -47,94 +46,10 @@ class JourneySummaryResponse(BaseModel):
     createdAt: dt.datetime
 
 
-async def _run_generation(job_id: int) -> None:
-    """Background worker: generate a tour and persist the outcome on the job row.
-
-    Runs after the HTTP response is sent, so it owns its own DB session (the
-    request-scoped session is already closed by then).
-    """
-    with Session(engine) as session:
-        job = session.get(TourJob, job_id)
-        if job is None:
-            logger.error("tour job vanished before generation | id=%s", job_id)
-            return
-
-        job.status = TourJobStatus.GENERATING
-        session.add(job)
-        session.commit()
-        session.refresh(job)
-
-        topic, repo_name, installation_id = job.topic, job.repo_name, job.installation_id
-
-        try:
-            artifact = await generate_tour(
-                session,
-                topic=topic,
-                repo_name=repo_name,
-                installation_id=installation_id,
-            )
-        except TourGenerationError as e:
-            logger.warning(
-                "tour generation failed | id=%s topic=%r repo=%r: %s",
-                job_id, topic, repo_name, e,
-            )
-            session.rollback()
-            _mark_failed(session, job_id, str(e))
-            return
-        except Exception:
-            logger.exception(
-                "tour generation crashed | id=%s topic=%r repo=%r",
-                job_id, topic, repo_name,
-            )
-            session.rollback()
-            _mark_failed(session, job_id, "Internal generation error")
-            return
-
-        job = session.get(TourJob, job_id)
-        if job is None:
-            logger.error("tour job vanished after generation | id=%s", job_id)
-            return
-        job.status = TourJobStatus.COMPLETE
-        job.artifact = artifact.model_dump()
-        job.error = None
-        session.add(job)
-        try:
-            session.commit()
-        except exc.SQLAlchemyError:
-            logger.exception(
-                "tour job commit failed after successful generation | id=%s topic=%r repo=%r",
-                job_id, topic, repo_name,
-            )
-            session.rollback()
-            _mark_failed(session, job_id, "Failed to persist generated tour")
-            return
-        logger.info(
-            "tour generation complete | id=%s topic=%r steps=%d",
-            job_id, topic, len(artifact.steps),
-        )
-
-
-def _mark_failed(session: Session, job_id: int, error: str) -> None:
-    try:
-        job = session.get(TourJob, job_id)
-        if job is None:
-            return
-        job.status = TourJobStatus.FAILED
-        job.error = error
-        session.add(job)
-        session.commit()
-    except exc.SQLAlchemyError:
-        logger.exception(
-            "failed to mark tour job as FAILED | id=%s", job_id
-        )
-        session.rollback()
-
-
 @router.post("", dependencies=[Depends(JOURNEY_CREATE_RATE_LIMIT)])
 async def create_journey(
     payload: CreateJourneyBody,
     session: SessionDep,
-    background_tasks: BackgroundTasks,
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> JourneyCreatedResponse:
     try:
@@ -164,7 +79,6 @@ async def create_journey(
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
 
-    background_tasks.add_task(_run_generation, job.id)
     logger.info(
         "tour job queued | id=%s topic=%r repo=%r", job.id, payload.topic, payload.repoName
     )

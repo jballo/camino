@@ -234,9 +234,10 @@ stateDiagram-v2
   complete --> [*]
 ```
 
-For v1, "worker" is a FastAPI `BackgroundTasks` job in-process. The README already
-plots SQS + a separate worker for Phase 3; the status column and polling API are
-designed so that swap is invisible to the frontend.
+For v1, the worker is an in-process polling loop (`app/worker.py`) that claims
+pending `tour_jobs` rows with `FOR UPDATE SKIP LOCKED`. A dedicated
+`python -m app.worker` process is safe to run alongside the API. The polling API
+is unchanged, so a later SQS swap stays invisible to the frontend.
 
 ---
 
@@ -258,7 +259,7 @@ sequenceDiagram
   participant U as User (/)
   participant F as Next.js /api/journeys
   participant B as FastAPI /api/v1/journeys
-  participant W as Worker (BackgroundTask)
+  participant W as Worker (claim loop)
   participant DB as Postgres
 
   U->>F: POST { url/repo, prompt/topic }
@@ -266,7 +267,7 @@ sequenceDiagram
   B->>DB: insert TourJob(status=pending)
   B-->>F: { id, status: pending }
   F-->>U: redirect /generate?id=...
-  B->>W: schedule generation(id)
+  W->>DB: claim pending (FOR UPDATE SKIP LOCKED)
   W->>W: Plan → Retrieve → Draft → Review
   W->>DB: update status=complete, artifact=...
   loop poll
@@ -375,8 +376,8 @@ construction but topic *coverage* is the hard part.
    *Assume bounded, model chooses within `[3, 8]`.*
 3. **Model routing** — same `gpt-4o-mini` as the agent, or a stronger model for the
    Plan node? *Assume single model v1; leave a seam for cheap/expensive split.*
-4. **Sync vs async** — `BackgroundTasks` in-process (v1) vs SQS worker (Phase 3).
-   *Assume in-process with a polling API shaped for later SQS.*
+4. **Sync vs async** — Postgres-backed claim loop (v1) vs SQS worker (later).
+   *Assume DB queue with a polling API shaped for later SQS.*
 5. **Validation target** — stored chunks (§5 option A) vs shallow clone (option B).
    *Assume A.*
 
@@ -430,9 +431,15 @@ construction but topic *coverage* is the hard part.
       (no external eval lib) to match the existing harness conventions. Tests in
       `tests/test_tour_judge.py` (8, passing). Committed reference run in
       `eval/judge_baseline.json` (overall 4.44). Known limitations + failure modes below.
+- [x] **M6 — Durable job queue.** `POST /journeys` only inserts `pending`; `app/worker.py`
+      claims with `FOR UPDATE SKIP LOCKED`, runs `generate_tour`, and recovers stale
+      `generating` rows after a lease timeout. Gated by `RUN_WORKER` (default on in the
+      API process; `python -m app.worker` is also safe). Tests in `tests/test_worker.py`
+      plus optional Postgres claim tests (`TEST_DATABASE_URL`).
 
 Milestones are independently shippable: M1–M2 make the pipeline runnable from a
-script/eval; M3–M4 expose it in the product; M5 adds the qualitative eval + docs.
+script/eval; M3–M4 expose it in the product; M5 adds the qualitative eval + docs;
+M6 makes generation survive process restarts.
 
 ---
 

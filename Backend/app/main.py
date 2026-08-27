@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+import asyncio
+import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +15,9 @@ from app.webhooks import clerk, github as github_webhook
 from app.models.code import CodeChunkModel, CodeChunkEmbedding
 from app.models.rate_limit import RateLimit
 from app.models.tour_job import TourJob
+from app.worker import WORKER_SHUTDOWN_TIMEOUT, worker_loop
 
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -36,6 +40,22 @@ async def lifespan(app: FastAPI):
             ON githubconnections ("githubUserId")
         """))
         conn.execute(text("""
+            ALTER TABLE tour_jobs
+            ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ
+        """))
+        conn.execute(text("""
+            ALTER TABLE tour_jobs
+            ADD COLUMN IF NOT EXISTS claimed_by TEXT
+        """))
+        conn.execute(text("""
+            ALTER TABLE tour_jobs
+            ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_tour_jobs_pending
+            ON tour_jobs ("createdAt") WHERE status = 'pending'
+        """))
+        conn.execute(text("""
             CREATE INDEX IF NOT EXISTS ix_embeddings_hnsw
             ON code_chunk_embeddings USING hnsw (embedding vector_cosine_ops)
             WITH (m = 16, ef_construction = 64)
@@ -45,7 +65,29 @@ async def lifespan(app: FastAPI):
             ON code_chunks USING gin (search_vector)
         """))
         conn.commit()
+
+    stop_event = asyncio.Event()
+    worker_task = None
+    if settings.run_worker:
+        worker_task = asyncio.create_task(
+            worker_loop(stop_event), name="tour-job-worker"
+        )
+    app.state.worker_stop_event = stop_event
+    app.state.worker_task = worker_task
+
     yield
+
+    if worker_task is not None:
+        stop_event.set()
+        try:
+            await asyncio.wait_for(worker_task, timeout=WORKER_SHUTDOWN_TIMEOUT)
+        except TimeoutError:
+            logger.warning("tour worker did not stop in time; cancelling")
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(lifespan=lifespan)

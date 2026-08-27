@@ -1,5 +1,5 @@
 import datetime as dt
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -71,8 +71,7 @@ def _make_job(**overrides):
 
 # ── create (POST) ───────────────────────────────────────────────────
 
-@patch("app.api.journeys._run_generation")
-def test_create_returns_pending_job(mock_run):
+def test_create_returns_pending_job():
     resp = client.post(JOURNEYS_URL, json=_body())
     assert resp.status_code == 200
     data = resp.json()
@@ -80,18 +79,19 @@ def test_create_returns_pending_job(mock_run):
     assert data["status"] == TourJobStatus.PENDING
 
 
-@patch("app.api.journeys._run_generation")
-def test_create_schedules_generation(mock_run):
+@patch("app.worker.run_job")
+@patch("app.worker.generate_tour")
+def test_create_does_not_invoke_generation(mock_generate, mock_run):
     resp = client.post(JOURNEYS_URL, json=_body())
     assert resp.status_code == 200
-    mock_run.assert_called_once_with(1)
+    assert resp.json()["status"] == TourJobStatus.PENDING
+    mock_generate.assert_not_called()
+    mock_run.assert_not_called()
 
 
-@patch("app.api.journeys._run_generation")
-def test_create_rejects_deprecated_user_id_field(mock_run):
+def test_create_rejects_deprecated_user_id_field():
     resp = client.post(JOURNEYS_URL, json=_body(userId="user_123"))
     assert resp.status_code == 422
-    mock_run.assert_not_called()
 
 
 def test_create_missing_topic_returns_422():

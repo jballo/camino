@@ -11,13 +11,14 @@ Built for new hires, OSS contributors, and anyone who's opened a repo and though
 
 ## Where we are
 
-**Phase 2 — Guided tours** · `✅ M5 implemented`
+**Phase 2 — Guided tours** · `✅ M6 implemented`
 
 The core indexing and hybrid-search pipeline is **built and tuned**. A LangGraph ReAct
 agent can answer natural-language questions about an ingested repo, grounded in retrieved
 code chunks. Phase 2 now has the full guided-tour path: a Plan → Retrieve → Draft →
-Review generator, persisted journey jobs, polling/list APIs, authenticated direct browser
-calls, the `/generate` polling page, the `/tours` library, and the `/tours/{id}` reader UI.
+Review generator, a durable Postgres-backed job queue, polling/list APIs, authenticated
+direct browser calls, the `/generate` polling page, the `/tours` library, and the
+`/tours/{id}` reader UI.
 
 What works today:
 
@@ -33,6 +34,7 @@ What works today:
 | LLM-as-judge tour eval                      | ✅ faithfulness/relevance/completeness/ordering + baseline |
 | ReAct Q&A agent                             | ✅ `/explore` + `/api/v1/agent/ask`                        |
 | Guided tour generation                      | ✅ backend pipeline + jobs/API + frontend flow             |
+| Durable tour-job execution                  | ✅ Postgres claims, leases, retries, and stale recovery     |
 | Direct browser API access                   | ✅ Clerk JWT calls from React pages to FastAPI              |
 | Per-user API rate limiting                  | ✅ PostgreSQL fixed windows on costly POST routes           |
 | Clerk account-deletion webhook cleanup      | ✅ idempotent, transactional local-data cleanup             |
@@ -66,8 +68,8 @@ flowchart LR
 | Phase           | Goal                                 | Key deliverables                                                                            |
 | --------------- | ------------------------------------ | ------------------------------------------------------------------------------------------- |
 | **1 — Done**    | Best-in-class retrieval for code Q&A | exp1–5 shipped (0.900 hit@5); optional exp6 BGE reranker (0.950, closes q17); q03 last miss |
-| **2 — Now**     | Structured guided tours              | End-to-end tour generation flow built; M5 LLM-as-judge eval + failure-mode docs landed      |
-| **3**           | Ship to users                        | AWS CDK, RDS PostgreSQL + pgvector, ECS Fargate, then durable jobs and observability         |
+| **2 — Now**     | Structured guided tours              | End-to-end tour flow, M5 evals, and M6 durable Postgres queue landed                         |
+| **3**           | Ship to users                        | AWS CDK, RDS PostgreSQL + pgvector, ECS Fargate, health checks, and observability             |
 | **4 — Stretch** | Meet devs where they work            | CLI (`onboard generate`), PR reviewer bot                                                   |
 
 
@@ -97,6 +99,7 @@ flowchart TB
     Search[Hybrid search — pgvector + FTS + RRF]
     Agent[LangGraph ReAct agent]
     Journeys["/api/v1/journeys — jobs + polling"]
+    Worker["Tour worker<br/>claim + lease recovery"]
     TourGraph["Tour graph<br/>Plan → Retrieve → Draft → Review"]
     Limits["Per-user fixed-window rate limits"]
   end
@@ -125,12 +128,13 @@ flowchart TB
   Limits -->|create| Journeys
   API -->|poll/list| Journeys
   Limits --> Counters
-  Journeys --> TourGraph
   Ingest --> Parser --> Embed --> Chunks
   Embed --> Vectors
   Agent --> Search
-  TourGraph --> Search
   Journeys --> Jobs
+  Worker -->|"FOR UPDATE SKIP LOCKED"| Jobs
+  Worker --> TourGraph
+  TourGraph --> Search
   Search --> Chunks
   Search --> Vectors
 ```
@@ -208,9 +212,10 @@ Clerk and GitHub cannot reach localhost webhooks directly; use a tunnel such as 
 or Cloudflare Tunnel when testing deletion flows locally. The install route currently
 targets the `camino-onboarder` GitHub App slug until `GITHUB_APP_SLUG` is configurable.
 
-When upgrading an existing local database, startup adds a nullable `githubUserId`
-compatibility column. Reconnect GitHub from **Settings** to populate it on a legacy
-connection.
+When upgrading an existing local database, startup adds the nullable `githubUserId`
+compatibility column plus the tour-worker lease columns (`claimed_at`, `claimed_by`,
+`attempts`) and pending-job index. Reconnect GitHub from **Settings** to populate
+`githubUserId` on a legacy connection.
 
 1. Sign in → open **Settings** → connect or manage the GitHub App.
 2. Open **Explore** → select a repo → **Process** (ingest). The repo must be indexed
@@ -240,9 +245,14 @@ npm run lint
 ```
 
 Backend coverage includes API/auth behavior, webhook cleanup, rate limiting, retrieval,
-tour generation, eval helpers, and startup schema compatibility. Frontend Vitest
-coverage exercises the shared direct-to-FastAPI client, including authenticated JSON
-requests and FastAPI/non-JSON error responses.
+tour generation, eval helpers, worker lifecycle, and startup schema compatibility. When
+the docker-compose Postgres is available, the same command automatically creates and
+drops a uniquely named `camino_worker_test_*` scratch database for real concurrent
+claim/recovery tests without deleting a pre-existing database; it never truncates
+`onboarding_agent`, and rejects a `TEST_DATABASE_URL` whose database name matches
+`DATABASE_URL` (even through a different host alias). Frontend Vitest coverage exercises
+the shared direct-to-FastAPI client, including authenticated JSON requests and
+FastAPI/non-JSON error responses.
 
 ---
 
@@ -282,9 +292,9 @@ npx cdk deploy CaminoBackendStack
 - Generate database credentials in Secrets Manager and inject application secrets into
   the task definition. Never put secret values in CDK source, CloudFormation outputs, or
   committed environment files.
-- Start with one Fargate task because tour generation currently uses in-process FastAPI
-  `BackgroundTasks`. A deployment can interrupt an active tour until SQS/worker recovery
-  is implemented.
+- Tour jobs are claimed from Postgres, so more than one Fargate task can share the
+  queue. A killed worker leaves its current job in `generating` until lease recovery
+  requeues or fails it; size `WORKER_LEASE_TIMEOUT` above the longest generation.
 
 ### Deployment gates
 
@@ -297,7 +307,8 @@ Before the first backend deployment:
 - [ ] Add Alembic and commit an initial schema migration, including `vector` and indexes.
 - [ ] Run migrations as a one-off ECS task; do not run schema creation in every web task.
 - [ ] Add explicit LLM timeouts and repository-size/file-count limits.
-- [ ] Define recovery for tour jobs left `pending` or `generating` after a task restart.
+- [x] Recover tour jobs left `generating` after a task restart with expiring leases,
+  bounded attempts, and periodic requeue/fail sweeps.
 - [ ] Add CI checks for backend tests, frontend lint/build, CDK synthesis, and migrations.
 - [ ] Run a deployed smoke test: auth → GitHub connect → ingest → ask → generate tour.
 - [ ] Register `https://<backend>/webhooks/clerk` for Clerk user lifecycle events
@@ -370,6 +381,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [x] Structured tour artifact (steps: title, explanation, snippet, path, lines, "why")
 - [x] Deterministic grounding — snippets/path/lines extracted from retrieved chunks
 - [x] Journey persistence/API — `tour_jobs`, `POST /api/v1/journeys`, `GET /{id}`, `GET ?repo=`
+- [x] Durable execution — atomic Postgres claims, worker leases/retries, and stale-job recovery
 
 - [~] Model routing — single model (`gpt-4o-mini`); no cheap/expensive split yet
 
@@ -415,7 +427,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [ ] CloudWatch application logs, retention policy, alarms, and request correlation
 - [ ] CI: tests, frontend build/lint, Docker build, CDK synth, and migration validation
 - [ ] S3 (tour artifacts + cached repo parses)
-- [ ] SQS (async tour jobs: request → Postgres + SQS → worker → S3 → poll)
+- [ ] Optional SQS replacement if Postgres queue throughput becomes a production constraint
 - [ ] Bedrock access (≥1 LLM call routed through it)
 
 ### Evaluation (the differentiator)
@@ -425,6 +437,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [x] Agent smoke eval (live ReAct path + citation parser/validator)
 - [x] Structural evals (schema + path/line/snippet validators, fixture CLI — no LLM)
 - [x] Tour route tests (`POST`, poll, list, auth/ownership, DB failures)
+- [x] Real-Postgres worker tests (concurrent claims, no duplicates, ordering, lease recovery)
 - [x] LLM-as-judge (faithfulness, relevance, completeness, ordering) + committed baseline
 - [ ] Eval suite across 2–3 repos (~35–40 questions total)
 - [ ] Eval gates in CI (GitHub Actions, fail on regression)
