@@ -52,7 +52,10 @@ SET status = CASE WHEN attempts >= :max_attempts THEN 'failed' ELSE 'pending' EN
     claimed_at = NULL,
     claimed_by = NULL
 WHERE status = 'generating'
-  AND claimed_at < now() - (:lease_timeout_seconds * INTERVAL '1 second')
+  AND (
+      claimed_at IS NULL
+      OR claimed_at < now() - (:lease_timeout_seconds * INTERVAL '1 second')
+  )
 """)
 
 RENEW_SQL = text("""

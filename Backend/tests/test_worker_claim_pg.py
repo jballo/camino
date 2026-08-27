@@ -259,6 +259,30 @@ def test_stale_generating_job_is_requeued(pg_engine_clean):
     assert row.attempts == 1
 
 
+def test_legacy_generating_job_without_lease_is_requeued(pg_engine_clean):
+    with Session(pg_engine_clean) as session:
+        job = _insert_job(
+            session,
+            status=TourJobStatus.GENERATING,
+            claimed_at=None,
+            claimed_by=None,
+            attempts=0,
+        )
+        job_id = job.id
+
+    with Session(pg_engine_clean) as session:
+        recovered = recover_stale_jobs(
+            session, lease_timeout_seconds=60, max_attempts=3
+        )
+
+    assert recovered == 1
+    row = _reload(pg_engine_clean, job_id)
+    assert row.status == TourJobStatus.PENDING
+    assert row.claimed_at is None
+    assert row.claimed_by is None
+    assert row.attempts == 0
+
+
 def test_stale_job_at_max_attempts_is_failed(pg_engine_clean):
     stale = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=20)
     with Session(pg_engine_clean) as session:
