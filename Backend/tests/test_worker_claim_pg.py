@@ -10,6 +10,7 @@ fixture fails fast if it resolves to the same database as ``DATABASE_URL``.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import os
 import threading
@@ -378,7 +379,7 @@ async def test_post_then_worker_then_get_completes(pg_engine_clean):
                 return_value=artifact,
             ),
         ):
-            await run_job(job_id)
+            await run_job(job_id, WORKER_A)
 
         fetched = client.get(f"/api/v1/journeys/{job_id}")
         assert fetched.status_code == 200
@@ -388,3 +389,71 @@ async def test_post_then_worker_then_get_completes(pg_engine_clean):
         assert body["error"] is None
     finally:
         app.dependency_overrides.clear()
+
+
+async def test_active_job_heartbeat_prevents_stale_recovery(pg_engine_clean):
+    with Session(pg_engine_clean) as session:
+        job_id = _insert_job(session).id
+        assert claim_next_job(session, WORKER_A) == job_id
+
+    artifact = _artifact()
+
+    async def _generate_slowly(*_args, **_kwargs):
+        await asyncio.sleep(0.15)
+        with Session(pg_engine_clean) as recovery_session:
+            recovered = recover_stale_jobs(
+                recovery_session,
+                lease_timeout_seconds=0.06,
+                max_attempts=3,
+            )
+        assert recovered == 0
+        return artifact
+
+    with (
+        patch("app.worker.engine", pg_engine_clean),
+        patch("app.worker.settings.worker_lease_timeout", 0.06),
+        patch("app.worker.generate_tour", side_effect=_generate_slowly),
+    ):
+        await run_job(job_id, WORKER_A)
+
+    row = _reload(pg_engine_clean, job_id)
+    assert row.status == TourJobStatus.COMPLETE
+    assert row.artifact == artifact.model_dump()
+
+
+async def test_old_worker_cannot_persist_after_job_is_reclaimed(pg_engine_clean):
+    with Session(pg_engine_clean) as session:
+        job_id = _insert_job(session).id
+        assert claim_next_job(session, WORKER_A) == job_id
+
+    artifact = _artifact()
+
+    async def _reclaim_during_generation(*_args, **_kwargs):
+        stale = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=20)
+        with Session(pg_engine_clean) as session:
+            session.execute(
+                text(
+                    "UPDATE tour_jobs SET claimed_at = :stale "
+                    "WHERE id = :job_id"
+                ),
+                {"stale": stale, "job_id": job_id},
+            )
+            session.commit()
+            assert recover_stale_jobs(
+                session,
+                lease_timeout_seconds=60,
+                max_attempts=3,
+            ) == 1
+            assert claim_next_job(session, WORKER_B) == job_id
+        return artifact
+
+    with (
+        patch("app.worker.engine", pg_engine_clean),
+        patch("app.worker.generate_tour", side_effect=_reclaim_during_generation),
+    ):
+        await run_job(job_id, WORKER_A)
+
+    row = _reload(pg_engine_clean, job_id)
+    assert row.status == TourJobStatus.GENERATING
+    assert row.claimed_by == WORKER_B
+    assert row.artifact is None
