@@ -36,15 +36,28 @@ async def test_lifespan_migrates_github_user_id_for_existing_tables():
         'ON githubconnections ("githubUserId")'
         in statements
     )
-    assert "ALTER TABLE tour_jobs ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ" in statements
-    assert "ALTER TABLE tour_jobs ADD COLUMN IF NOT EXISTS claimed_by TEXT" in statements
+    assert any("ALTER TABLE tour_jobs RENAME TO jobs" in sql for sql in statements)
+    assert "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ" in statements
+    assert "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_by TEXT" in statements
     assert (
-        "ALTER TABLE tour_jobs ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0"
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0"
         in statements
     )
     assert (
-        'CREATE INDEX IF NOT EXISTS ix_tour_jobs_pending '
-        'ON tour_jobs ("createdAt") WHERE status = \'pending\''
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS job_type TEXT NOT NULL DEFAULT 'tour'"
+        in statements
+    )
+    assert "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dedupe_key TEXT" in statements
+    assert "ALTER TABLE jobs ALTER COLUMN topic DROP NOT NULL" in statements
+    assert (
+        'CREATE INDEX IF NOT EXISTS ix_jobs_pending '
+        'ON jobs ("createdAt") WHERE status = \'pending\''
+        in statements
+    )
+    assert (
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_active_dedupe "
+        "ON jobs (dedupe_key) WHERE status IN ('pending', 'running') "
+        "AND dedupe_key IS NOT NULL"
         in statements
     )
 

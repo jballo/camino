@@ -1,10 +1,10 @@
 """Ingest a local code repository into Postgres using the production pipeline.
 
-This mirrors ``app.api.repositories.process_repository`` exactly (same parser,
-same embedding text, same RRF-ready ``search_vector`` population) but reads files
-from the local filesystem instead of the GitHub API. It exists so the retrieval
-eval can exercise the *real* ``hybrid_search`` path against a known codebase
-(FastAPI) without needing a GitHub App installation.
+This mirrors ``app.services.repository_ingestion.ingest_repository`` (same parser,
+embedding text, and RRF-ready ``search_vector`` population) but reads files from
+the local filesystem instead of the GitHub API. It exists so the retrieval eval
+can exercise the *real* ``hybrid_search`` path against a known codebase (FastAPI)
+without needing a GitHub App installation.
 
 Usage:
     uv run python -m eval.ingest_local --path eval/.data/fastapi \

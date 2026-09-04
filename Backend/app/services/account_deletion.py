@@ -3,8 +3,8 @@ from sqlmodel import Session, select
 
 from app.models.code import CodeChunkModel
 from app.models.github_connection import GithubConnections
+from app.models.job import Job
 from app.models.rate_limit import RateLimit
-from app.models.tour_job import TourJob
 from app.models.user import User
 
 
@@ -27,7 +27,7 @@ def delete_local_account_data(session: Session, user_id: str) -> None:
             ).all()
         )
 
-        session.exec(delete(TourJob).where(TourJob.userId == user_id))
+        session.exec(delete(Job).where(Job.userId == user_id))
         session.exec(delete(RateLimit).where(RateLimit.user_id == user_id))
         session.exec(
             delete(GithubConnections).where(GithubConnections.userId == user_id)

@@ -13,8 +13,8 @@ from app.db import engine
 from app.api import agent, github, journeys, repositories
 from app.webhooks import clerk, github as github_webhook
 from app.models.code import CodeChunkModel, CodeChunkEmbedding
+from app.models.job import Job
 from app.models.rate_limit import RateLimit
-from app.models.tour_job import TourJob
 from app.worker import WORKER_SHUTDOWN_TIMEOUT, worker_loop
 
 logger = logging.getLogger(__name__)
@@ -24,6 +24,16 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     with engine.connect() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        # Preserve queued tours when upgrading from the tour-specific queue.
+        conn.execute(text("""
+            DO $$
+            BEGIN
+                IF to_regclass('public.jobs') IS NULL
+                   AND to_regclass('public.tour_jobs') IS NOT NULL THEN
+                    ALTER TABLE tour_jobs RENAME TO jobs;
+                END IF;
+            END $$;
+        """))
         conn.commit()
     SQLModel.metadata.create_all(engine)
 
@@ -40,20 +50,61 @@ async def lifespan(app: FastAPI):
             ON githubconnections ("githubUserId")
         """))
         conn.execute(text("""
-            ALTER TABLE tour_jobs
+            ALTER TABLE jobs
             ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ
         """))
         conn.execute(text("""
-            ALTER TABLE tour_jobs
+            ALTER TABLE jobs
             ADD COLUMN IF NOT EXISTS claimed_by TEXT
         """))
         conn.execute(text("""
-            ALTER TABLE tour_jobs
+            ALTER TABLE jobs
             ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0
         """))
         conn.execute(text("""
-            CREATE INDEX IF NOT EXISTS ix_tour_jobs_pending
-            ON tour_jobs ("createdAt") WHERE status = 'pending'
+            ALTER TABLE jobs
+            ADD COLUMN IF NOT EXISTS job_type TEXT NOT NULL DEFAULT 'tour'
+        """))
+        conn.execute(text("""
+            ALTER TABLE jobs
+            ADD COLUMN IF NOT EXISTS dedupe_key TEXT
+        """))
+        conn.execute(text("ALTER TABLE jobs ALTER COLUMN topic DROP NOT NULL"))
+        conn.execute(text("""
+            UPDATE jobs SET status = 'running' WHERE status = 'generating'
+        """))
+        conn.execute(text("""
+            WITH ranked AS (
+                SELECT id,
+                       concat(
+                           'tour:', "userId", ':', installation_id, ':',
+                           repo_name, ':', topic
+                       ) AS key,
+                       row_number() OVER (
+                           PARTITION BY "userId", installation_id, repo_name, topic
+                           ORDER BY "createdAt", id
+                       ) AS position
+                FROM jobs
+                WHERE job_type = 'tour'
+                  AND status IN ('pending', 'running')
+                  AND dedupe_key IS NULL
+            )
+            UPDATE jobs
+            SET dedupe_key = ranked.key
+            FROM ranked
+            WHERE jobs.id = ranked.id AND ranked.position = 1
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_jobs_job_type ON jobs (job_type)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_jobs_pending
+            ON jobs ("createdAt") WHERE status = 'pending'
+        """))
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_active_dedupe
+            ON jobs (dedupe_key)
+            WHERE status IN ('pending', 'running') AND dedupe_key IS NOT NULL
         """))
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS ix_embeddings_hnsw
@@ -70,7 +121,7 @@ async def lifespan(app: FastAPI):
     worker_task = None
     if settings.run_worker:
         worker_task = asyncio.create_task(
-            worker_loop(stop_event), name="tour-job-worker"
+            worker_loop(stop_event), name="job-worker"
         )
     app.state.worker_stop_event = stop_event
     app.state.worker_task = worker_task
@@ -82,7 +133,7 @@ async def lifespan(app: FastAPI):
         try:
             await asyncio.wait_for(worker_task, timeout=WORKER_SHUTDOWN_TIMEOUT)
         except TimeoutError:
-            logger.warning("tour worker did not stop in time; cancelling")
+            logger.warning("job worker did not stop in time; cancelling")
             worker_task.cancel()
             try:
                 await worker_task

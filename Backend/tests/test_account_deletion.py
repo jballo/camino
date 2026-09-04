@@ -34,7 +34,7 @@ def test_local_cleanup_deletes_unreferenced_installation_and_commits():
 
     statements = [str(call.args[0]) for call in session.exec.call_args_list]
     assert len(statements) == 7
-    assert any("DELETE FROM tour_jobs" in statement for statement in statements)
+    assert any("DELETE FROM jobs" in statement for statement in statements)
     assert any("DELETE FROM rate_limits" in statement for statement in statements)
     assert any("DELETE FROM githubconnections" in statement for statement in statements)
     assert any("DELETE FROM users" in statement for statement in statements)

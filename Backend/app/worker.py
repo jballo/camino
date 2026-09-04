@@ -1,6 +1,6 @@
-"""Durable tour-job queue: atomic claim, generation, and stale-lease recovery.
+"""Durable database job queue with atomic claims and stale-lease recovery.
 
-Pending jobs live in Postgres (`tour_jobs`). A polling loop claims the oldest
+Pending jobs live in Postgres (`jobs`). A polling loop claims the oldest
 pending row with ``FOR UPDATE SKIP LOCKED`` so multiple API processes (or a
 dedicated ``python -m app.worker``) cannot double-run the same job.
 """
@@ -16,12 +16,24 @@ import threading
 import time
 import uuid
 
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    RateLimitError,
+)
+from requests.exceptions import RequestException
 from sqlalchemy import exc, text, update
 from sqlmodel import Session
 
 from app.config import settings
 from app.db import engine
-from app.models.tour_job import TourJob, TourJobStatus
+from app.models.job import Job, JobStatus, JobType
+from app.services.repository_ingestion import (
+    PermanentRepositoryIngestionError,
+    TransientRepositoryIngestionError,
+    ingest_repository,
+)
 from app.tour import TourGenerationError, generate_tour
 
 logger = logging.getLogger(__name__)
@@ -30,13 +42,14 @@ WORKER_RECOVERY_INTERVAL = 60.0
 WORKER_SHUTDOWN_TIMEOUT = 10.0
 
 CLAIM_SQL = text("""
-UPDATE tour_jobs
-SET status = 'generating',
+UPDATE jobs
+SET status = 'running',
     claimed_at = now(),
     claimed_by = :worker_id,
-    attempts = attempts + 1
+    attempts = attempts + 1,
+    error = NULL
 WHERE id = (
-    SELECT id FROM tour_jobs
+    SELECT id FROM jobs
     WHERE status = 'pending'
     ORDER BY "createdAt"
     LIMIT 1
@@ -46,12 +59,12 @@ RETURNING id
 """)
 
 RECOVER_SQL = text("""
-UPDATE tour_jobs
+UPDATE jobs
 SET status = CASE WHEN attempts >= :max_attempts THEN 'failed' ELSE 'pending' END,
     error  = CASE WHEN attempts >= :max_attempts THEN 'Exceeded max attempts' ELSE error END,
     claimed_at = NULL,
     claimed_by = NULL
-WHERE status = 'generating'
+WHERE status = 'running'
   AND (
       claimed_at IS NULL
       OR claimed_at < now() - (:lease_timeout_seconds * INTERVAL '1 second')
@@ -59,10 +72,10 @@ WHERE status = 'generating'
 """)
 
 RENEW_SQL = text("""
-UPDATE tour_jobs
+UPDATE jobs
 SET claimed_at = now()
 WHERE id = :job_id
-  AND status = 'generating'
+  AND status = 'running'
   AND claimed_by = :worker_id
 """)
 
@@ -77,7 +90,7 @@ def claim_next_job(session: Session, worker_id: str) -> int | None:
     job_id = result.scalar_one_or_none()
     session.commit()
     if job_id is not None:
-        logger.info("claimed tour job | id=%s worker=%s", job_id, worker_id)
+        logger.info("claimed job | id=%s worker=%s", job_id, worker_id)
     return job_id
 
 
@@ -87,7 +100,7 @@ def recover_stale_jobs(
     lease_timeout_seconds: float,
     max_attempts: int,
 ) -> int:
-    """Requeue or fail generating jobs whose lease has expired. Commits before returning."""
+    """Requeue or fail running jobs whose lease has expired. Commits before returning."""
     result = session.execute(
         RECOVER_SQL,
         {
@@ -98,7 +111,7 @@ def recover_stale_jobs(
     session.commit()
     recovered = result.rowcount or 0
     if recovered:
-        logger.warning("recovered %d stale tour job(s)", recovered)
+        logger.warning("recovered %d stale job(s)", recovered)
     return recovered
 
 
@@ -144,7 +157,7 @@ def _heartbeat_job_lease(
             # cannot safely duplicate the final write because outcome updates
             # below also verify ownership.
             logger.exception(
-                "tour job lease renewal failed | id=%s worker=%s",
+                "job lease renewal failed | id=%s worker=%s",
                 job_id,
                 worker_id,
             )
@@ -152,7 +165,7 @@ def _heartbeat_job_lease(
         if not renewed:
             lease_lost.set()
             logger.warning(
-                "tour job lease ownership lost | id=%s worker=%s",
+                "job lease ownership lost | id=%s worker=%s",
                 job_id,
                 worker_id,
             )
@@ -165,13 +178,13 @@ def _update_owned_job(
     worker_id: str,
     **values: object,
 ) -> bool:
-    """Update a generating job only while ``worker_id`` owns its lease."""
+    """Update a running job only while ``worker_id`` owns its lease."""
     result = session.execute(
-        update(TourJob)
+        update(Job)
         .where(
-            TourJob.id == job_id,
-            TourJob.status == TourJobStatus.GENERATING,
-            TourJob.claimed_by == worker_id,
+            Job.id == job_id,
+            Job.status == JobStatus.RUNNING,
+            Job.claimed_by == worker_id,
         )
         .values(**values)
     )
@@ -193,57 +206,119 @@ def _mark_failed(
             session,
             job_id,
             worker_id,
-            status=TourJobStatus.FAILED,
+            status=JobStatus.FAILED,
             error=error,
+            claimed_at=None,
+            claimed_by=None,
         )
     except exc.SQLAlchemyError:
         logger.exception(
-            "failed to mark tour job as FAILED | id=%s", job_id
+            "failed to mark job as FAILED | id=%s", job_id
         )
         session.rollback()
         return False
     if not updated:
         logger.warning(
-            "discarded tour job failure after lease ownership changed | id=%s worker=%s",
+            "discarded job failure after lease ownership changed | id=%s worker=%s",
             job_id,
             worker_id,
         )
     return updated
 
 
+def _requeue_or_fail(
+    session: Session,
+    job_id: int,
+    worker_id: str,
+    *,
+    attempts: int,
+    error: str,
+) -> bool:
+    """Requeue a transient failure unless this claim exhausted the retry budget."""
+    exhausted = attempts >= settings.worker_max_attempts
+    try:
+        updated = _update_owned_job(
+            session,
+            job_id,
+            worker_id,
+            status=JobStatus.FAILED if exhausted else JobStatus.PENDING,
+            error=(
+                f"Exceeded max attempts: {error}"
+                if exhausted
+                else error
+            ),
+            claimed_at=None,
+            claimed_by=None,
+        )
+    except exc.SQLAlchemyError:
+        logger.exception("failed to requeue transient job | id=%s", job_id)
+        session.rollback()
+        return False
+
+    if updated:
+        logger.warning(
+            "%s transient job | id=%s attempt=%d/%d error=%s",
+            "failed" if exhausted else "requeued",
+            job_id,
+            attempts,
+            settings.worker_max_attempts,
+            error,
+        )
+    else:
+        logger.warning(
+            "discarded transient job outcome after lease ownership changed "
+            "| id=%s worker=%s",
+            job_id,
+            worker_id,
+        )
+    return updated
+
+
+_TRANSIENT_JOB_ERRORS = (
+    RequestException,
+    RateLimitError,
+    APITimeoutError,
+    APIConnectionError,
+    InternalServerError,
+    exc.OperationalError,
+    TransientRepositoryIngestionError,
+)
+
+
 async def run_job(job_id: int, worker_id: str) -> None:
-    """Generate a tour and persist the outcome. Never raises to the caller."""
+    """Dispatch one claimed job and persist its outcome. Never raises."""
     with Session(engine) as session:
-        job = session.get(TourJob, job_id)
+        job = session.get(Job, job_id)
         if job is None:
-            logger.error("tour job vanished before generation | id=%s", job_id)
+            logger.error("job vanished before execution | id=%s", job_id)
             return
 
-        if (
-            job.status != TourJobStatus.GENERATING
-            or job.claimed_by != worker_id
-        ):
+        if job.status != JobStatus.RUNNING or job.claimed_by != worker_id:
             logger.warning(
-                "skipping tour job not owned by worker | id=%s worker=%s",
+                "skipping job not owned by worker | id=%s worker=%s",
                 job_id,
                 worker_id,
             )
             return
 
-        topic, repo_name, installation_id = job.topic, job.repo_name, job.installation_id
+        job_type = job.job_type
+        topic = job.topic
+        repo_name = job.repo_name
+        installation_id = job.installation_id
+        attempts = job.attempts
 
         try:
             owns_lease = _renew_job_lease(job_id, worker_id)
         except Exception:
             logger.exception(
-                "could not establish tour job lease heartbeat | id=%s worker=%s",
+                "could not establish job lease heartbeat | id=%s worker=%s",
                 job_id,
                 worker_id,
             )
             return
         if not owns_lease:
             logger.warning(
-                "tour job lease changed before generation | id=%s worker=%s",
+                "job lease changed before execution | id=%s worker=%s",
                 job_id,
                 worker_id,
             )
@@ -260,48 +335,89 @@ async def run_job(job_id: int, worker_id: str) -> None:
                 "stop_event": heartbeat_stop,
                 "lease_lost": lease_lost,
             },
-            name=f"tour-job-{job_id}-heartbeat",
+            name=f"job-{job_id}-heartbeat",
             daemon=True,
         )
         heartbeat.start()
 
-        generation_error: str | None = None
+        result: dict | None = None
+        transient_error: str | None = None
+        permanent_error: str | None = None
         try:
-            artifact = await generate_tour(
-                session,
-                topic=topic,
-                repo_name=repo_name,
-                installation_id=installation_id,
-            )
-        except TourGenerationError as e:
+            if job_type == JobType.TOUR:
+                if topic is None:
+                    raise TourGenerationError("Tour job is missing its topic")
+                artifact = await generate_tour(
+                    session,
+                    topic=topic,
+                    repo_name=repo_name,
+                    installation_id=installation_id,
+                )
+                result = artifact.model_dump()
+            elif job_type == JobType.REPOSITORY_INGEST:
+                result = await ingest_repository(
+                    session,
+                    repo_name=repo_name,
+                    installation_id=installation_id,
+                )
+            else:
+                permanent_error = f"Unsupported job type: {job_type}"
+        except (TourGenerationError, PermanentRepositoryIngestionError) as error:
             logger.warning(
-                "tour generation failed | id=%s topic=%r repo=%r: %s",
-                job_id, topic, repo_name, e,
+                "job failed permanently | id=%s type=%s repo=%r: %s",
+                job_id,
+                job_type,
+                repo_name,
+                error,
             )
             session.rollback()
-            generation_error = str(e)
-        except Exception:
+            permanent_error = str(error)
+        except _TRANSIENT_JOB_ERRORS as error:
+            logger.warning(
+                "job failed transiently | id=%s type=%s repo=%r: %s",
+                job_id,
+                job_type,
+                repo_name,
+                error,
+            )
+            session.rollback()
+            transient_error = str(error) or type(error).__name__
+        except Exception as error:
             logger.exception(
-                "tour generation crashed | id=%s topic=%r repo=%r",
-                job_id, topic, repo_name,
+                "job crashed | id=%s type=%s repo=%r",
+                job_id,
+                job_type,
+                repo_name,
             )
             session.rollback()
-            generation_error = "Internal generation error"
+            permanent_error = f"Internal {job_type} error"
         finally:
             heartbeat_stop.set()
             heartbeat.join()
 
-        if generation_error is not None:
-            _mark_failed(session, job_id, worker_id, generation_error)
-            return
-
         if lease_lost.is_set():
             session.rollback()
             logger.warning(
-                "discarded generated tour after lease ownership changed | id=%s worker=%s",
+                "discarded job outcome after lease ownership changed | id=%s worker=%s",
                 job_id,
                 worker_id,
             )
+            return
+
+        if transient_error is not None:
+            _requeue_or_fail(
+                session,
+                job_id,
+                worker_id,
+                attempts=attempts,
+                error=transient_error,
+            )
+            return
+        if permanent_error is not None:
+            _mark_failed(session, job_id, worker_id, permanent_error)
+            return
+        if result is None:
+            _mark_failed(session, job_id, worker_id, "Job produced no result")
             return
 
         try:
@@ -309,33 +425,40 @@ async def run_job(job_id: int, worker_id: str) -> None:
                 session,
                 job_id,
                 worker_id,
-                status=TourJobStatus.COMPLETE,
-                artifact=artifact.model_dump(),
+                status=JobStatus.COMPLETE,
+                artifact=result,
                 error=None,
+                claimed_at=None,
+                claimed_by=None,
             )
-        except exc.SQLAlchemyError:
+        except exc.SQLAlchemyError as error:
             logger.exception(
-                "tour job commit failed after successful generation | id=%s topic=%r repo=%r",
-                job_id, topic, repo_name,
+                "job result commit failed | id=%s type=%s repo=%r",
+                job_id,
+                job_type,
+                repo_name,
             )
             session.rollback()
-            _mark_failed(
+            _requeue_or_fail(
                 session,
                 job_id,
                 worker_id,
-                "Failed to persist generated tour",
+                attempts=attempts,
+                error=f"Failed to persist job result: {error}",
             )
             return
         if not persisted:
             logger.warning(
-                "discarded generated tour after lease ownership changed | id=%s worker=%s",
+                "discarded job result after lease ownership changed | id=%s worker=%s",
                 job_id,
                 worker_id,
             )
             return
         logger.info(
-            "tour generation complete | id=%s topic=%r steps=%d",
-            job_id, topic, len(artifact.steps),
+            "job complete | id=%s type=%s repo=%r",
+            job_id,
+            job_type,
+            repo_name,
         )
 
 
@@ -365,7 +488,7 @@ async def worker_loop(
         WORKER_RECOVERY_INTERVAL if recovery_interval is None else recovery_interval
     )
     last_recover = 0.0
-    logger.info("tour worker started | worker=%s", identity)
+    logger.info("job worker started | worker=%s", identity)
 
     while not stop_event.is_set():
         now = time.monotonic()
@@ -397,11 +520,11 @@ async def worker_loop(
                         session,
                         job_id,
                         identity,
-                        "Internal generation error",
+                        "Internal job error",
                     )
             except Exception:
                 logger.exception(
-                    "failed to mark leaked tour job as FAILED | id=%s", job_id
+                    "failed to mark leaked job as FAILED | id=%s", job_id
                 )
 
 

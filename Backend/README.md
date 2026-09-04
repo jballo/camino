@@ -66,7 +66,7 @@ configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
 | `RATE_LIMIT_REPOSITORY_INGEST_REQUESTS` / `RATE_LIMIT_REPOSITORY_INGEST_WINDOW_SECONDS` | Ingest limit (default 2 requests / 3600 seconds) |
 | `RATE_LIMIT_REPOSITORY_SEARCH_REQUESTS` / `RATE_LIMIT_REPOSITORY_SEARCH_WINDOW_SECONDS` | Direct-search limit (default 60 requests / 60 seconds) |
 | `RATE_LIMIT_JOURNEY_CREATE_REQUESTS` / `RATE_LIMIT_JOURNEY_CREATE_WINDOW_SECONDS` | Journey creation limit (default 5 requests / 3600 seconds) |
-| `RUN_WORKER` | Start the tour worker in the API process (default `true`) |
+| `RUN_WORKER` | Start the shared job worker in the API process (default `true`) |
 | `WORKER_POLL_INTERVAL` | Seconds between empty-queue polls (default `1.5`) |
 | `WORKER_LEASE_TIMEOUT` | Seconds before a dead worker's claim is stale (default `1800`) |
 | `WORKER_MAX_ATTEMPTS` | Claims allowed before stale recovery marks a job failed (default `3`) |
@@ -99,15 +99,15 @@ stack boundaries and deployment order.
   account-deletion flow triggers the existing local cleanup service.
 - Add explicit request/model deadlines and cap repository file count, total bytes, and
   generated chunks before cloning, embedding, or generating tours.
-- Handle `SIGTERM` so an in-flight `generate_tour` can finish or be cancelled cleanly;
-  stale `generating` rows are requeued or failed by the worker's lease recovery.
+- Handle `SIGTERM` so in-flight jobs can finish or be cancelled cleanly; stale
+  `running` rows are requeued or failed by the worker's lease recovery.
 
 ### RDS and migrations
 
 The current lifespan hook in `app/main.py` runs `CREATE EXTENSION`,
 `SQLModel.metadata.create_all()`, idempotent compatibility migrations for
-`GithubConnections.githubUserId` and the tour-worker lease fields (`claimed_at`,
-`claimed_by`, `attempts`), and index creation including the partial pending-job index.
+`GithubConnections.githubUserId` and the shared job fields, plus the active-job
+deduplication and partial pending-job indexes.
 The GitHub compatibility column stays nullable on an existing database because a
 trustworthy numeric GitHub ID cannot be derived from legacy rows; reconnecting the
 GitHub account fills it in, while all new application writes require it. This startup
@@ -148,16 +148,20 @@ be embedded in the Docker image, CDK source, CloudFormation outputs, or committe
 
 ### Job queue
 
-`POST /api/v1/journeys` inserts a `pending` `tour_jobs` row. A polling worker
-(`app/worker.py`, started from the API lifespan when `RUN_WORKER=true`, or via
-`python -m app.worker`) claims the oldest pending job with `FOR UPDATE SKIP LOCKED`,
-runs generation, and requeues or fails leases that expire. Multiple processes can
-share the queue. In-flight generation is still lost if a worker is killed; the row
-returns to `pending` (or `failed` after `WORKER_MAX_ATTEMPTS`) once
-`WORKER_LEASE_TIMEOUT` elapses.
+Tour generation and repository ingestion insert typed `pending` rows in the shared
+`jobs` table. The polling worker (`app/worker.py`, started from the API lifespan when
+`RUN_WORKER=true`, or via `python -m app.worker`) claims the oldest pending job with
+`FOR UPDATE SKIP LOCKED` and dispatches it by type. Active duplicate requests reuse
+the same row through a status-scoped unique deduplication key. Known transient
+upstream and database errors return the job to `pending`; each claim increments
+`attempts`, and the job becomes `failed` after `WORKER_MAX_ATTEMPTS`.
+
+Multiple processes can share the queue. If a worker dies, lease recovery returns its
+row to `pending` (or marks it `failed` at the attempt limit) after
+`WORKER_LEASE_TIMEOUT`.
 
 Leave `RUN_WORKER=true` for normal local development. Set it to `false` in API
-processes when generation runs separately with `python -m app.worker`. Atomic claims
+processes when jobs run separately with `python -m app.worker`. Atomic claims
 make either topology—and multiple worker processes—safe.
 
 ---
@@ -167,7 +171,7 @@ make either topology—and multiple worker processes—safe.
 ```
 app/
 ├── main.py              # FastAPI app, local DB init/compatibility migration, indexes
-├── worker.py            # Postgres-backed tour-job claim loop
+├── worker.py            # Postgres-backed shared job claim/dispatch loop
 ├── rate_limit.py        # PostgreSQL fixed-window limiter dependencies
 ├── api/
 │   ├── repositories.py  # list repos, ingest, hybrid search
@@ -216,7 +220,8 @@ eval/
 | `POST` | `/api/v1/github/connect` | Exchange GitHub OAuth code and persist encrypted, expiring user-to-server credentials |
 | `GET` | `/api/v1/repositories` | List repos for the authenticated user's GitHub installation |
 | `GET` | `/api/v1/repositories/processed` | List indexed repos and chunk counts for the authenticated user's installation |
-| `POST` | `/api/v1/repositories/ingest` | Clone + parse + embed a repo |
+| `POST` | `/api/v1/repositories/ingest` | Queue repository parsing + embedding; returns `{id, status}` |
+| `GET` | `/api/v1/repositories/ingest/{id}` | Poll an ingestion job; returns result/error when available |
 | `POST` | `/api/v1/repositories/search` | Direct hybrid search (no agent) |
 | `POST` | `/api/v1/agent/ask` | Ask the codebase (ReAct agent) |
 | `POST` | `/api/v1/journeys` | Queue a guided-tour job for an ingested repo |
@@ -344,7 +349,7 @@ they are included in a plain `uv run pytest`: the fixture creates a scratch
 database with a unique `camino_worker_test_*` name on the `DATABASE_URL` server
 and drops it after the run. It never drops a pre-existing database. If Postgres
 is down, the module skips. Set `TEST_DATABASE_URL` to target an existing database
-instead (it gets `tour_jobs` truncated); the fixture refuses to run if its database
+instead (it gets `jobs` truncated); the fixture refuses to run if its database
 name matches `DATABASE_URL`, including through a different host alias. The normal,
 recommended command is still only `uv run pytest`; no manual test-database setup
 is needed.

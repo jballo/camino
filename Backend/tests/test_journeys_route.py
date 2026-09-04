@@ -7,7 +7,7 @@ from sqlalchemy import exc
 
 from app.db import get_session
 from app.main import app
-from app.models.tour_job import TourJobStatus
+from app.models.job import JobStatus, JobType
 from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
 from app.security import get_authenticated_user_id
 
@@ -25,6 +25,7 @@ def _fake_session():
     gh_conn = MagicMock()
     gh_conn.installationId = FAKE_INSTALLATION_ID
     session.exec.return_value.one.return_value = gh_conn
+    session.exec.return_value.first.return_value = None
 
     def _assign_id(obj):
         obj.id = 1
@@ -59,7 +60,8 @@ def _body(**overrides):
 def _make_job(**overrides):
     job = MagicMock()
     job.id = overrides.get("id", 1)
-    job.status = overrides.get("status", TourJobStatus.COMPLETE)
+    job.status = overrides.get("status", JobStatus.COMPLETE)
+    job.job_type = overrides.get("job_type", JobType.TOUR)
     job.userId = overrides.get("userId", "user_123")
     job.repo_name = overrides.get("repo_name", "org/repo")
     job.topic = overrides.get("topic", "authentication flow")
@@ -76,7 +78,7 @@ def test_create_returns_pending_job():
     assert resp.status_code == 200
     data = resp.json()
     assert data["id"] == 1
-    assert data["status"] == TourJobStatus.PENDING
+    assert data["status"] == JobStatus.PENDING
 
 
 @patch("app.worker.run_job")
@@ -84,7 +86,7 @@ def test_create_returns_pending_job():
 def test_create_does_not_invoke_generation(mock_generate, mock_run):
     resp = client.post(JOURNEYS_URL, json=_body())
     assert resp.status_code == 200
-    assert resp.json()["status"] == TourJobStatus.PENDING
+    assert resp.json()["status"] == JobStatus.PENDING
     mock_generate.assert_not_called()
     mock_run.assert_not_called()
 
@@ -123,7 +125,7 @@ def test_create_no_github_connection_returns_404():
 # ── read (GET /{id}) ────────────────────────────────────────────────
 
 def test_get_returns_job():
-    job = _make_job(status=TourJobStatus.COMPLETE, artifact={"title": "Tour", "steps": []})
+    job = _make_job(status=JobStatus.COMPLETE, artifact={"title": "Tour", "steps": []})
 
     def _session_with_job():
         session = MagicMock()
@@ -135,7 +137,7 @@ def test_get_returns_job():
     assert resp.status_code == 200
     data = resp.json()
     assert data["id"] == 1
-    assert data["status"] == TourJobStatus.COMPLETE
+    assert data["status"] == JobStatus.COMPLETE
     assert data["repoName"] == "org/repo"
     assert data["artifact"] == {"title": "Tour", "steps": []}
 

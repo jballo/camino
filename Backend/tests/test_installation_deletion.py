@@ -12,7 +12,7 @@ from app.services.installation_deletion import (
 INSTALLATION_ID = 101
 
 
-def test_deletes_connections_tours_and_chunks():
+def test_deletes_connections_jobs_and_chunks():
     session = MagicMock()
 
     delete_installation_local_data(session, INSTALLATION_ID)
@@ -20,7 +20,7 @@ def test_deletes_connections_tours_and_chunks():
     statements = [str(call.args[0]) for call in session.exec.call_args_list]
     assert len(statements) == 3
     assert any("DELETE FROM githubconnections" in s for s in statements)
-    assert any("DELETE FROM tour_jobs" in s for s in statements)
+    assert any("DELETE FROM jobs" in s for s in statements)
     assert any("DELETE FROM code_chunks" in s for s in statements)
     session.commit.assert_called_once_with()
     session.rollback.assert_not_called()

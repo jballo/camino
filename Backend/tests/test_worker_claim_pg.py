@@ -4,7 +4,7 @@ These need a real Postgres (``FOR UPDATE SKIP LOCKED`` semantics can't be
 mocked). By default a uniquely named ``camino_worker_test_*`` scratch database
 is created on the same server as ``DATABASE_URL`` and dropped afterwards; if
 Postgres is unreachable the module skips. Set ``TEST_DATABASE_URL`` to use an
-existing database instead (it will have ``tour_jobs`` truncated); as a safety
+existing database instead (it will have ``jobs`` truncated); as a safety
 net the fixture fails fast if it resolves to the same database as
 ``DATABASE_URL``.
 """
@@ -31,7 +31,7 @@ from app.db import get_session
 from app.main import app
 from app.models.github_connection import GithubConnections
 from app.models.tour import TourArtifact, TourStep
-from app.models.tour_job import TourJob, TourJobStatus
+from app.models.job import Job, JobStatus, JobType
 from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
 from app.security import get_authenticated_user_id
 from app.worker import claim_next_job, recover_stale_jobs, run_job
@@ -56,7 +56,7 @@ def pg_engine():
         if url.database == app_url.database:
             pytest.fail(
                 "TEST_DATABASE_URL points at the application database "
-                f"({app_url.database!r}); these tests TRUNCATE tour_jobs. "
+                f"({app_url.database!r}); these tests TRUNCATE jobs. "
                 "Use a dedicated test database or unset TEST_DATABASE_URL "
                 "to auto-provision a scratch one."
             )
@@ -81,20 +81,25 @@ def pg_engine():
 
     engine = create_engine(url)
     try:
-        TourJob.__table__.create(engine, checkfirst=True)
+        Job.__table__.create(engine, checkfirst=True)
     except OperationalError as e:
         engine.dispose()
         pytest.skip(f"Postgres not reachable ({e}); skipping claim integration tests")
     GithubConnections.__table__.create(engine, checkfirst=True)
     with engine.connect() as conn:
-        conn.execute(text("ALTER TABLE tour_jobs ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ"))
-        conn.execute(text("ALTER TABLE tour_jobs ADD COLUMN IF NOT EXISTS claimed_by TEXT"))
+        conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ"))
+        conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_by TEXT"))
         conn.execute(text(
-            "ALTER TABLE tour_jobs ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0"
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0"
         ))
         conn.execute(text(
-            'CREATE INDEX IF NOT EXISTS ix_tour_jobs_pending '
-            "ON tour_jobs (\"createdAt\") WHERE status = 'pending'"
+            'CREATE INDEX IF NOT EXISTS ix_jobs_pending '
+            "ON jobs (\"createdAt\") WHERE status = 'pending'"
+        ))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_active_dedupe "
+            "ON jobs (dedupe_key) WHERE status IN ('pending', 'running') "
+            "AND dedupe_key IS NOT NULL"
         ))
         conn.commit()
 
@@ -110,19 +115,21 @@ def pg_engine():
 @pytest.fixture
 def pg_engine_clean(pg_engine):
     with Session(pg_engine) as session:
-        session.execute(text("TRUNCATE tour_jobs RESTART IDENTITY CASCADE"))
+        session.execute(text("TRUNCATE jobs RESTART IDENTITY CASCADE"))
         session.commit()
     return pg_engine
 
 
-def _insert_job(session: Session, **overrides) -> TourJob:
+def _insert_job(session: Session, **overrides) -> Job:
     now = dt.datetime.now(dt.timezone.utc)
-    job = TourJob(
+    job = Job(
         userId=overrides.get("userId", "user_1"),
         installation_id=overrides.get("installation_id", 1),
         repo_name=overrides.get("repo_name", "org/repo"),
         topic=overrides.get("topic", "topic"),
-        status=overrides.get("status", TourJobStatus.PENDING),
+        job_type=overrides.get("job_type", JobType.TOUR),
+        dedupe_key=overrides.get("dedupe_key"),
+        status=overrides.get("status", JobStatus.PENDING),
         claimed_at=overrides.get("claimed_at"),
         claimed_by=overrides.get("claimed_by"),
         attempts=overrides.get("attempts", 0),
@@ -137,9 +144,9 @@ def _insert_job(session: Session, **overrides) -> TourJob:
     return job
 
 
-def _reload(engine, job_id: int) -> TourJob:
+def _reload(engine, job_id: int) -> Job:
     with Session(engine) as session:
-        job = session.get(TourJob, job_id)
+        job = session.get(Job, job_id)
         assert job is not None
         session.expunge(job)
         return job
@@ -220,7 +227,7 @@ def test_claim_sets_generating_lease_and_attempts(pg_engine_clean):
 
     assert claimed == job_id
     row = _reload(pg_engine_clean, job_id)
-    assert row.status == TourJobStatus.GENERATING
+    assert row.status == JobStatus.RUNNING
     assert row.claimed_at is not None
     assert row.claimed_by == WORKER_A
     assert row.attempts == 1
@@ -229,9 +236,9 @@ def test_claim_sets_generating_lease_and_attempts(pg_engine_clean):
 def test_claim_skips_non_pending_rows(pg_engine_clean):
     now = dt.datetime.now(dt.timezone.utc)
     with Session(pg_engine_clean) as session:
-        _insert_job(session, status=TourJobStatus.GENERATING, claimed_at=now, claimed_by="w")
-        _insert_job(session, status=TourJobStatus.COMPLETE)
-        _insert_job(session, status=TourJobStatus.FAILED, error="nope")
+        _insert_job(session, status=JobStatus.RUNNING, claimed_at=now, claimed_by="w")
+        _insert_job(session, status=JobStatus.COMPLETE)
+        _insert_job(session, status=JobStatus.FAILED, error="nope")
 
     with Session(pg_engine_clean) as session:
         assert claim_next_job(session, WORKER_A) is None
@@ -244,7 +251,7 @@ def test_stale_generating_job_is_requeued(pg_engine_clean):
     with Session(pg_engine_clean) as session:
         job = _insert_job(
             session,
-            status=TourJobStatus.GENERATING,
+            status=JobStatus.RUNNING,
             claimed_at=stale,
             claimed_by=WORKER_A,
             attempts=1,
@@ -258,7 +265,7 @@ def test_stale_generating_job_is_requeued(pg_engine_clean):
 
     assert recovered == 1
     row = _reload(pg_engine_clean, job_id)
-    assert row.status == TourJobStatus.PENDING
+    assert row.status == JobStatus.PENDING
     assert row.claimed_at is None
     assert row.claimed_by is None
     assert row.attempts == 1
@@ -268,7 +275,7 @@ def test_legacy_generating_job_without_lease_is_requeued(pg_engine_clean):
     with Session(pg_engine_clean) as session:
         job = _insert_job(
             session,
-            status=TourJobStatus.GENERATING,
+            status=JobStatus.RUNNING,
             claimed_at=None,
             claimed_by=None,
             attempts=0,
@@ -282,7 +289,7 @@ def test_legacy_generating_job_without_lease_is_requeued(pg_engine_clean):
 
     assert recovered == 1
     row = _reload(pg_engine_clean, job_id)
-    assert row.status == TourJobStatus.PENDING
+    assert row.status == JobStatus.PENDING
     assert row.claimed_at is None
     assert row.claimed_by is None
     assert row.attempts == 0
@@ -293,7 +300,7 @@ def test_stale_job_at_max_attempts_is_failed(pg_engine_clean):
     with Session(pg_engine_clean) as session:
         job = _insert_job(
             session,
-            status=TourJobStatus.GENERATING,
+            status=JobStatus.RUNNING,
             claimed_at=stale,
             claimed_by=WORKER_A,
             attempts=3,
@@ -304,7 +311,7 @@ def test_stale_job_at_max_attempts_is_failed(pg_engine_clean):
         recover_stale_jobs(session, lease_timeout_seconds=60, max_attempts=3)
 
     row = _reload(pg_engine_clean, job_id)
-    assert row.status == TourJobStatus.FAILED
+    assert row.status == JobStatus.FAILED
     assert row.error == "Exceeded max attempts"
     assert row.claimed_at is None
     assert row.claimed_by is None
@@ -315,7 +322,7 @@ def test_fresh_generating_job_is_untouched(pg_engine_clean):
     with Session(pg_engine_clean) as session:
         job = _insert_job(
             session,
-            status=TourJobStatus.GENERATING,
+            status=JobStatus.RUNNING,
             claimed_at=now,
             claimed_by=WORKER_A,
             attempts=1,
@@ -329,7 +336,7 @@ def test_fresh_generating_job_is_untouched(pg_engine_clean):
 
     assert recovered == 0
     row = _reload(pg_engine_clean, job_id)
-    assert row.status == TourJobStatus.GENERATING
+    assert row.status == JobStatus.RUNNING
     assert row.claimed_by == WORKER_A
     assert row.claimed_at is not None
 
@@ -394,7 +401,17 @@ async def test_post_then_worker_then_get_completes(pg_engine_clean):
         )
         assert created.status_code == 200
         job_id = created.json()["id"]
-        assert created.json()["status"] == TourJobStatus.PENDING
+        assert created.json()["status"] == JobStatus.PENDING
+
+        duplicate = client.post(
+            "/api/v1/journeys",
+            json={"repoName": "org/repo", "topic": "authentication flow"},
+        )
+        assert duplicate.status_code == 200
+        assert duplicate.json() == {
+            "id": job_id,
+            "status": JobStatus.PENDING,
+        }
 
         with Session(pg_engine_clean) as session:
             claimed = claim_next_job(session, WORKER_A)
@@ -413,7 +430,7 @@ async def test_post_then_worker_then_get_completes(pg_engine_clean):
         fetched = client.get(f"/api/v1/journeys/{job_id}")
         assert fetched.status_code == 200
         body = fetched.json()
-        assert body["status"] == TourJobStatus.COMPLETE
+        assert body["status"] == JobStatus.COMPLETE
         assert body["artifact"] == artifact.model_dump()
         assert body["error"] is None
     finally:
@@ -446,7 +463,7 @@ async def test_active_job_heartbeat_prevents_stale_recovery(pg_engine_clean):
         await run_job(job_id, WORKER_A)
 
     row = _reload(pg_engine_clean, job_id)
-    assert row.status == TourJobStatus.COMPLETE
+    assert row.status == JobStatus.COMPLETE
     assert row.artifact == artifact.model_dump()
 
 
@@ -462,7 +479,7 @@ async def test_old_worker_cannot_persist_after_job_is_reclaimed(pg_engine_clean)
         with Session(pg_engine_clean) as session:
             session.execute(
                 text(
-                    "UPDATE tour_jobs SET claimed_at = :stale "
+                    "UPDATE jobs SET claimed_at = :stale "
                     "WHERE id = :job_id"
                 ),
                 {"stale": stale, "job_id": job_id},
@@ -483,6 +500,6 @@ async def test_old_worker_cannot_persist_after_job_is_reclaimed(pg_engine_clean)
         await run_job(job_id, WORKER_A)
 
     row = _reload(pg_engine_clean, job_id)
-    assert row.status == TourJobStatus.GENERATING
+    assert row.status == JobStatus.RUNNING
     assert row.claimed_by == WORKER_B
     assert row.artifact is None

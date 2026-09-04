@@ -8,9 +8,10 @@ from sqlmodel import select
 
 from app.db import SessionDep
 from app.models.github_connection import GithubConnections
-from app.models.tour_job import TourJob, TourJobStatus
+from app.models.job import Job, JobType
 from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
 from app.security import get_authenticated_user_id
+from app.services.jobs import enqueue_job, tour_dedupe_key
 
 logger = logging.getLogger(__name__)
 
@@ -65,22 +66,30 @@ async def create_journey(
         raise HTTPException(status_code=500, detail="Database error")
 
     try:
-        job = TourJob(
-            userId=auth_user_id,
+        job, created = enqueue_job(
+            session,
+            user_id=auth_user_id,
             installation_id=gh_connection.installationId,
             repo_name=payload.repoName,
+            job_type=JobType.TOUR,
+            dedupe_key=tour_dedupe_key(
+                user_id=auth_user_id,
+                installation_id=gh_connection.installationId,
+                repo_name=payload.repoName,
+                topic=payload.topic,
+            ),
             topic=payload.topic,
-            status=TourJobStatus.PENDING,
         )
-        session.add(job)
-        session.commit()
-        session.refresh(job)
     except exc.SQLAlchemyError:
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
 
     logger.info(
-        "tour job queued | id=%s topic=%r repo=%r", job.id, payload.topic, payload.repoName
+        "tour job %s | id=%s topic=%r repo=%r",
+        "queued" if created else "deduplicated",
+        job.id,
+        payload.topic,
+        payload.repoName,
     )
     return JourneyCreatedResponse(id=job.id, status=job.status)
 
@@ -92,7 +101,7 @@ async def get_journey(
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> JourneyResponse:
     try:
-        job = session.get(TourJob, job_id)
+        job = session.get(Job, job_id)
     except exc.OperationalError:
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
@@ -101,6 +110,8 @@ async def get_journey(
         raise HTTPException(status_code=404, detail="Journey not found")
     if job.userId != auth_user_id:
         raise HTTPException(status_code=403, detail="Forbidden")
+    if job.job_type != JobType.TOUR:
+        raise HTTPException(status_code=404, detail="Journey not found")
 
     return JourneyResponse(
         id=job.id,
@@ -118,10 +129,13 @@ async def list_journeys(
     auth_user_id: str = Depends(get_authenticated_user_id),
     repo: str | None = None,
 ) -> list[JourneySummaryResponse]:
-    statement = select(TourJob).where(TourJob.userId == auth_user_id)
+    statement = select(Job).where(
+        Job.userId == auth_user_id,
+        Job.job_type == JobType.TOUR,
+    )
     if repo:
-        statement = statement.where(TourJob.repo_name == repo)
-    statement = statement.order_by(TourJob.createdAt.desc())
+        statement = statement.where(Job.repo_name == repo)
+    statement = statement.order_by(Job.createdAt.desc())
 
     try:
         jobs = session.exec(statement).all()
