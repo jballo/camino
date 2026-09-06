@@ -79,6 +79,7 @@ configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
 | `ENCRYPTION_KEY` | Fernet key for token encryption at rest |
 | `RATE_LIMIT_AGENT_ASK_REQUESTS` / `RATE_LIMIT_AGENT_ASK_WINDOW_SECONDS` | Q&A limit (default 20 requests / 600 seconds) |
 | `RATE_LIMIT_REPOSITORY_INGEST_REQUESTS` / `RATE_LIMIT_REPOSITORY_INGEST_WINDOW_SECONDS` | Ingest limit (default 2 requests / 3600 seconds) |
+| `INGEST_MAX_TARBALL_BYTES` | Maximum compressed GitHub tarball download size (default `209715200`, or 200 MiB) |
 | `RATE_LIMIT_REPOSITORY_SEARCH_REQUESTS` / `RATE_LIMIT_REPOSITORY_SEARCH_WINDOW_SECONDS` | Direct-search limit (default 60 requests / 60 seconds) |
 | `RATE_LIMIT_JOURNEY_CREATE_REQUESTS` / `RATE_LIMIT_JOURNEY_CREATE_WINDOW_SECONDS` | Journey creation limit (default 5 requests / 3600 seconds) |
 | `RUN_WORKER` | Start the shared job worker in the API process (default `false`; use only for an explicitly combined deployment) |
@@ -170,9 +171,11 @@ requests reuse the same row through a status-scoped unique deduplication key. Kn
 transient upstream and database errors return the job to `pending`; each claim
 increments `attempts`, and the job becomes `failed` after `WORKER_MAX_ATTEMPTS`.
 
-PyGithub's repository pagination, file downloads, and tree-sitter parsing are
-synchronous, so repository ingestion runs that complete walk with
-`asyncio.to_thread`. Embedding calls and job orchestration remain asynchronous.
+Repository ingestion verifies installation access with PyGithub, then streams one
+GitHub tarball snapshot up to `INGEST_MAX_TARBALL_BYTES`, safely extracts it, and
+parses supported source files locally. The snapshot reflects a single commit. This
+blocking download/extract/parse stretch runs with `asyncio.to_thread`; embedding calls
+and job orchestration remain asynchronous.
 
 Multiple processes can share the queue. If a worker dies, lease recovery returns its
 row to `pending` (or marks it `failed` at the attempt limit) after

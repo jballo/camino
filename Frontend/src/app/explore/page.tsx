@@ -12,10 +12,19 @@ import {
   Search,
 } from "lucide-react";
 import { useAuth } from "@clerk/nextjs";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 
 import { ApiError, backendFetch } from "@/lib/api";
+import {
+  enqueueRepositoryIngestion,
+  isAbortError,
+  pollRepositoryIngestion,
+} from "@/lib/repository-ingestion";
+import type {
+  RepositoryIngestionJob,
+  RepositoryIngestionResult,
+} from "@/types/repository-ingestion";
 
 type Source = {
   chunk_id: number;
@@ -34,10 +43,8 @@ type AgentAnswer = {
   sources: Source[];
 };
 
-type IngestResult = {
+type IngestResult = RepositoryIngestionResult & {
   repoName: string;
-  chunks_inserted: number;
-  embeddings_created: number;
 };
 
 export default function Explore() {
@@ -58,6 +65,10 @@ export default function Explore() {
   const [processError, setProcessError] = useState<string | undefined>(
     undefined,
   );
+  const [ingestionJob, setIngestionJob] = useState<
+    RepositoryIngestionJob | undefined
+  >(undefined);
+  const ingestionAbortRef = useRef<AbortController | null>(null);
   const [processedMap, setProcessedMap] = useState<Record<string, number>>({});
   const [processedLoading, setProcessedLoading] = useState(false);
 
@@ -112,34 +123,79 @@ export default function Explore() {
     loadProcessed();
   }, [loadRepos, loadProcessed]);
 
+  useEffect(
+    () => () => {
+      ingestionAbortRef.current?.abort();
+    },
+    [],
+  );
+
   const processRepo = useCallback(
     async (repoName: string) => {
+      ingestionAbortRef.current?.abort();
+      const controller = new AbortController();
+      ingestionAbortRef.current = controller;
+
       setProcessingRepo(repoName);
+      setIngestionJob(undefined);
       setIngestResult(undefined);
       setProcessError(undefined);
       try {
         const token = await getToken();
         if (!token) throw new ApiError(401, "Not authenticated");
 
-        const result = await backendFetch<Omit<IngestResult, "repoName">>(
-          "/api/v1/repositories/ingest",
+        const created = await enqueueRepositoryIngestion(
+          repoName,
           token,
-          {
-            method: "POST",
-            body: { repoName },
-          },
+          controller.signal,
         );
-        setIngestResult({ repoName, ...result });
+        setIngestionJob({
+          ...created,
+          repoName,
+          attempts: 0,
+          result: null,
+          error: null,
+        });
+
+        const job = await pollRepositoryIngestion(created.id, getToken, {
+          signal: controller.signal,
+          onUpdate: setIngestionJob,
+        });
+        if (job.status === "failed") {
+          throw new Error(job.error ?? "Repository ingestion failed.");
+        }
+        if (!job.result) {
+          throw new Error("Repository ingestion completed without a result.");
+        }
+
+        setIngestResult({ repoName, ...job.result });
         setProcessedMap((prev) => ({
           ...prev,
-          [repoName]: result.chunks_inserted,
+          [repoName]: job.result?.chunks_inserted ?? 0,
         }));
-        loadProcessed();
+        void loadProcessed();
       } catch (error) {
+        if (isAbortError(error)) return;
         console.log("Error: ", error);
-        setProcessError(`Failed to process ${repoName}`);
+        if (
+          error instanceof ApiError &&
+          (error.status === 401 || error.status === 403)
+        ) {
+          setProcessError(
+            "Your session expired. Please refresh the page and log in again.",
+          );
+        } else {
+          setProcessError(
+            error instanceof Error
+              ? `Failed to process ${repoName}: ${error.message}`
+              : `Failed to process ${repoName}`,
+          );
+        }
       } finally {
-        setProcessingRepo(undefined);
+        if (ingestionAbortRef.current === controller) {
+          ingestionAbortRef.current = null;
+          setProcessingRepo(undefined);
+        }
       }
     },
     [getToken, loadProcessed],
@@ -212,6 +268,7 @@ export default function Explore() {
               const isProcessing = repo === processingRepo;
               const isProcessed = repo in processedMap;
               const chunkCount = processedMap[repo];
+              const jobStatus = isProcessing ? ingestionJob?.status : undefined;
               return (
                 <div
                   key={repo}
@@ -232,7 +289,20 @@ export default function Explore() {
                     )}
                   </div>
                   <div className="flex items-center gap-1.5">
-                    {isProcessed ? (
+                    {isProcessing ? (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-primary/15 px-2 py-0.5 text-xs text-primary">
+                        <Loader2 className="size-3 animate-spin" />
+                        {jobStatus === "pending"
+                          ? ingestionJob && ingestionJob.attempts > 0
+                            ? `Retry queued · attempt ${ingestionJob.attempts}`
+                            : "Queued"
+                          : jobStatus === "running"
+                            ? ingestionJob && ingestionJob.attempts > 1
+                              ? `Processing · attempt ${ingestionJob.attempts}`
+                              : "Processing"
+                            : "Starting"}
+                      </span>
+                    ) : isProcessed ? (
                       <span className="inline-flex items-center gap-1 rounded-full bg-primary/15 px-2 py-0.5 text-xs text-primary">
                         <CheckCircle2 className="size-3" />
                         Processed
@@ -252,13 +322,13 @@ export default function Explore() {
                       e.stopPropagation();
                       processRepo(repo);
                     }}
-                    disabled={isProcessing}
+                    disabled={processingRepo !== undefined}
                     className="flex items-center justify-center gap-2 h-8 rounded-md bg-primary text-primary-foreground text-sm disabled:opacity-60"
                   >
                     {isProcessing ? (
                       <>
                         <Loader2 className="size-4 animate-spin" />
-                        Processing…
+                        {jobStatus === "pending" ? "Queued…" : "Processing…"}
                       </>
                     ) : isProcessed ? (
                       <>

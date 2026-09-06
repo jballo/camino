@@ -7,7 +7,7 @@ import {
   Loader2,
   Sparkles,
 } from "lucide-react";
-import { useCallback, useState, useTransition } from "react";
+import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   Description,
@@ -18,6 +18,12 @@ import {
 import { useAuth } from "@clerk/nextjs";
 
 import { ApiError, backendFetch } from "@/lib/api";
+import {
+  enqueueRepositoryIngestion,
+  isAbortError,
+  pollRepositoryIngestion,
+} from "@/lib/repository-ingestion";
+import type { RepositoryIngestionJob } from "@/types/repository-ingestion";
 
 const EXAMPLE_TOPICS = [
   "Authentication flow",
@@ -41,6 +47,13 @@ export default function Home() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | undefined>(undefined);
   const [processing, setProcessing] = useState(false);
+  const [processingError, setProcessingError] = useState<string | undefined>(
+    undefined,
+  );
+  const [ingestionJob, setIngestionJob] = useState<
+    RepositoryIngestionJob | undefined
+  >(undefined);
+  const ingestionAbortRef = useRef<AbortController | null>(null);
 
   const canSubmit = prompt.trim().length > 0 && !!repoSelected && !submitting;
 
@@ -94,6 +107,8 @@ export default function Home() {
   const openDialog = async () => {
     setRepoSelectionDialog(true);
     setRepoRetrievalError(undefined);
+    setProcessingError(undefined);
+    setIngestionJob(undefined);
     startTransition(async () => {
       try {
         const token = await getToken();
@@ -114,29 +129,73 @@ export default function Home() {
   const processRepo = useCallback(async () => {
     if (repoSelected == undefined) return;
 
+    ingestionAbortRef.current?.abort();
+    const controller = new AbortController();
+    ingestionAbortRef.current = controller;
+
     setProcessing(true);
+    setProcessingError(undefined);
+    setIngestionJob(undefined);
     try {
       const token = await getToken();
       if (!token) throw new ApiError(401, "Not authenticated");
 
-      const result = await backendFetch<unknown>(
-        "/api/v1/repositories/ingest",
+      const created = await enqueueRepositoryIngestion(
+        repoSelected,
         token,
-        {
-          method: "POST",
-          body: {
-          repoName: repoSelected,
-          },
-        },
+        controller.signal,
       );
-      console.log("Result: ", result);
+      setIngestionJob({
+        ...created,
+        repoName: repoSelected,
+        attempts: 0,
+        result: null,
+        error: null,
+      });
+
+      const job = await pollRepositoryIngestion(created.id, getToken, {
+        signal: controller.signal,
+        onUpdate: setIngestionJob,
+      });
+      if (job.status === "failed") {
+        throw new Error(job.error ?? "Repository ingestion failed.");
+      }
+      if (!job.result) {
+        throw new Error("Repository ingestion completed without a result.");
+      }
+
       setRepoSelectionDialog(false);
     } catch (error) {
+      if (isAbortError(error)) return;
       console.log("Error: ", error);
+      if (
+        error instanceof ApiError &&
+        (error.status === 401 || error.status === 403)
+      ) {
+        setProcessingError(
+          "Your session expired. Please refresh the page and log in again.",
+        );
+      } else {
+        setProcessingError(
+          error instanceof Error
+            ? error.message
+            : "Failed to process repository.",
+        );
+      }
     } finally {
-      setProcessing(false);
+      if (ingestionAbortRef.current === controller) {
+        ingestionAbortRef.current = null;
+        setProcessing(false);
+      }
     }
   }, [getToken, repoSelected]);
+
+  useEffect(
+    () => () => {
+      ingestionAbortRef.current?.abort();
+    },
+    [],
+  );
 
   return (
     <div className="flex flex-col justify-center items-center w-full min-h-full">
@@ -222,7 +281,9 @@ export default function Home() {
 
             <Dialog
                 open={repoSelectionDialog}
-                onClose={() => setRepoSelectionDialog(false)}
+                onClose={() => {
+                  if (!processing) setRepoSelectionDialog(false);
+                }}
                 className="relative z-50"
               >
                 <div className="fixed inset-0 flex w-screen items-center justify-center p-4">
@@ -234,6 +295,27 @@ export default function Home() {
                       This is the repository the tour will be based on. It must
                       be processed (ingested) before a tour can be generated.
                     </Description>
+                    {processing && (
+                      <div className="flex items-center gap-2 rounded-md border border-border bg-accent/50 p-3 text-sm">
+                        <Loader2 className="size-4 shrink-0 animate-spin text-primary" />
+                        <span>
+                          {ingestionJob?.status === "pending"
+                            ? ingestionJob.attempts > 0
+                              ? `Retry queued (attempt ${ingestionJob.attempts})`
+                              : "Repository queued"
+                            : ingestionJob?.status === "running"
+                              ? ingestionJob.attempts > 1
+                                ? `Processing repository (attempt ${ingestionJob.attempts})`
+                                : "Processing repository"
+                              : "Starting repository ingestion"}
+                        </span>
+                      </div>
+                    )}
+                    {processingError && (
+                      <div className="text-sm text-destructive">
+                        {processingError}
+                      </div>
+                    )}
                     <RadioGroup
                       value={repoSelected || ""}
                       onChange={setRepoSelected}
@@ -256,6 +338,7 @@ export default function Home() {
                       <Button
                         className="rounded-sm px-3 py-1.5 text-sm hover:bg-accent"
                         onClick={() => setRepoSelectionDialog(false)}
+                        disabled={processing}
                       >
                         Cancel
                       </Button>
@@ -268,12 +351,16 @@ export default function Home() {
                           {processing && (
                             <Loader2 className="size-3.5 animate-spin" />
                           )}
-                          Process repo
+                          {processing
+                            ? ingestionJob?.status === "pending"
+                              ? "Queued…"
+                              : "Processing…"
+                            : "Process repo"}
                         </Button>
                         <Button
                           className="rounded-sm bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-50"
                           onClick={() => setRepoSelectionDialog(false)}
-                          disabled={!repoSelected}
+                          disabled={!repoSelected || processing}
                         >
                           Use repository
                         </Button>
