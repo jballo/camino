@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import logging
 import os
 import random
@@ -20,7 +21,13 @@ from app.services.embeddings import (
     build_embedding_text,
     embed_all,
 )
-from app.services.parser import LANGUAGES, MAX_FILE_BYTES, SKIP_DIRS, parse_file
+from app.services.parser import (
+    LANGUAGES,
+    MAX_FILE_BYTES,
+    SKIP_DIRS,
+    CodeChunk,
+    parse_file,
+)
 from app.services.search_index import populate_search_vector_sql
 
 logger = logging.getLogger(__name__)
@@ -40,7 +47,16 @@ class PermanentRepositoryIngestionError(RepositoryIngestionError):
     """Invalid input or deterministic failure that should not be retried."""
 
 
-async def _gh_with_retry(fn, what: str, attempts: int = 4, base_delay: float = 0.5):
+@dataclass(frozen=True)
+class _RepositoryWalk:
+    chunks: list[CodeChunk]
+    files_seen: int
+    files_parsed: int
+    dirs_walked: int
+
+
+def _gh_with_retry(fn, what: str, attempts: int = 4, base_delay: float = 0.5):
+    """Run one blocking GitHub request with bounded transient retries."""
     for attempt in range(1, attempts + 1):
         try:
             return fn()
@@ -58,7 +74,84 @@ async def _gh_with_retry(fn, what: str, attempts: int = 4, base_delay: float = 0
                 attempts,
                 delay,
             )
-            await asyncio.sleep(delay)
+            time.sleep(delay)
+
+
+def _walk_repository(
+    *,
+    repo_name: str,
+    installation_id: int,
+) -> _RepositoryWalk:
+    """Synchronously fetch and parse a repository.
+
+    PyGithub performs blocking HTTP and lazy pagination, and decoded_content can
+    issue another request. The async caller runs this entire function in one
+    thread so none of those operations block its event loop.
+    """
+    app_auth = Auth.AppAuth(
+        app_id=settings.gh_app_id,
+        private_key=settings.gh_app_private_key,
+    )
+    installation = GithubIntegration(auth=app_auth).get_app_installation(
+        installation_id
+    )
+    repo_selected = next(
+        (repo for repo in installation.get_repos() if repo.full_name == repo_name),
+        None,
+    )
+    if repo_selected is None:
+        raise PermanentRepositoryIngestionError("Repository not found")
+
+    contents = _gh_with_retry(
+        lambda: repo_selected.get_contents(""),
+        "get_contents:root",
+    )
+    chunks: list[CodeChunk] = []
+    files_seen = 0
+    files_parsed = 0
+    dirs_walked = 0
+
+    while contents:
+        file_content = contents.pop(0)
+        path_parts = file_content.path.replace("\\", "/").split("/")
+        if any(part in SKIP_DIRS for part in path_parts):
+            continue
+
+        if file_content.type == "dir":
+            dirs_walked += 1
+            contents.extend(
+                _gh_with_retry(
+                    lambda path=file_content.path: repo_selected.get_contents(path),
+                    f"get_contents:{file_content.path}",
+                )
+            )
+            continue
+        if file_content.type != "file":
+            continue
+
+        extension = os.path.splitext(file_content.path)[1]
+        if extension not in LANGUAGES:
+            continue
+        if file_content.size and file_content.size > MAX_FILE_BYTES:
+            continue
+
+        files_seen += 1
+        try:
+            source_bytes = file_content.decoded_content
+        except AssertionError:
+            continue
+        if not source_bytes:
+            continue
+
+        chunks.extend(parse_file(file_content.path, source_bytes))
+        files_parsed += 1
+
+    return _RepositoryWalk(
+        chunks=chunks,
+        files_seen=files_seen,
+        files_parsed=files_parsed,
+        dirs_walked=dirs_walked,
+    )
 
 
 async def ingest_repository(
@@ -69,7 +162,6 @@ async def ingest_repository(
 ) -> dict[str, int]:
     """Replace one repository's index atomically and return ingestion counts."""
     phase = "init"
-    current_path = ""
     files_seen = 0
     files_parsed = 0
     dirs_walked = 0
@@ -82,64 +174,17 @@ async def ingest_repository(
             repo_name,
             installation_id,
         )
-        app_auth = Auth.AppAuth(
-            app_id=settings.gh_app_id,
-            private_key=settings.gh_app_private_key,
-        )
-        installation = GithubIntegration(auth=app_auth).get_app_installation(
-            installation_id
-        )
-
-        phase = "find_repo"
-        repo_selected = next(
-            (repo for repo in installation.get_repos() if repo.full_name == repo_name),
-            None,
-        )
-        if repo_selected is None:
-            raise PermanentRepositoryIngestionError("Repository not found")
 
         phase = "walk"
-        contents = await _gh_with_retry(
-            lambda: repo_selected.get_contents(""),
-            "get_contents:root",
+        walk = await asyncio.to_thread(
+            _walk_repository,
+            repo_name=repo_name,
+            installation_id=installation_id,
         )
-        all_chunks = []
-        while contents:
-            file_content = contents.pop(0)
-            current_path = file_content.path
-
-            path_parts = file_content.path.replace("\\", "/").split("/")
-            if any(part in SKIP_DIRS for part in path_parts):
-                continue
-
-            if file_content.type == "dir":
-                dirs_walked += 1
-                contents.extend(
-                    await _gh_with_retry(
-                        lambda path=file_content.path: repo_selected.get_contents(path),
-                        f"get_contents:{file_content.path}",
-                    )
-                )
-                continue
-            if file_content.type != "file":
-                continue
-
-            extension = os.path.splitext(file_content.path)[1]
-            if extension not in LANGUAGES:
-                continue
-            if file_content.size and file_content.size > MAX_FILE_BYTES:
-                continue
-
-            files_seen += 1
-            try:
-                source_bytes = file_content.decoded_content
-            except AssertionError:
-                continue
-            if not source_bytes:
-                continue
-
-            all_chunks.extend(parse_file(file_content.path, source_bytes))
-            files_parsed += 1
+        all_chunks = walk.chunks
+        files_seen = walk.files_seen
+        files_parsed = walk.files_parsed
+        dirs_walked = walk.dirs_walked
 
         logger.info(
             "ingest walk complete | repo=%r files_seen=%d files_parsed=%d "
@@ -210,10 +255,9 @@ async def ingest_repository(
     except (RequestException, EmbeddingError, exc.OperationalError) as error:
         session.rollback()
         logger.warning(
-            "transient ingest failure | phase=%s repo=%r last_path=%r error=%s",
+            "transient ingest failure | phase=%s repo=%r error=%s",
             phase,
             repo_name,
-            current_path,
             error,
         )
         raise TransientRepositoryIngestionError(str(error)) from error
@@ -237,11 +281,10 @@ async def ingest_repository(
     except Exception as error:
         session.rollback()
         logger.exception(
-            "unexpected ingest failure | phase=%s repo=%r last_path=%r "
-            "files_seen=%d elapsed=%.2fs",
+            "unexpected ingest failure | phase=%s repo=%r files_seen=%d "
+            "elapsed=%.2fs",
             phase,
             repo_name,
-            current_path,
             files_seen,
             time.monotonic() - started,
         )

@@ -10,5 +10,28 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  worker:
+    image: ghcr.io/astral-sh/uv:python3.14-bookworm-slim
+    profiles: ["worker"]
+    working_dir: /app
+    command: ["uv", "run", "--frozen", "python", "-m", "app.worker"]
+    init: true
+    restart: always
+    stop_grace_period: 30s
+    depends_on:
+      - db
+    env_file:
+      - ./Backend/.env
+    environment:
+      DATABASE_URL: postgresql://agent:localdev@db:5432/onboarding_agent
+      RUN_WORKER: "false"
+      UV_PROJECT_ENVIRONMENT: /opt/venv
+    volumes:
+      - ./Backend:/app:ro
+      - worker-venv:/opt/venv
+      - uv-cache:/root/.cache/uv
+
 volumes:
   pgdata:
+  worker-venv:
+  uv-cache:

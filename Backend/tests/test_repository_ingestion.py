@@ -1,3 +1,4 @@
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -44,6 +45,43 @@ async def test_ingestion_commits_atomic_replace_and_returns_counts():
     assert result == {"chunks_inserted": 0, "embeddings_created": 0}
     session.commit.assert_called_once_with()
     session.rollback.assert_not_called()
+
+
+async def test_github_walk_runs_outside_the_event_loop_thread():
+    session = MagicMock()
+    installation = MagicMock()
+    repository = MagicMock(full_name="org/repo")
+    repository.get_contents.return_value = []
+    installation.get_repos.return_value = [repository]
+    integration = MagicMock()
+    walk_threads: list[int] = []
+
+    def get_installation(_installation_id: int):
+        walk_threads.append(threading.get_ident())
+        return installation
+
+    integration.get_app_installation.side_effect = get_installation
+    event_loop_thread = threading.get_ident()
+
+    with (
+        patch(
+            "app.services.repository_ingestion.GithubIntegration",
+            return_value=integration,
+        ),
+        patch(
+            "app.services.repository_ingestion.embed_all",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+    ):
+        await ingest_repository(
+            session,
+            repo_name="org/repo",
+            installation_id=123,
+        )
+
+    assert walk_threads
+    assert walk_threads[0] != event_loop_thread
 
 
 async def test_network_failure_is_transient():

@@ -185,7 +185,11 @@ cp .env.example .env   # fill in secrets
 uv sync
 uv run fastapi dev app/main.py --port 8000
 
-# 3. Frontend
+# 3. Worker (in a second terminal)
+cd Backend
+uv run python -m app.worker
+
+# 4. Frontend
 cd ../Frontend
 cp .env.example .env.local
 npm install
@@ -292,9 +296,11 @@ npx cdk deploy CaminoBackendStack
 - Generate database credentials in Secrets Manager and inject application secrets into
   the task definition. Never put secret values in CDK source, CloudFormation outputs, or
   committed environment files.
-- Tour jobs are claimed from Postgres, so more than one Fargate task can share the
-  queue. A killed worker leaves its current job in `generating` until lease recovery
-  requeues or fails it; size `WORKER_LEASE_TIMEOUT` above the longest generation.
+- Run the API and `python -m app.worker` as separate services, with `RUN_WORKER=false`
+  on the API and an always-restart policy on the worker.
+- Jobs are claimed from Postgres, so more than one worker can share the queue. A killed
+  worker leaves its current job in `running` until the 600-second lease expires and
+  recovery requeues or fails it; active workers renew their leases every 200 seconds.
 
 ### Deployment gates
 

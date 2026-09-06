@@ -36,9 +36,24 @@ cd Backend
 cp .env.example .env        # fill in secrets (see below)
 uv sync
 uv run fastapi dev app/main.py --port 8000
+
+# In a second terminal
+cd Backend
+uv run python -m app.worker
 ```
 
 API docs: http://127.0.0.1:8000/docs
+
+The API does not run jobs in-process by default. As an alternative to the
+second terminal, start the supervised Compose worker after filling in
+`Backend/.env`:
+
+```bash
+docker compose --profile worker up -d worker
+```
+
+The Compose worker uses `restart: always`, connects to the Compose Postgres
+service, and runs the same `python -m app.worker` entrypoint.
 
 Clerk user sync and GitHub App uninstall cleanup arrive via webhooks, which need a
 publicly reachable backend. To exercise them locally, expose port 8000 with a tunnel and
@@ -66,9 +81,9 @@ configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
 | `RATE_LIMIT_REPOSITORY_INGEST_REQUESTS` / `RATE_LIMIT_REPOSITORY_INGEST_WINDOW_SECONDS` | Ingest limit (default 2 requests / 3600 seconds) |
 | `RATE_LIMIT_REPOSITORY_SEARCH_REQUESTS` / `RATE_LIMIT_REPOSITORY_SEARCH_WINDOW_SECONDS` | Direct-search limit (default 60 requests / 60 seconds) |
 | `RATE_LIMIT_JOURNEY_CREATE_REQUESTS` / `RATE_LIMIT_JOURNEY_CREATE_WINDOW_SECONDS` | Journey creation limit (default 5 requests / 3600 seconds) |
-| `RUN_WORKER` | Start the shared job worker in the API process (default `true`) |
+| `RUN_WORKER` | Start the shared job worker in the API process (default `false`; use only for an explicitly combined deployment) |
 | `WORKER_POLL_INTERVAL` | Seconds between empty-queue polls (default `1.5`) |
-| `WORKER_LEASE_TIMEOUT` | Seconds before a dead worker's claim is stale (default `1800`) |
+| `WORKER_LEASE_TIMEOUT` | Seconds before a dead worker's claim is stale (default `600`) |
 | `WORKER_MAX_ATTEMPTS` | Claims allowed before stale recovery marks a job failed (default `3`) |
 
 Generate `ENCRYPTION_KEY` with:
@@ -149,20 +164,26 @@ be embedded in the Docker image, CDK source, CloudFormation outputs, or committe
 ### Job queue
 
 Tour generation and repository ingestion insert typed `pending` rows in the shared
-`jobs` table. The polling worker (`app/worker.py`, started from the API lifespan when
-`RUN_WORKER=true`, or via `python -m app.worker`) claims the oldest pending job with
-`FOR UPDATE SKIP LOCKED` and dispatches it by type. Active duplicate requests reuse
-the same row through a status-scoped unique deduplication key. Known transient
-upstream and database errors return the job to `pending`; each claim increments
-`attempts`, and the job becomes `failed` after `WORKER_MAX_ATTEMPTS`.
+`jobs` table. The standalone polling worker (`python -m app.worker`) claims the oldest
+pending job with `FOR UPDATE SKIP LOCKED` and dispatches it by type. Active duplicate
+requests reuse the same row through a status-scoped unique deduplication key. Known
+transient upstream and database errors return the job to `pending`; each claim
+increments `attempts`, and the job becomes `failed` after `WORKER_MAX_ATTEMPTS`.
+
+PyGithub's repository pagination, file downloads, and tree-sitter parsing are
+synchronous, so repository ingestion runs that complete walk with
+`asyncio.to_thread`. Embedding calls and job orchestration remain asynchronous.
 
 Multiple processes can share the queue. If a worker dies, lease recovery returns its
 row to `pending` (or marks it `failed` at the attempt limit) after
-`WORKER_LEASE_TIMEOUT`.
+`WORKER_LEASE_TIMEOUT`. The default 600-second lease is renewed every 200 seconds while
+a job runs; stale recovery scans every 60 seconds.
 
-Leave `RUN_WORKER=true` for normal local development. Set it to `false` in API
-processes when jobs run separately with `python -m app.worker`. Atomic claims
-make either topology—and multiple worker processes—safe.
+Keep `RUN_WORKER=false` in API processes and supervise the separate worker process.
+The local Compose worker uses `restart: always`; production orchestration should apply
+the equivalent always-restart policy. `RUN_WORKER=true` remains available for an
+explicitly combined local process. Atomic claims make either topology—and multiple
+worker processes—safe.
 
 ---
 

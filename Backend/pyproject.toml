@@ -33,6 +33,7 @@ rerank = [
 
 [dependency-groups]
 dev = [
+    "pyyaml>=6.0.3",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
 ]
