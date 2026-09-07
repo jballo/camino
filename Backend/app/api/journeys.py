@@ -11,7 +11,11 @@ from app.models.github_connection import GithubConnections
 from app.models.job import Job, JobType
 from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
 from app.security import get_authenticated_user_id
-from app.services.jobs import enqueue_job, tour_dedupe_key
+from app.services.jobs import (
+    enqueue_job,
+    normalize_repository_name,
+    tour_dedupe_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +138,9 @@ async def list_journeys(
         Job.job_type == JobType.TOUR,
     )
     if repo:
-        statement = statement.where(Job.repo_name == repo)
+        statement = statement.where(
+            Job.repo_name == normalize_repository_name(repo)
+        )
     statement = statement.order_by(Job.createdAt.desc())
 
     try:

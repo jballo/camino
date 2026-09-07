@@ -6,6 +6,7 @@ from sqlalchemy import text
 from sqlmodel import Session
 
 from app.services.embeddings import EMBED_MODEL, embed_batch
+from app.services.jobs import normalize_repository_name
 from app.services.rerank import DEFAULT_RERANK_RRF_WEIGHT, DEFAULT_RERANK_TOP_N
 
 logger = logging.getLogger(__name__)
@@ -338,6 +339,7 @@ async def hybrid_search_debug(
     test/tutorial chunks after fusion. ``filter_demo_paths`` excludes those paths
     from the retriever candidate pools (Exp 5).
     """
+    repo_name = normalize_repository_name(repo_name)
     generation = _get_active_generation(session, repo_name, installation_id)
     if generation is None:
         return [], RetrievalDebug(vector_ranks={}, fts_ranks={}, fused=[])

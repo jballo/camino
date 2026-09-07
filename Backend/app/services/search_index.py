@@ -19,6 +19,7 @@ from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app.models.code import RepoIndexState
+from app.services.jobs import normalize_repository_name
 
 # Split camelCase, PascalCase, ACRONYMBoundaries, and snake_case into words.
 # Two passes: lower/digit -> Upper ("getOpenapi" -> "get Openapi") and
@@ -70,6 +71,7 @@ def rebuild_search_vector(
     session: Session, repo_name: str, installation_id: int
 ) -> None:
     """Recompute ``search_vector`` for a repo's live generation."""
+    repo_name = normalize_repository_name(repo_name)
     generation = session.exec(
         select(RepoIndexState.active_generation).where(
             RepoIndexState.repo_name == repo_name,

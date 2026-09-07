@@ -6,16 +6,29 @@ from sqlmodel import Session, select
 from app.models.job import Job, JobStatus, JobType
 
 
+def normalize_repository_name(repo_name: str) -> str:
+    """Return the stable, case-insensitive identity used for a GitHub repository."""
+    return repo_name.casefold()
+
+
 def tour_dedupe_key(
     *, user_id: str, installation_id: int, repo_name: str, topic: str
 ) -> str:
-    return f"{JobType.TOUR}:{user_id}:{installation_id}:{repo_name}:{topic}"
+    normalized_repo_name = normalize_repository_name(repo_name)
+    return (
+        f"{JobType.TOUR}:{user_id}:{installation_id}:"
+        f"{normalized_repo_name}:{topic}"
+    )
 
 
 def repository_ingest_dedupe_key(
     *, installation_id: int, repo_name: str
 ) -> str:
-    return f"{JobType.REPOSITORY_INGEST}:{installation_id}:{repo_name}"
+    normalized_repo_name = normalize_repository_name(repo_name)
+    return (
+        f"{JobType.REPOSITORY_INGEST}:{installation_id}:"
+        f"{normalized_repo_name}"
+    )
 
 
 def _active_job(session: Session, dedupe_key: str) -> Job | None:
@@ -45,6 +58,7 @@ def enqueue_job(
     ``dedupe_key`` closes the concurrent-enqueue race; its loser reloads the row
     inserted by the winner.
     """
+    repo_name = normalize_repository_name(repo_name)
     existing = _active_job(session, dedupe_key)
     if existing is not None:
         return existing, False

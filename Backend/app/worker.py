@@ -86,12 +86,16 @@ FROM jobs AS j
 WHERE j.id = :job_id
   AND j.status = 'running'
   AND j.claimed_by = :worker_id
-  AND EXISTS (
-      SELECT 1
-      FROM githubconnections AS gc
-      WHERE gc."installationId" = :installation_id
-  )
 FOR SHARE OF j
+""")
+
+LOCK_INSTALLATION_CONNECTION_SQL = text("""
+SELECT 1
+FROM githubconnections
+WHERE "installationId" = :installation_id
+ORDER BY id
+LIMIT 1
+FOR SHARE
 """)
 
 
@@ -167,18 +171,24 @@ def _ensure_ingestion_owned(
     if lease_lost.is_set():
         raise IngestionCancelledError("Ingestion job lease was lost")
 
-    owned = session.execute(
+    installation_exists = session.execute(
+        LOCK_INSTALLATION_CONNECTION_SQL,
+        {"installation_id": installation_id},
+    ).scalar_one_or_none()
+    if installation_exists is None:
+        raise IngestionCancelledError(
+            "GitHub installation is no longer active"
+        )
+
+    owns_job = session.execute(
         ENSURE_INGESTION_OWNED_SQL,
         {
             "job_id": job_id,
             "worker_id": worker_id,
-            "installation_id": installation_id,
         },
     ).scalar_one_or_none()
-    if owned is None:
-        raise IngestionCancelledError(
-            "Ingestion job or GitHub installation is no longer active"
-        )
+    if owns_job is None:
+        raise IngestionCancelledError("Ingestion job is no longer active")
 
 
 def _heartbeat_job_lease(

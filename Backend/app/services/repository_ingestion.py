@@ -26,6 +26,7 @@ from app.services.embeddings import (
     build_embedding_text,
     embed_all,
 )
+from app.services.jobs import normalize_repository_name
 from app.services.parser import (
     LANGUAGES,
     MAX_FILE_BYTES,
@@ -211,8 +212,13 @@ def _prepare_repository(
     )
     integration = GithubIntegration(auth=app_auth)
     installation = integration.get_app_installation(installation_id)
+    normalized_repo_name = normalize_repository_name(repo_name)
     repo_selected = next(
-        (repo for repo in installation.get_repos() if repo.full_name == repo_name),
+        (
+            repo
+            for repo in installation.get_repos()
+            if normalize_repository_name(repo.full_name) == normalized_repo_name
+        ),
         None,
     )
     if repo_selected is None:
@@ -220,7 +226,7 @@ def _prepare_repository(
 
     token = integration.get_access_token(installation_id).token
     archive_path = temp_path / "repo.tar.gz"
-    _download_tarball(repo_name, token, archive_path)
+    _download_tarball(repo_selected.full_name, token, archive_path)
     return _extract_tarball(archive_path, temp_path)
 
 
@@ -271,6 +277,7 @@ async def ingest_repository(
     ensure_owned: Callable[[Session], None] | None = None,
 ) -> dict[str, int]:
     """Stage a repository index in bounded waves, then publish it atomically."""
+    repo_name = normalize_repository_name(repo_name)
     phase = "init"
     stats = _RepositoryWalkStats(0, 0, 0)
     generation = uuid4().hex

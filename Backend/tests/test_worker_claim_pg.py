@@ -380,6 +380,20 @@ def test_ingestion_guard_requires_current_claim_and_installation(pg_engine_clean
             installation_id=installation_id,
             lease_lost=threading.Event(),
         )
+
+        with Session(pg_engine_clean) as deleting_session:
+            deleting_session.execute(text("SET LOCAL lock_timeout = '100ms'"))
+            with pytest.raises(OperationalError):
+                deleting_session.execute(
+                    text(
+                        'DELETE FROM githubconnections WHERE "installationId" = '
+                        ":installation_id"
+                    ),
+                    {"installation_id": installation_id},
+                )
+                deleting_session.commit()
+            deleting_session.rollback()
+
         session.rollback()
 
     with Session(pg_engine_clean) as session:

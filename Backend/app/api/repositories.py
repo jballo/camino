@@ -16,7 +16,11 @@ from app.rate_limit import (
     REPOSITORY_SEARCH_RATE_LIMIT,
 )
 from app.security import get_authenticated_user_id
-from app.services.jobs import enqueue_job, repository_ingest_dedupe_key
+from app.services.jobs import (
+    enqueue_job,
+    normalize_repository_name,
+    repository_ingest_dedupe_key,
+)
 from app.services.search import hybrid_search
 
 logger = logging.getLogger(__name__)
@@ -209,9 +213,9 @@ async def get_repository_ingest(
             installation = GithubIntegration(
                 auth=app_auth
             ).get_app_installation(connection.installationId)
-            target_repo = job.repo_name.casefold()
+            target_repo = normalize_repository_name(job.repo_name)
             repository_is_accessible = any(
-                repo.full_name.casefold() == target_repo
+                normalize_repository_name(repo.full_name) == target_repo
                 for repo in installation.get_repos()
             )
         except GithubException:

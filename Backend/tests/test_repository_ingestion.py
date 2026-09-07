@@ -99,7 +99,7 @@ async def test_ingestion_stages_publishes_and_returns_counts():
     ):
         result = await ingest_repository(
             session,
-            repo_name="org/repo",
+            repo_name="Org/Repo",
             installation_id=123,
             ensure_owned=ensure_owned,
         )
@@ -107,7 +107,9 @@ async def test_ingestion_stages_publishes_and_returns_counts():
     assert result == {"chunks_inserted": 1, "embeddings_created": 1}
     chunk_models = session.add_all.call_args_list[0].args[0]
     assert [chunk.file_path for chunk in chunk_models] == ["src/example.py"]
+    assert [chunk.repo_name for chunk in chunk_models] == ["org/repo"]
     integration.get_access_token.assert_called_once_with(123)
+    assert get.call_args.args[0] == "https://api.github.com/repos/org/repo/tarball"
     request_kwargs = get.call_args.kwargs
     assert request_kwargs["stream"] is True
     assert request_kwargs["allow_redirects"] is True

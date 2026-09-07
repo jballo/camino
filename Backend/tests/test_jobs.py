@@ -5,6 +5,7 @@ from sqlalchemy import exc
 from app.models.job import JobStatus, JobType
 from app.services.jobs import (
     enqueue_job,
+    normalize_repository_name,
     repository_ingest_dedupe_key,
 )
 
@@ -54,6 +55,35 @@ def test_enqueue_creates_job_when_no_active_match_exists():
     assert job.dedupe_key == "repository_ingest:123:org/repo"
     session.add.assert_called_once_with(job)
     session.commit.assert_called_once_with()
+
+
+def test_repository_ingestion_identity_is_case_insensitive():
+    assert normalize_repository_name("Org/Repo") == "org/repo"
+    assert repository_ingest_dedupe_key(
+        installation_id=123,
+        repo_name="Org/Repo",
+    ) == repository_ingest_dedupe_key(
+        installation_id=123,
+        repo_name="org/repo",
+    )
+
+    session = MagicMock()
+    session.exec.return_value.first.return_value = None
+    job, created = enqueue_job(
+        session,
+        user_id="user_1",
+        installation_id=123,
+        repo_name="Org/Repo",
+        job_type=JobType.REPOSITORY_INGEST,
+        dedupe_key=repository_ingest_dedupe_key(
+            installation_id=123,
+            repo_name="Org/Repo",
+        ),
+    )
+
+    assert created is True
+    assert job.repo_name == "org/repo"
+    assert job.dedupe_key == "repository_ingest:123:org/repo"
 
 
 def test_enqueue_recovers_concurrent_unique_index_loser():

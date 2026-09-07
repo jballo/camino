@@ -355,17 +355,25 @@ def test_ingestion_ownership_guard_locks_owned_job_and_checks_installation():
         lease_lost=threading.Event(),
     )
 
-    sql = " ".join(str(session.execute.call_args.args[0]).split())
-    assert "j.status = 'running'" in sql
-    assert "j.claimed_by = :worker_id" in sql
-    assert "githubconnections" in sql
-    assert 'gc."installationId" = :installation_id' in sql
-    assert "FOR SHARE OF j" in sql
+    installation_sql = " ".join(
+        str(session.execute.call_args_list[0].args[0]).split()
+    )
+    job_sql = " ".join(str(session.execute.call_args_list[1].args[0]).split())
+    assert "j.status = 'running'" in job_sql
+    assert "j.claimed_by = :worker_id" in job_sql
+    assert "FOR SHARE OF j" in job_sql
+    assert "FROM githubconnections" in installation_sql
+    assert '"installationId" = :installation_id' in installation_sql
+    assert "FOR SHARE" in installation_sql
 
 
 def test_ingestion_ownership_guard_rejects_missing_or_reclaimed_job():
     session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
+    existing_installation = MagicMock()
+    existing_installation.scalar_one_or_none.return_value = 1
+    missing_job = MagicMock()
+    missing_job.scalar_one_or_none.return_value = None
+    session.execute.side_effect = [existing_installation, missing_job]
 
     with pytest.raises(IngestionCancelledError, match="no longer active"):
         _ensure_ingestion_owned(
@@ -375,6 +383,27 @@ def test_ingestion_ownership_guard_rejects_missing_or_reclaimed_job():
             installation_id=12345,
             lease_lost=threading.Event(),
         )
+
+    assert session.execute.call_count == 2
+
+
+def test_ingestion_ownership_guard_rejects_missing_installation():
+    session = MagicMock()
+    session.execute.return_value.scalar_one_or_none.return_value = None
+
+    with pytest.raises(
+        IngestionCancelledError,
+        match="installation is no longer active",
+    ):
+        _ensure_ingestion_owned(
+            session,
+            job_id=1,
+            worker_id=WORKER_ID,
+            installation_id=12345,
+            lease_lost=threading.Event(),
+        )
+
+    assert session.execute.call_count == 1
 
 
 def test_ingestion_ownership_guard_rejects_known_lease_loss_without_query():

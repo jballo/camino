@@ -348,7 +348,7 @@ async def test_hybrid_search_returns_empty_without_active_generation(mock_embed)
     results, debug = await hybrid_search_debug(
         mock_session,
         "query",
-        "org/repo",
+        "Org/Repo",
         installation_id=1,
     )
 
@@ -356,6 +356,7 @@ async def test_hybrid_search_returns_empty_without_active_generation(mock_embed)
     assert debug.vector_ranks == {}
     assert debug.fts_ranks == {}
     assert debug.fused == []
+    assert mock_session.execute.call_args.args[1]["repo_name"] == "org/repo"
     mock_embed.assert_not_awaited()
 
 
