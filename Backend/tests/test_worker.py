@@ -16,6 +16,7 @@ from app.tour import TourGenerationError
 from app.worker import (
     _ensure_ingestion_owned,
     _requeue_or_fail,
+    _stage_owned_ingestion_completion,
     run_job,
     worker_loop,
 )
@@ -229,15 +230,28 @@ async def test_run_job_dispatches_repository_ingestion():
     session.get.return_value = job
     result = {"chunks_inserted": 12, "embeddings_created": 12}
     persist = MagicMock(return_value=True)
+    stage_completion = MagicMock()
+
+    async def ingest_and_finalize(
+        _session,
+        *,
+        finalize_publication,
+        **_kwargs,
+    ):
+        finalize_publication(_session, result)
+        return result
 
     with (
         _patch_session(session),
         patch("app.worker._renew_job_lease", return_value=True),
         patch("app.worker._update_owned_job", persist),
         patch(
+            "app.worker._stage_owned_ingestion_completion",
+            stage_completion,
+        ),
+        patch(
             "app.worker.ingest_repository",
-            new_callable=AsyncMock,
-            return_value=result,
+            side_effect=ingest_and_finalize,
         ) as ingest,
         patch("app.worker.generate_tour", new_callable=AsyncMock) as generate,
     ):
@@ -248,18 +262,36 @@ async def test_run_job_dispatches_repository_ingestion():
         repo_name="org/repo",
         installation_id=12345,
         ensure_owned=ANY,
+        finalize_publication=ANY,
     )
     generate.assert_not_awaited()
-    persist.assert_called_once_with(
+    stage_completion.assert_called_once_with(
         session,
-        1,
-        WORKER_ID,
-        status=JobStatus.COMPLETE,
+        job_id=1,
+        worker_id=WORKER_ID,
         artifact=result,
-        error=None,
-        claimed_at=None,
-        claimed_by=None,
     )
+    persist.assert_not_called()
+
+
+def test_ingestion_completion_is_staged_without_a_separate_commit():
+    session = MagicMock()
+    session.execute.return_value.rowcount = 1
+    artifact = {"chunks_inserted": 12, "embeddings_created": 12}
+
+    _stage_owned_ingestion_completion(
+        session,
+        job_id=1,
+        worker_id=WORKER_ID,
+        artifact=artifact,
+    )
+
+    statement = session.execute.call_args.args[0]
+    compiled = str(statement.compile(compile_kwargs={"literal_binds": False}))
+    assert "jobs.id = :id_1" in compiled
+    assert "jobs.status = :status_1" in compiled
+    assert "jobs.claimed_by = :claimed_by_1" in compiled
+    session.commit.assert_not_called()
 
 
 async def test_run_job_requeues_transient_ingestion_failure():

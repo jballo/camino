@@ -191,6 +191,33 @@ def _ensure_ingestion_owned(
         raise IngestionCancelledError("Ingestion job is no longer active")
 
 
+def _stage_owned_ingestion_completion(
+    session: Session,
+    *,
+    job_id: int,
+    worker_id: str,
+    artifact: dict[str, int],
+) -> None:
+    """Stage job completion without committing the publication transaction."""
+    result = session.execute(
+        update(Job)
+        .where(
+            Job.id == job_id,
+            Job.status == JobStatus.RUNNING,
+            Job.claimed_by == worker_id,
+        )
+        .values(
+            status=JobStatus.COMPLETE,
+            artifact=artifact,
+            error=None,
+            claimed_at=None,
+            claimed_by=None,
+        )
+    )
+    if result.rowcount != 1:
+        raise IngestionCancelledError("Ingestion job is no longer active")
+
+
 def _heartbeat_job_lease(
     job_id: int,
     worker_id: str,
@@ -395,6 +422,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
         transient_error: str | None = None
         permanent_error: str | None = None
         ingestion_cancelled = False
+        ingestion_completed = False
         try:
             if job_type == JobType.TOUR:
                 if topic is None:
@@ -416,12 +444,25 @@ async def run_job(job_id: int, worker_id: str) -> None:
                         lease_lost=lease_lost,
                     )
 
+                def finalize_ingestion_publication(
+                    publication_session: Session,
+                    artifact: dict[str, int],
+                ) -> None:
+                    _stage_owned_ingestion_completion(
+                        publication_session,
+                        job_id=job_id,
+                        worker_id=worker_id,
+                        artifact=artifact,
+                    )
+
                 result = await ingest_repository(
                     session,
                     repo_name=repo_name,
                     installation_id=installation_id,
                     ensure_owned=ensure_ingestion_owned,
+                    finalize_publication=finalize_ingestion_publication,
                 )
+                ingestion_completed = True
             else:
                 permanent_error = f"Unsupported job type: {job_type}"
         except IngestionCancelledError as error:
@@ -465,6 +506,15 @@ async def run_job(job_id: int, worker_id: str) -> None:
         finally:
             heartbeat_stop.set()
             heartbeat.join()
+
+        if ingestion_completed:
+            logger.info(
+                "job complete | id=%s type=%s repo=%r",
+                job_id,
+                job_type,
+                repo_name,
+            )
+            return
 
         if ingestion_cancelled or lease_lost.is_set():
             session.rollback()

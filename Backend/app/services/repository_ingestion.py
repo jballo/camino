@@ -275,8 +275,11 @@ async def ingest_repository(
     repo_name: str,
     installation_id: int,
     ensure_owned: Callable[[Session], None] | None = None,
+    finalize_publication: (
+        Callable[[Session, dict[str, int]], None] | None
+    ) = None,
 ) -> dict[str, int]:
-    """Stage a repository index in bounded waves, then publish it atomically."""
+    """Stage an index, then atomically publish it and finalize its owner."""
     repo_name = normalize_repository_name(repo_name)
     phase = "init"
     stats = _RepositoryWalkStats(0, 0, 0)
@@ -410,6 +413,10 @@ async def ingest_repository(
         )
         session.commit()
 
+        result = {
+            "chunks_inserted": chunks_inserted,
+            "embeddings_created": embeddings_created,
+        }
         phase = "swap"
         if ensure_owned is not None:
             ensure_owned(session)
@@ -420,12 +427,10 @@ async def ingest_repository(
         }
         session.execute(_PUBLISH_GENERATION_SQL, publish_params)
         session.execute(_DELETE_OLD_GENERATIONS_SQL, publish_params)
+        if finalize_publication is not None:
+            finalize_publication(session, result)
         session.commit()
 
-        result = {
-            "chunks_inserted": chunks_inserted,
-            "embeddings_created": embeddings_created,
-        }
         logger.info(
             "ingest complete | repo=%r chunks=%d embeddings=%d elapsed=%.2fs",
             repo_name,

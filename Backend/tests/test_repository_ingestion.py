@@ -73,6 +73,13 @@ def _repository_installation(repo_name: str = "org/repo"):
 async def test_ingestion_stages_publishes_and_returns_counts():
     session = MagicMock()
     ensure_owned = MagicMock()
+
+    def assert_finalized_before_publish_commit(*_args):
+        assert session.commit.call_count == 3
+
+    finalize_publication = MagicMock(
+        side_effect=assert_finalized_before_publish_commit
+    )
     github_patch, integration = _github(_repository_installation())
     response = _StreamingResponse(
         _tarball(
@@ -102,6 +109,7 @@ async def test_ingestion_stages_publishes_and_returns_counts():
             repo_name="Org/Repo",
             installation_id=123,
             ensure_owned=ensure_owned,
+            finalize_publication=finalize_publication,
         )
 
     assert result == {"chunks_inserted": 1, "embeddings_created": 1}
@@ -124,7 +132,39 @@ async def test_ingestion_stages_publishes_and_returns_counts():
     assert executed_sql[0].startswith("DELETE FROM code_chunks AS c")
     assert "INSERT INTO repo_index_state" in executed_sql[-2]
     assert executed_sql[-1].startswith("DELETE FROM code_chunks")
+    finalize_publication.assert_called_once_with(session, result)
     session.rollback.assert_not_called()
+
+
+async def test_failed_job_finalization_rolls_back_publication():
+    session = MagicMock()
+    github_patch, _ = _github(_repository_installation())
+    finalize_publication = MagicMock(
+        side_effect=IngestionCancelledError("job was reclaimed")
+    )
+
+    with (
+        github_patch,
+        patch(
+            "app.services.repository_ingestion.requests.get",
+            return_value=_StreamingResponse(_tarball({})),
+        ),
+        pytest.raises(IngestionCancelledError, match="job was reclaimed"),
+    ):
+        await ingest_repository(
+            session,
+            repo_name="org/repo",
+            installation_id=123,
+            finalize_publication=finalize_publication,
+        )
+
+    # Cleanup and search vectors committed; publication did not.
+    assert session.commit.call_count == 2
+    finalize_publication.assert_called_once_with(
+        session,
+        {"chunks_inserted": 0, "embeddings_created": 0},
+    )
+    session.rollback.assert_called_once_with()
 
 
 async def test_download_extract_and_parse_run_outside_the_event_loop_thread():
