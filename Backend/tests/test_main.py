@@ -33,12 +33,28 @@ async def test_lifespan_migrates_github_user_id_for_existing_tables():
         in statements
     )
     assert (
+        "UPDATE code_chunks SET repo_name = lower(repo_name) "
+        "WHERE repo_name <> lower(repo_name)"
+        in statements
+    )
+    assert any(
+        "INSERT INTO repo_index_state" in sql
+        and "SELECT installation_id, lower(repo_name), active_generation" in sql
+        and "WHERE repo_name <> lower(repo_name)" in sql
+        and "ON CONFLICT (installation_id, repo_name) DO NOTHING" in sql
+        for sql in statements
+    )
+    assert (
+        "DELETE FROM repo_index_state WHERE repo_name <> lower(repo_name)"
+        in statements
+    )
+    assert (
         "ALTER TABLE code_chunks ALTER COLUMN generation SET NOT NULL"
         in statements
     )
     assert any(
         "INSERT INTO repo_index_state" in sql
-        and "SELECT DISTINCT installation_id, repo_name, 'legacy'" in sql
+        and "SELECT DISTINCT installation_id, lower(repo_name), 'legacy'" in sql
         for sql in statements
     )
     assert any("DROP CONSTRAINT IF EXISTS uq_chunk_identity" in sql for sql in statements)

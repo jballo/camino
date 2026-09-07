@@ -50,6 +50,29 @@ async def lifespan(app: FastAPI):
             SET generation = 'legacy'
             WHERE generation IS NULL
         """))
+        # GitHub repository identity is case-insensitive. Normalize both sides
+        # of the live-index join so mixed-case indexes created before repository
+        # names were canonicalized remain searchable after the upgrade.
+        conn.execute(text("""
+            UPDATE code_chunks
+            SET repo_name = lower(repo_name)
+            WHERE repo_name <> lower(repo_name)
+        """))
+        conn.execute(text("""
+            INSERT INTO repo_index_state (
+                installation_id,
+                repo_name,
+                active_generation
+            )
+            SELECT installation_id, lower(repo_name), active_generation
+            FROM repo_index_state
+            WHERE repo_name <> lower(repo_name)
+            ON CONFLICT (installation_id, repo_name) DO NOTHING
+        """))
+        conn.execute(text("""
+            DELETE FROM repo_index_state
+            WHERE repo_name <> lower(repo_name)
+        """))
         conn.execute(text("""
             ALTER TABLE code_chunks
             ALTER COLUMN generation SET NOT NULL
@@ -60,7 +83,7 @@ async def lifespan(app: FastAPI):
                 repo_name,
                 active_generation
             )
-            SELECT DISTINCT installation_id, repo_name, 'legacy'
+            SELECT DISTINCT installation_id, lower(repo_name), 'legacy'
             FROM code_chunks
             ON CONFLICT (installation_id, repo_name) DO NOTHING
         """))
