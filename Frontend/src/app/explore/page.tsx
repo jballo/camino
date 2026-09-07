@@ -335,7 +335,7 @@ export default function Explore() {
                     className="flex items-center justify-center gap-2 h-8 rounded-md bg-primary text-primary-foreground text-sm disabled:opacity-60"
                   >
                     {isProcessing ? (
-                      "Cancel"
+                      "Stop waiting"
                     ) : isProcessed ? (
                       <>
                         <RefreshCw className="size-3.5" />
