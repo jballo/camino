@@ -71,7 +71,7 @@ def _vector_search(
                    ORDER BY e.embedding <=> CAST(:embedding AS vector), e.chunk_id
                ) AS rank
         FROM   code_chunk_embeddings e
-        JOIN   code_chunks c ON c.id = e.chunk_id
+        JOIN   live_code_chunks c ON c.id = e.chunk_id
         WHERE  c.repo_name = :repo_name
           AND  c.installation_id = :installation_id
           AND  e.model_name = :model_name
@@ -123,7 +123,7 @@ def _fts_search(
                ROW_NUMBER() OVER (
                    ORDER BY ts_rank(c.search_vector, q.query) DESC, c.id
                ) AS rank
-        FROM   code_chunks c, q
+        FROM   live_code_chunks c, q
         WHERE  c.repo_name = :repo_name
           AND  c.installation_id = :installation_id
           AND  q.query IS NOT NULL
@@ -177,7 +177,7 @@ def _demote_paths(
         return fused
     ids = [cid for cid, _ in fused]
     rows = session.execute(
-        text("SELECT id, file_path FROM code_chunks WHERE id = ANY(:ids)"),
+        text("SELECT id, file_path FROM live_code_chunks WHERE id = ANY(:ids)"),
         {"ids": ids},
     ).all()
     path_map = {r.id: r.file_path or "" for r in rows}
@@ -207,7 +207,7 @@ def _load_chunks(
     sql = text("""
         SELECT id, repo_name, file_path, symbol_name, symbol_type,
                language, start_line, end_line, source_code, signature, docstring
-        FROM   code_chunks
+        FROM   live_code_chunks
         WHERE  id = ANY(:ids)
     """)
     rows = session.execute(sql, {"ids": ids}).mappings().all()

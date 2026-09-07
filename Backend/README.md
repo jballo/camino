@@ -80,6 +80,8 @@ configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
 | `RATE_LIMIT_AGENT_ASK_REQUESTS` / `RATE_LIMIT_AGENT_ASK_WINDOW_SECONDS` | Q&A limit (default 20 requests / 600 seconds) |
 | `RATE_LIMIT_REPOSITORY_INGEST_REQUESTS` / `RATE_LIMIT_REPOSITORY_INGEST_WINDOW_SECONDS` | Ingest limit (default 2 requests / 3600 seconds) |
 | `INGEST_MAX_TARBALL_BYTES` | Maximum compressed GitHub tarball download size (default `209715200`, or 200 MiB) |
+| `INGEST_WAVE_CHUNKS` | Parsed chunks embedded and persisted per ingestion wave (default `256`) |
+| `INGEST_MAX_CHUNKS` | Hard per-repository chunk cap; oversized ingests fail permanently (default `25000`) |
 | `RATE_LIMIT_REPOSITORY_SEARCH_REQUESTS` / `RATE_LIMIT_REPOSITORY_SEARCH_WINDOW_SECONDS` | Direct-search limit (default 60 requests / 60 seconds) |
 | `RATE_LIMIT_JOURNEY_CREATE_REQUESTS` / `RATE_LIMIT_JOURNEY_CREATE_WINDOW_SECONDS` | Journey creation limit (default 5 requests / 3600 seconds) |
 | `RUN_WORKER` | Start the shared job worker in the API process (default `false`; use only for an explicitly combined deployment) |
@@ -113,8 +115,9 @@ stack boundaries and deployment order.
   an installation the authenticated GitHub user may access before persisting it.
 - Revoke or uninstall the external GitHub App authorization when Clerk's confirmed
   account-deletion flow triggers the existing local cleanup service.
-- Add explicit request/model deadlines and cap repository file count, total bytes, and
-  generated chunks before cloning, embedding, or generating tours.
+- Add explicit request/model deadlines and cap repository file count and extracted
+  bytes before parsing or generating tours. Compressed tarballs and generated chunks
+  are already capped.
 - Handle `SIGTERM` so in-flight jobs can finish or be cancelled cleanly; stale
   `running` rows are requeued or failed by the worker's lease recovery.
 
@@ -176,6 +179,14 @@ GitHub tarball snapshot up to `INGEST_MAX_TARBALL_BYTES`, safely extracts it, an
 parses supported source files locally. The snapshot reflects a single commit. This
 blocking download/extract/parse stretch runs with `asyncio.to_thread`; embedding calls
 and job orchestration remain asynchronous.
+
+Parsing, embedding, and inserts run in bounded waves of `INGEST_WAVE_CHUNKS`. Each
+ingest writes a new generation that remains invisible while its waves commit. Once
+complete, one short transaction updates `repo_index_state` to publish that generation
+and deletes the old rows; failed waves leave the previous complete index live. The
+`INGEST_MAX_CHUNKS` cap rejects oversized repositories before further embedding. All
+chunk read queries must use the `live_code_chunks` view; direct `code_chunks` access is
+reserved for ingestion and deletion.
 
 Multiple processes can share the queue. If a worker dies, lease recovery returns its
 row to `pending` (or marks it `failed` at the attempt limit) after

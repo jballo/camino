@@ -28,17 +28,19 @@ def test_local_cleanup_deletes_unreferenced_installation_and_commits():
         MagicMock(),
         _result([]),
         MagicMock(),
+        MagicMock(),
     ]
 
     delete_local_account_data(session, USER_ID)
 
     statements = [str(call.args[0]) for call in session.exec.call_args_list]
-    assert len(statements) == 7
+    assert len(statements) == 8
     assert any("DELETE FROM jobs" in statement for statement in statements)
     assert any("DELETE FROM rate_limits" in statement for statement in statements)
     assert any("DELETE FROM githubconnections" in statement for statement in statements)
     assert any("DELETE FROM users" in statement for statement in statements)
     assert any("DELETE FROM code_chunks" in statement for statement in statements)
+    assert any("DELETE FROM repo_index_state" in statement for statement in statements)
     session.commit.assert_called_once_with()
     session.rollback.assert_not_called()
 

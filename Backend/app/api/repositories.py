@@ -1,14 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
 from github import Auth, GithubException, GithubIntegration
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import exc, func
+from sqlalchemy import exc, text
 from sqlmodel import select
 
 import logging
 
 from app.config import settings
 from app.services.embeddings import EmbeddingError
-from app.models.code import CodeChunkModel
 from app.db import SessionDep
 from app.models.github_connection import GithubConnections
 from app.models.job import Job, JobType
@@ -115,13 +114,14 @@ async def list_processed_repositories(
         raise HTTPException(status_code=500, detail="Database error")
 
     try:
-        rows = session.exec(
-            select(
-                CodeChunkModel.repo_name,
-                func.count(CodeChunkModel.id),
-            )
-            .where(CodeChunkModel.installation_id == gh_connection.installationId)
-            .group_by(CodeChunkModel.repo_name)
+        rows = session.execute(
+            text("""
+                SELECT repo_name, count(id) AS chunk_count
+                FROM live_code_chunks
+                WHERE installation_id = :installation_id
+                GROUP BY repo_name
+            """),
+            {"installation_id": gh_connection.installationId},
         ).all()
     except exc.SQLAlchemyError:
         session.rollback()

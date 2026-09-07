@@ -8,12 +8,14 @@ from pathlib import Path
 import tarfile
 import tempfile
 import time
+from collections.abc import Iterator
+from uuid import uuid4
 
 from github import Auth, GithubException, GithubIntegration
 import requests
 from requests.exceptions import RequestException
 from sqlalchemy import exc, text
-from sqlmodel import Session, delete
+from sqlmodel import Session
 
 from app.config import settings
 from app.models.code import CodeChunkEmbedding, CodeChunkModel
@@ -39,6 +41,37 @@ _RETRYABLE_GH_STATUS = {408, 429, 500, 502, 503, 504}
 _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 _DOWNLOAD_TIMEOUT_SECONDS = (10, 120)
 
+_CLEANUP_STAGED_SQL = text("""
+    DELETE FROM code_chunks AS c
+    WHERE c.repo_name = :repo_name
+      AND c.installation_id = :installation_id
+      AND NOT EXISTS (
+          SELECT 1
+          FROM repo_index_state AS s
+          WHERE s.repo_name = c.repo_name
+            AND s.installation_id = c.installation_id
+            AND s.active_generation = c.generation
+      )
+""")
+
+_PUBLISH_GENERATION_SQL = text("""
+    INSERT INTO repo_index_state (
+        installation_id,
+        repo_name,
+        active_generation
+    )
+    VALUES (:installation_id, :repo_name, :generation)
+    ON CONFLICT (installation_id, repo_name)
+    DO UPDATE SET active_generation = EXCLUDED.active_generation
+""")
+
+_DELETE_OLD_GENERATIONS_SQL = text("""
+    DELETE FROM code_chunks
+    WHERE repo_name = :repo_name
+      AND installation_id = :installation_id
+      AND generation <> :generation
+""")
+
 
 class RepositoryIngestionError(RuntimeError):
     """Base error raised by repository ingestion."""
@@ -52,13 +85,11 @@ class PermanentRepositoryIngestionError(RepositoryIngestionError):
     """Invalid input or deterministic failure that should not be retried."""
 
 
-@dataclass(frozen=True)
-class _RepositoryWalk:
-    chunks: list[CodeChunk]
+@dataclass
+class _RepositoryWalkStats:
     files_seen: int
     files_parsed: int
     dirs_walked: int
-    commit_sha: str
 
 
 def _download_tarball(repo_name: str, token: str, destination: Path) -> None:
@@ -113,15 +144,15 @@ def _extract_tarball(archive_path: Path, destination: Path) -> tuple[Path, str]:
     return repo_root, commit_sha
 
 
-def _parse_repository(root: Path, commit_sha: str) -> _RepositoryWalk:
-    chunks: list[CodeChunk] = []
-    files_seen = 0
-    files_parsed = 0
-    dirs_walked = 0
-
+def _iter_file_chunks(
+    root: Path,
+    stats: _RepositoryWalkStats | None = None,
+) -> Iterator[list[CodeChunk]]:
+    """Parse supported source files lazily, yielding one file at a time."""
+    walk_stats = stats or _RepositoryWalkStats(0, 0, 0)
     for dirpath, dirnames, filenames in os.walk(root):
         if Path(dirpath) != root:
-            dirs_walked += 1
+            walk_stats.dirs_walked += 1
         dirnames[:] = [name for name in dirnames if name not in SKIP_DIRS]
         for name in filenames:
             extension = os.path.splitext(name)[1]
@@ -135,7 +166,7 @@ def _parse_repository(root: Path, commit_sha: str) -> _RepositoryWalk:
             except OSError:
                 continue
 
-            files_seen += 1
+            walk_stats.files_seen += 1
             try:
                 source_bytes = full_path.read_bytes()
             except OSError:
@@ -144,24 +175,17 @@ def _parse_repository(root: Path, commit_sha: str) -> _RepositoryWalk:
                 continue
 
             relative_path = full_path.relative_to(root).as_posix()
-            chunks.extend(parse_file(relative_path, source_bytes))
-            files_parsed += 1
-
-    return _RepositoryWalk(
-        chunks=chunks,
-        files_seen=files_seen,
-        files_parsed=files_parsed,
-        dirs_walked=dirs_walked,
-        commit_sha=commit_sha,
-    )
+            chunks = parse_file(relative_path, source_bytes)
+            walk_stats.files_parsed += 1
+            yield chunks
 
 
-def _walk_repository(
-    *,
+def _prepare_repository(
     repo_name: str,
     installation_id: int,
-) -> _RepositoryWalk:
-    """Synchronously verify access, download, extract, and parse a repository."""
+    temp_path: Path,
+) -> tuple[Path, str]:
+    """Synchronously verify access, download, and extract one snapshot."""
     app_auth = Auth.AppAuth(
         app_id=settings.gh_app_id,
         private_key=settings.gh_app_private_key,
@@ -176,81 +200,34 @@ def _walk_repository(
         raise PermanentRepositoryIngestionError("Repository not found")
 
     token = integration.get_access_token(installation_id).token
-    with tempfile.TemporaryDirectory() as temp_directory:
-        temp_path = Path(temp_directory)
-        archive_path = temp_path / "repo.tar.gz"
-        _download_tarball(repo_name, token, archive_path)
-        repo_root, commit_sha = _extract_tarball(archive_path, temp_path)
-        return _parse_repository(repo_root, commit_sha)
+    archive_path = temp_path / "repo.tar.gz"
+    _download_tarball(repo_name, token, archive_path)
+    return _extract_tarball(archive_path, temp_path)
 
 
-async def ingest_repository(
+async def _persist_wave(
     session: Session,
+    chunks: list[CodeChunk],
     *,
     repo_name: str,
     installation_id: int,
-) -> dict[str, int]:
-    """Replace one repository's index atomically and return ingestion counts."""
-    phase = "init"
-    files_seen = 0
-    files_parsed = 0
-    dirs_walked = 0
-    started = time.monotonic()
-
-    try:
-        phase = "github_auth"
-        logger.info(
-            "ingest start | repo=%r installation=%s",
-            repo_name,
-            installation_id,
-        )
-
-        phase = "walk"
-        walk = await asyncio.to_thread(
-            _walk_repository,
+    generation: str,
+) -> int:
+    """Embed and commit one bounded wave, returning its row count."""
+    vectors = await embed_all([build_embedding_text(chunk) for chunk in chunks])
+    chunk_models = [
+        CodeChunkModel.from_parsed(
+            chunk,
             repo_name=repo_name,
             installation_id=installation_id,
+            generation=generation,
         )
-        all_chunks = walk.chunks
-        files_seen = walk.files_seen
-        files_parsed = walk.files_parsed
-        dirs_walked = walk.dirs_walked
-
-        logger.info(
-            "ingest walk complete | repo=%r files_seen=%d files_parsed=%d "
-            "dirs_walked=%d chunks=%d commit_sha=%s elapsed=%.2fs",
-            repo_name,
-            files_seen,
-            files_parsed,
-            dirs_walked,
-            len(all_chunks),
-            walk.commit_sha,
-            time.monotonic() - started,
-        )
-
-        phase = "embed"
-        vectors = await embed_all(
-            [build_embedding_text(chunk) for chunk in all_chunks]
-        )
-
-        phase = "persist"
-        session.exec(
-            delete(CodeChunkModel).where(
-                CodeChunkModel.repo_name == repo_name,
-                CodeChunkModel.installation_id == installation_id,
-            )
-        )
-        chunk_models = [
-            CodeChunkModel.from_parsed(
-                chunk,
-                repo_name=repo_name,
-                installation_id=installation_id,
-            )
-            for chunk in all_chunks
-        ]
-        session.add_all(chunk_models)
-        session.flush()
-        embedding_models = [
+        for chunk in chunks
+    ]
+    session.add_all(chunk_models)
+    session.flush()
+    session.add_all(
+        [
             CodeChunkEmbedding(
                 chunk_id=chunk.id,
                 model_name=EMBED_MODEL,
@@ -259,18 +236,156 @@ async def ingest_repository(
             )
             for chunk, vector in zip(chunk_models, vectors, strict=True)
         ]
-        session.add_all(embedding_models)
-        session.exec(
+    )
+    session.commit()
+    return len(chunk_models)
+
+
+async def ingest_repository(
+    session: Session,
+    *,
+    repo_name: str,
+    installation_id: int,
+) -> dict[str, int]:
+    """Stage a repository index in bounded waves, then publish it atomically."""
+    phase = "init"
+    stats = _RepositoryWalkStats(0, 0, 0)
+    generation = uuid4().hex
+    chunks_inserted = 0
+    embeddings_created = 0
+    wave_number = 0
+    started = time.monotonic()
+
+    try:
+        logger.info(
+            "ingest start | repo=%r installation=%s generation=%s",
+            repo_name,
+            installation_id,
+            generation,
+        )
+
+        phase = "cleanup"
+        session.execute(
+            _CLEANUP_STAGED_SQL,
+            {
+                "repo_name": repo_name,
+                "installation_id": installation_id,
+            },
+        )
+        session.commit()
+
+        with tempfile.TemporaryDirectory() as temp_directory:
+            phase = "github_auth"
+            repo_root, commit_sha = await asyncio.to_thread(
+                _prepare_repository,
+                repo_name,
+                installation_id,
+                Path(temp_directory),
+            )
+
+            phase = "walk"
+            file_chunks_iter = _iter_file_chunks(repo_root, stats)
+            wave: list[CodeChunk] = []
+            while True:
+                file_chunks = await asyncio.to_thread(
+                    next,
+                    file_chunks_iter,
+                    None,
+                )
+                if file_chunks is None:
+                    break
+                if not file_chunks:
+                    continue
+
+                chunks_inserted += len(file_chunks)
+                if chunks_inserted > settings.ingest_max_chunks:
+                    raise PermanentRepositoryIngestionError(
+                        "Repository exceeds the maximum indexable size"
+                    )
+                wave.extend(file_chunks)
+                if len(wave) < settings.ingest_wave_chunks:
+                    continue
+
+                phase = "wave"
+                wave_number += 1
+                persisted = await _persist_wave(
+                    session,
+                    wave,
+                    repo_name=repo_name,
+                    installation_id=installation_id,
+                    generation=generation,
+                )
+                embeddings_created += persisted
+                logger.info(
+                    "ingest wave complete | repo=%r generation=%s wave=%d "
+                    "wave_chunks=%d cumulative_chunks=%d elapsed=%.2fs",
+                    repo_name,
+                    generation,
+                    wave_number,
+                    persisted,
+                    chunks_inserted,
+                    time.monotonic() - started,
+                )
+                wave = []
+                phase = "walk"
+
+            if wave:
+                phase = "wave"
+                wave_number += 1
+                persisted = await _persist_wave(
+                    session,
+                    wave,
+                    repo_name=repo_name,
+                    installation_id=installation_id,
+                    generation=generation,
+                )
+                embeddings_created += persisted
+                logger.info(
+                    "ingest wave complete | repo=%r generation=%s wave=%d "
+                    "wave_chunks=%d cumulative_chunks=%d elapsed=%.2fs",
+                    repo_name,
+                    generation,
+                    wave_number,
+                    persisted,
+                    chunks_inserted,
+                    time.monotonic() - started,
+                )
+
+        logger.info(
+            "ingest walk complete | repo=%r files_seen=%d files_parsed=%d "
+            "dirs_walked=%d chunks=%d commit_sha=%s elapsed=%.2fs",
+            repo_name,
+            stats.files_seen,
+            stats.files_parsed,
+            stats.dirs_walked,
+            chunks_inserted,
+            commit_sha,
+            time.monotonic() - started,
+        )
+
+        phase = "search_vector"
+        session.execute(
             text(populate_search_vector_sql(only_null=True)).bindparams(
                 repo_name=repo_name,
                 installation_id=installation_id,
+                generation=generation,
             )
         )
         session.commit()
 
+        phase = "swap"
+        publish_params = {
+            "repo_name": repo_name,
+            "installation_id": installation_id,
+            "generation": generation,
+        }
+        session.execute(_PUBLISH_GENERATION_SQL, publish_params)
+        session.execute(_DELETE_OLD_GENERATIONS_SQL, publish_params)
+        session.commit()
+
         result = {
-            "chunks_inserted": len(chunk_models),
-            "embeddings_created": len(embedding_models),
+            "chunks_inserted": chunks_inserted,
+            "embeddings_created": embeddings_created,
         }
         logger.info(
             "ingest complete | repo=%r chunks=%d embeddings=%d elapsed=%.2fs",
@@ -327,7 +442,7 @@ async def ingest_repository(
             "elapsed=%.2fs",
             phase,
             repo_name,
-            files_seen,
+            stats.files_seen,
             time.monotonic() - started,
         )
         raise PermanentRepositoryIngestionError(

@@ -69,7 +69,7 @@ def _repository_installation(repo_name: str = "org/repo"):
     return installation
 
 
-async def test_ingestion_commits_atomic_replace_and_returns_counts():
+async def test_ingestion_stages_publishes_and_returns_counts():
     session = MagicMock()
     github_patch, integration = _github(_repository_installation())
     response = _StreamingResponse(
@@ -110,7 +110,13 @@ async def test_ingestion_commits_atomic_replace_and_returns_counts():
     assert request_kwargs["allow_redirects"] is True
     assert request_kwargs["headers"]["Authorization"] == "Bearer installation-token"
     assert response.closed is True
-    session.commit.assert_called_once_with()
+    assert chunk_models[0].generation
+    # Cleanup, one wave, search-vector population, then atomic publish.
+    assert session.commit.call_count == 4
+    executed_sql = [" ".join(str(call.args[0]).split()) for call in session.execute.call_args_list]
+    assert executed_sql[0].startswith("DELETE FROM code_chunks AS c")
+    assert "INSERT INTO repo_index_state" in executed_sql[-2]
+    assert executed_sql[-1].startswith("DELETE FROM code_chunks")
     session.rollback.assert_not_called()
 
 
@@ -353,7 +359,9 @@ async def test_embedding_failure_is_transient():
         github_patch,
         patch(
             "app.services.repository_ingestion.requests.get",
-            return_value=_StreamingResponse(_tarball({})),
+            return_value=_StreamingResponse(
+                _tarball({"src/example.py": b"def example():\n    return True\n"})
+            ),
         ),
         patch(
             "app.services.repository_ingestion.embed_all",
@@ -368,4 +376,125 @@ async def test_embedding_failure_is_transient():
                 installation_id=123,
             )
 
+    session.rollback.assert_called_once_with()
+
+
+async def test_ingestion_commits_multiple_bounded_waves():
+    session = MagicMock()
+    github_patch, _ = _github(_repository_installation())
+    response = _StreamingResponse(
+        _tarball(
+            {
+                "src/a.py": b"def a():\n    return 1\n",
+                "src/b.py": b"def b():\n    return 2\n",
+                "src/c.py": b"def c():\n    return 3\n",
+            }
+        )
+    )
+
+    with (
+        github_patch,
+        patch.object(settings, "ingest_wave_chunks", 2),
+        patch(
+            "app.services.repository_ingestion.requests.get",
+            return_value=response,
+        ),
+        patch(
+            "app.services.repository_ingestion.embed_all",
+            new_callable=AsyncMock,
+            side_effect=[[[0.1], [0.2]], [[0.3]]],
+        ) as embed,
+    ):
+        result = await ingest_repository(
+            session,
+            repo_name="org/repo",
+            installation_id=123,
+        )
+
+    assert result == {"chunks_inserted": 3, "embeddings_created": 3}
+    assert [len(call.args[0]) for call in embed.await_args_list] == [2, 1]
+    # Cleanup + two wave commits + search vectors + swap.
+    assert session.commit.call_count == 5
+
+
+async def test_chunk_cap_fails_permanently_without_publishing():
+    session = MagicMock()
+    github_patch, _ = _github(_repository_installation())
+    response = _StreamingResponse(
+        _tarball(
+            {
+                "src/a.py": b"def a():\n    return 1\n",
+                "src/b.py": b"def b():\n    return 2\n",
+            }
+        )
+    )
+
+    with (
+        github_patch,
+        patch.object(settings, "ingest_wave_chunks", 1),
+        patch.object(settings, "ingest_max_chunks", 1),
+        patch(
+            "app.services.repository_ingestion.requests.get",
+            return_value=response,
+        ),
+        patch(
+            "app.services.repository_ingestion.embed_all",
+            new_callable=AsyncMock,
+            return_value=[[0.1]],
+        ) as embed,
+        pytest.raises(
+            PermanentRepositoryIngestionError,
+            match="Repository exceeds the maximum indexable size",
+        ),
+    ):
+        await ingest_repository(
+            session,
+            repo_name="org/repo",
+            installation_id=123,
+        )
+
+    embed.assert_awaited_once()
+    # Cleanup and wave 1 committed, but the registry pointer was never changed.
+    assert session.commit.call_count == 2
+    executed_sql = [" ".join(str(call.args[0]).split()) for call in session.execute.call_args_list]
+    assert not any("INSERT INTO repo_index_state" in sql for sql in executed_sql)
+    session.rollback.assert_called_once_with()
+
+
+async def test_second_wave_failure_leaves_generation_unpublished():
+    session = MagicMock()
+    github_patch, _ = _github(_repository_installation())
+    response = _StreamingResponse(
+        _tarball(
+            {
+                "src/a.py": b"def a():\n    return 1\n",
+                "src/b.py": b"def b():\n    return 2\n",
+            }
+        )
+    )
+
+    with (
+        github_patch,
+        patch.object(settings, "ingest_wave_chunks", 1),
+        patch(
+            "app.services.repository_ingestion.requests.get",
+            return_value=response,
+        ),
+        patch(
+            "app.services.repository_ingestion.embed_all",
+            new_callable=AsyncMock,
+            side_effect=[[[0.1]], EmbeddingError("wave 2 failed")],
+        ) as embed,
+        pytest.raises(TransientRepositoryIngestionError, match="wave 2 failed"),
+    ):
+        await ingest_repository(
+            session,
+            repo_name="org/repo",
+            installation_id=123,
+        )
+
+    assert embed.await_count == 2
+    assert session.commit.call_count == 2
+    executed_sql = [" ".join(str(call.args[0]).split()) for call in session.execute.call_args_list]
+    assert not any("INSERT INTO repo_index_state" in sql for sql in executed_sql)
     session.rollback.assert_called_once_with()

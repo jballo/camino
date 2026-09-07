@@ -27,6 +27,24 @@ async def test_lifespan_migrates_github_user_id_for_existing_tables():
 
     create_all.assert_called_once_with(mock_engine)
     statements = _normalized_sql(connection)
+    assert "ALTER TABLE code_chunks ADD COLUMN IF NOT EXISTS generation TEXT" in statements
+    assert (
+        "UPDATE code_chunks SET generation = 'legacy' WHERE generation IS NULL"
+        in statements
+    )
+    assert (
+        "ALTER TABLE code_chunks ALTER COLUMN generation SET NOT NULL"
+        in statements
+    )
+    assert any(
+        "INSERT INTO repo_index_state" in sql
+        and "SELECT DISTINCT installation_id, repo_name, 'legacy'" in sql
+        for sql in statements
+    )
+    assert any("DROP CONSTRAINT IF EXISTS uq_chunk_identity" in sql for sql in statements)
+    assert any("CREATE UNIQUE INDEX IF NOT EXISTS uq_chunk_identity_gen" in sql for sql in statements)
+    assert any("CREATE INDEX IF NOT EXISTS ix_chunks_repo_generation" in sql for sql in statements)
+    assert any("CREATE OR REPLACE VIEW live_code_chunks AS" in sql for sql in statements)
     assert (
         'ALTER TABLE githubconnections ADD COLUMN IF NOT EXISTS "githubUserId" INTEGER'
         in statements

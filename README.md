@@ -312,7 +312,8 @@ Before the first backend deployment:
 - [ ] Add `/health` and readiness behavior for the ALB.
 - [ ] Add Alembic and commit an initial schema migration, including `vector` and indexes.
 - [ ] Run migrations as a one-off ECS task; do not run schema creation in every web task.
-- [ ] Add explicit LLM timeouts and repository-size/file-count limits.
+- [~] Add explicit LLM timeouts and repository file-count/expanded-byte limits;
+  compressed-tarball and generated-chunk caps are enforced.
 - [x] Recover tour jobs left `generating` after a task restart with expiring leases,
   bounded attempts, and periodic requeue/fail sweeps.
 - [ ] Add CI checks for backend tests, frontend lint/build, CDK synthesis, and migrations.

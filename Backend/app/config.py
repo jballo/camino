@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     rate_limit_repository_ingest_requests: int = 2
     rate_limit_repository_ingest_window_seconds: int = 3600
     ingest_max_tarball_bytes: int = Field(default=200 * 1024 * 1024, gt=0)
+    ingest_wave_chunks: int = Field(default=256, gt=0)
+    ingest_max_chunks: int = Field(default=25_000, gt=0)
     rate_limit_repository_search_requests: int = 60
     rate_limit_repository_search_window_seconds: int = 60
     rate_limit_journey_create_requests: int = 5

@@ -12,7 +12,7 @@ from app.db import engine
 
 from app.api import agent, github, journeys, repositories
 from app.webhooks import clerk, github as github_webhook
-from app.models.code import CodeChunkModel, CodeChunkEmbedding
+from app.models.code import CodeChunkEmbedding, CodeChunkModel, RepoIndexState
 from app.models.job import Job
 from app.models.rate_limit import RateLimit
 from app.worker import WORKER_SHUTDOWN_TIMEOUT, worker_loop
@@ -38,6 +38,61 @@ async def lifespan(app: FastAPI):
     SQLModel.metadata.create_all(engine)
 
     with engine.connect() as conn:
+        # Repository indexes are staged in generations. Existing chunks become
+        # the initial live "legacy" generation during this compatibility
+        # migration, then all reads go through live_code_chunks.
+        conn.execute(text("""
+            ALTER TABLE code_chunks
+            ADD COLUMN IF NOT EXISTS generation TEXT
+        """))
+        conn.execute(text("""
+            UPDATE code_chunks
+            SET generation = 'legacy'
+            WHERE generation IS NULL
+        """))
+        conn.execute(text("""
+            ALTER TABLE code_chunks
+            ALTER COLUMN generation SET NOT NULL
+        """))
+        conn.execute(text("""
+            INSERT INTO repo_index_state (
+                installation_id,
+                repo_name,
+                active_generation
+            )
+            SELECT DISTINCT installation_id, repo_name, 'legacy'
+            FROM code_chunks
+            ON CONFLICT (installation_id, repo_name) DO NOTHING
+        """))
+        conn.execute(text("""
+            ALTER TABLE code_chunks
+            DROP CONSTRAINT IF EXISTS uq_chunk_identity
+        """))
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_chunk_identity_gen
+            ON code_chunks (
+                installation_id,
+                repo_name,
+                generation,
+                file_path,
+                symbol_name,
+                start_line
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_chunks_repo_generation
+            ON code_chunks (installation_id, repo_name, generation)
+        """))
+        conn.execute(text("""
+            CREATE OR REPLACE VIEW live_code_chunks AS
+            SELECT c.*
+            FROM code_chunks c
+            JOIN repo_index_state s
+              ON s.installation_id = c.installation_id
+             AND s.repo_name = c.repo_name
+             AND s.active_generation = c.generation
+        """))
+
         # create_all() does not evolve existing tables. Keep this nullable for
         # legacy connections because a numeric GitHub user ID cannot be derived
         # reliably from the data already stored; reconnecting fills it in.

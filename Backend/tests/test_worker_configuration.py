@@ -26,6 +26,15 @@ def test_worker_defaults_use_standalone_topology_and_ten_minute_lease():
     assert environment["WORKER_LEASE_TIMEOUT"] == "600"
 
 
+def test_ingestion_wave_and_chunk_cap_defaults_are_documented():
+    assert Settings.model_fields["ingest_wave_chunks"].default == 256
+    assert Settings.model_fields["ingest_max_chunks"].default == 25_000
+
+    environment = _example_environment()
+    assert environment["INGEST_WAVE_CHUNKS"] == "256"
+    assert environment["INGEST_MAX_CHUNKS"] == "25000"
+
+
 def test_compose_worker_is_standalone_and_always_restarted():
     compose = yaml.safe_load((REPO_ROOT / "docker-compose.yml").read_text())
     worker = compose["services"]["worker"]

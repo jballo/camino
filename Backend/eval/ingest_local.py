@@ -19,6 +19,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from uuid import uuid4
 
 from sqlalchemy import text
 from sqlmodel import Session, create_engine, delete
@@ -94,6 +95,7 @@ async def ingest(
 ) -> dict:
     started = time.monotonic()
     engine = create_engine(settings.database_url)
+    generation = uuid4().hex
 
     all_chunks = []
     files_parsed = 0
@@ -129,7 +131,10 @@ async def ingest(
 
         chunk_models = [
             CodeChunkModel.from_parsed(
-                c, repo_name=repo_name, installation_id=installation_id
+                c,
+                repo_name=repo_name,
+                installation_id=installation_id,
+                generation=generation,
             )
             for c in all_chunks
         ]
@@ -149,7 +154,25 @@ async def ingest(
 
         session.exec(
             text(populate_search_vector_sql(only_null=True)).bindparams(
-                repo_name=repo_name, installation_id=installation_id
+                repo_name=repo_name,
+                installation_id=installation_id,
+                generation=generation,
+            )
+        )
+        session.exec(
+            text("""
+                INSERT INTO repo_index_state (
+                    installation_id,
+                    repo_name,
+                    active_generation
+                )
+                VALUES (:installation_id, :repo_name, :generation)
+                ON CONFLICT (installation_id, repo_name)
+                DO UPDATE SET active_generation = EXCLUDED.active_generation
+            """).bindparams(
+                repo_name=repo_name,
+                installation_id=installation_id,
+                generation=generation,
             )
         )
 

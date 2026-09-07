@@ -71,6 +71,8 @@ def test_vector_search_returns_ranked_tuples():
     result = _vector_search(mock_session, [0.1] * 1536, "org/repo", 1, 20)
     assert result == [(10, 1), (20, 2)]
     mock_session.execute.assert_called_once()
+    sql = " ".join(str(mock_session.execute.call_args.args[0]).split())
+    assert "JOIN live_code_chunks c" in sql
 
 
 def test_vector_search_empty_result():
@@ -92,6 +94,8 @@ def test_fts_search_returns_ranked_tuples():
     result = _fts_search(mock_session, "authenticate", "org/repo", 1, 20)
     assert result == [(30, 1), (40, 2)]
     mock_session.execute.assert_called_once()
+    sql = " ".join(str(mock_session.execute.call_args.args[0]).split())
+    assert "FROM live_code_chunks c, q" in sql
 
 
 def test_fts_search_empty_result():
@@ -129,6 +133,8 @@ def test_load_chunks_returns_search_results():
     assert isinstance(results[0], SearchResult)
     assert results[0].chunk_id == 10
     assert results[0].score == 0.033
+    sql = " ".join(str(mock_session.execute.call_args.args[0]).split())
+    assert "FROM live_code_chunks" in sql
 
 
 def test_load_chunks_preserves_fused_order():
