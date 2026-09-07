@@ -2,11 +2,13 @@ import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 
 from app.services.search import (
+    _demote_paths,
     _rrf_fuse,
     _load_chunks,
     _vector_search,
     _fts_search,
     hybrid_search,
+    hybrid_search_debug,
     SearchResult,
     DEFAULT_K,
 )
@@ -68,18 +70,34 @@ def test_vector_search_returns_ranked_tuples():
     mock_row_2 = MagicMock(chunk_id=20, rank=2)
     mock_session.execute.return_value.all.return_value = [mock_row_1, mock_row_2]
 
-    result = _vector_search(mock_session, [0.1] * 1536, "org/repo", 1, 20)
+    result = _vector_search(
+        mock_session,
+        [0.1] * 1536,
+        "org/repo",
+        1,
+        20,
+        generation="generation-1",
+    )
     assert result == [(10, 1), (20, 2)]
     mock_session.execute.assert_called_once()
     sql = " ".join(str(mock_session.execute.call_args.args[0]).split())
-    assert "JOIN live_code_chunks c" in sql
+    assert "JOIN code_chunks c" in sql
+    assert "c.generation = :generation" in sql
+    assert mock_session.execute.call_args.args[1]["generation"] == "generation-1"
 
 
 def test_vector_search_empty_result():
     mock_session = MagicMock()
     mock_session.execute.return_value.all.return_value = []
 
-    result = _vector_search(mock_session, [0.1] * 1536, "org/repo", 1, 20)
+    result = _vector_search(
+        mock_session,
+        [0.1] * 1536,
+        "org/repo",
+        1,
+        20,
+        generation="generation-1",
+    )
     assert result == []
 
 
@@ -91,18 +109,34 @@ def test_fts_search_returns_ranked_tuples():
     mock_row_2 = MagicMock(chunk_id=40, rank=2)
     mock_session.execute.return_value.all.return_value = [mock_row_1, mock_row_2]
 
-    result = _fts_search(mock_session, "authenticate", "org/repo", 1, 20)
+    result = _fts_search(
+        mock_session,
+        "authenticate",
+        "org/repo",
+        1,
+        20,
+        generation="generation-1",
+    )
     assert result == [(30, 1), (40, 2)]
     mock_session.execute.assert_called_once()
     sql = " ".join(str(mock_session.execute.call_args.args[0]).split())
-    assert "FROM live_code_chunks c, q" in sql
+    assert "FROM code_chunks c, q" in sql
+    assert "c.generation = :generation" in sql
+    assert mock_session.execute.call_args.args[1]["generation"] == "generation-1"
 
 
 def test_fts_search_empty_result():
     mock_session = MagicMock()
     mock_session.execute.return_value.all.return_value = []
 
-    result = _fts_search(mock_session, "nonexistent", "org/repo", 1, 20)
+    result = _fts_search(
+        mock_session,
+        "nonexistent",
+        "org/repo",
+        1,
+        20,
+        generation="generation-1",
+    )
     assert result == []
 
 
@@ -128,13 +162,22 @@ def test_load_chunks_returns_search_results():
     mock_session.execute.return_value.mappings.return_value.all.return_value = [FAKE_ROW]
 
     fused = [(10, 0.033)]
-    results = _load_chunks(mock_session, fused, limit=10)
+    results = _load_chunks(
+        mock_session,
+        fused,
+        limit=10,
+        repo_name="org/repo",
+        installation_id=1,
+        generation="generation-1",
+    )
     assert len(results) == 1
     assert isinstance(results[0], SearchResult)
     assert results[0].chunk_id == 10
     assert results[0].score == 0.033
     sql = " ".join(str(mock_session.execute.call_args.args[0]).split())
-    assert "FROM live_code_chunks" in sql
+    assert "FROM code_chunks" in sql
+    assert "generation = :generation" in sql
+    assert mock_session.execute.call_args.args[1]["generation"] == "generation-1"
 
 
 def test_load_chunks_preserves_fused_order():
@@ -144,7 +187,14 @@ def test_load_chunks_preserves_fused_order():
     mock_session.execute.return_value.mappings.return_value.all.return_value = [row_b, row_a]
 
     fused = [(10, 0.05), (20, 0.03)]
-    results = _load_chunks(mock_session, fused, limit=10)
+    results = _load_chunks(
+        mock_session,
+        fused,
+        limit=10,
+        repo_name="org/repo",
+        installation_id=1,
+        generation="generation-1",
+    )
     assert [r.chunk_id for r in results] == [10, 20]
 
 
@@ -154,13 +204,27 @@ def test_load_chunks_respects_limit():
     mock_session.execute.return_value.mappings.return_value.all.return_value = rows
 
     fused = [(i, 1.0 / (60 + i)) for i in range(5)]
-    results = _load_chunks(mock_session, fused, limit=2)
+    results = _load_chunks(
+        mock_session,
+        fused,
+        limit=2,
+        repo_name="org/repo",
+        installation_id=1,
+        generation="generation-1",
+    )
     assert len(results) == 2
 
 
 def test_load_chunks_empty_fused():
     mock_session = MagicMock()
-    results = _load_chunks(mock_session, [], limit=10)
+    results = _load_chunks(
+        mock_session,
+        [],
+        limit=10,
+        repo_name="org/repo",
+        installation_id=1,
+        generation="generation-1",
+    )
     assert results == []
     mock_session.execute.assert_not_called()
 
@@ -170,9 +234,35 @@ def test_load_chunks_skips_missing_ids():
     mock_session.execute.return_value.mappings.return_value.all.return_value = [FAKE_ROW]
 
     fused = [(10, 0.05), (999, 0.03)]
-    results = _load_chunks(mock_session, fused, limit=10)
+    results = _load_chunks(
+        mock_session,
+        fused,
+        limit=10,
+        repo_name="org/repo",
+        installation_id=1,
+        generation="generation-1",
+    )
     assert len(results) == 1
     assert results[0].chunk_id == 10
+
+
+def test_demote_paths_is_generation_scoped():
+    mock_session = MagicMock()
+    mock_session.execute.return_value.all.return_value = []
+
+    _demote_paths(
+        mock_session,
+        [(10, 0.05)],
+        0.3,
+        repo_name="org/repo",
+        installation_id=1,
+        generation="generation-1",
+    )
+
+    sql = " ".join(str(mock_session.execute.call_args.args[0]).split())
+    assert "FROM code_chunks" in sql
+    assert "generation = :generation" in sql
+    assert mock_session.execute.call_args.args[1]["generation"] == "generation-1"
 
 
 # ── hybrid_search (integration of all pieces) ───────────────────────
@@ -247,3 +337,80 @@ async def test_hybrid_search_vector_only_when_fts_empty(
     results = await hybrid_search(mock_session, "query", "org/repo", installation_id=1)
     assert len(results) == 1
     assert results[0].chunk_id == 10
+
+
+@pytest.mark.asyncio
+@patch("app.services.search.embed_batch", new_callable=AsyncMock)
+async def test_hybrid_search_returns_empty_without_active_generation(mock_embed):
+    mock_session = MagicMock()
+    mock_session.execute.return_value.scalar_one_or_none.return_value = None
+
+    results, debug = await hybrid_search_debug(
+        mock_session,
+        "query",
+        "org/repo",
+        installation_id=1,
+    )
+
+    assert results == []
+    assert debug.vector_ranks == {}
+    assert debug.fts_ranks == {}
+    assert debug.fused == []
+    mock_embed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_hybrid_search_retries_once_when_generation_changes():
+    hydrated = SearchResult(
+        chunk_id=FAKE_ROW["id"],
+        **{key: value for key, value in FAKE_ROW.items() if key != "id"},
+        score=0.05,
+    )
+
+    with (
+        patch(
+            "app.services.search._get_active_generation",
+            side_effect=["generation-1", "generation-2", "generation-2"],
+        ),
+        patch(
+            "app.services.search.embed_batch",
+            new_callable=AsyncMock,
+            return_value=[[0.1] * 1536],
+        ),
+        patch(
+            "app.services.search._vector_search",
+            return_value=[(10, 1)],
+        ) as vector,
+        patch(
+            "app.services.search._fts_search",
+            return_value=[(10, 1)],
+        ) as fts,
+        patch(
+            "app.services.search._demote_paths",
+            side_effect=lambda _session, fused, _penalty, **_kwargs: fused,
+        ),
+        patch(
+            "app.services.search._load_chunks",
+            return_value=[hydrated],
+        ) as load,
+    ):
+        results, _ = await hybrid_search_debug(
+            MagicMock(),
+            "query",
+            "org/repo",
+            installation_id=1,
+        )
+
+    assert results == [hydrated]
+    assert [call.kwargs["generation"] for call in vector.call_args_list] == [
+        "generation-1",
+        "generation-2",
+    ]
+    assert [call.kwargs["generation"] for call in fts.call_args_list] == [
+        "generation-1",
+        "generation-2",
+    ]
+    assert [call.kwargs["generation"] for call in load.call_args_list] == [
+        "generation-1",
+        "generation-2",
+    ]

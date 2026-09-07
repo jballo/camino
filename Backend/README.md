@@ -80,6 +80,8 @@ configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
 | `RATE_LIMIT_AGENT_ASK_REQUESTS` / `RATE_LIMIT_AGENT_ASK_WINDOW_SECONDS` | Q&A limit (default 20 requests / 600 seconds) |
 | `RATE_LIMIT_REPOSITORY_INGEST_REQUESTS` / `RATE_LIMIT_REPOSITORY_INGEST_WINDOW_SECONDS` | Ingest limit (default 2 requests / 3600 seconds) |
 | `INGEST_MAX_TARBALL_BYTES` | Maximum compressed GitHub tarball download size (default `209715200`, or 200 MiB) |
+| `INGEST_MAX_EXTRACTED_BYTES` | Maximum cumulative expanded archive size (default `1073741824`, or 1 GiB) |
+| `INGEST_MAX_ARCHIVE_ENTRIES` | Maximum tar archive member count (default `100000`) |
 | `INGEST_WAVE_CHUNKS` | Parsed chunks embedded and persisted per ingestion wave (default `256`) |
 | `INGEST_MAX_CHUNKS` | Hard per-repository chunk cap; oversized ingests fail permanently (default `25000`) |
 | `RATE_LIMIT_REPOSITORY_SEARCH_REQUESTS` / `RATE_LIMIT_REPOSITORY_SEARCH_WINDOW_SECONDS` | Direct-search limit (default 60 requests / 60 seconds) |
@@ -115,9 +117,9 @@ stack boundaries and deployment order.
   an installation the authenticated GitHub user may access before persisting it.
 - Revoke or uninstall the external GitHub App authorization when Clerk's confirmed
   account-deletion flow triggers the existing local cleanup service.
-- Add explicit request/model deadlines and cap repository file count and extracted
-  bytes before parsing or generating tours. Compressed tarballs and generated chunks
-  are already capped.
+- Add explicit request/model deadlines and cap the parsed repository file count before
+  generating tours. Compressed tarballs, expanded archive bytes, archive entries, and
+  generated chunks are already capped.
 - Handle `SIGTERM` so in-flight jobs can finish or be cancelled cleanly; stale
   `running` rows are requeued or failed by the worker's lease recovery.
 
@@ -176,17 +178,20 @@ increments `attempts`, and the job becomes `failed` after `WORKER_MAX_ATTEMPTS`.
 
 Repository ingestion verifies installation access with PyGithub, then streams one
 GitHub tarball snapshot up to `INGEST_MAX_TARBALL_BYTES`, safely extracts it, and
-parses supported source files locally. The snapshot reflects a single commit. This
-blocking download/extract/parse stretch runs with `asyncio.to_thread`; embedding calls
-and job orchestration remain asynchronous.
+parses supported source files locally. Extraction also enforces
+`INGEST_MAX_EXTRACTED_BYTES` and `INGEST_MAX_ARCHIVE_ENTRIES` before parsing. The
+snapshot reflects a single commit. This blocking download/extract/parse stretch runs
+with `asyncio.to_thread`; embedding calls and job orchestration remain asynchronous.
 
 Parsing, embedding, and inserts run in bounded waves of `INGEST_WAVE_CHUNKS`. Each
 ingest writes a new generation that remains invisible while its waves commit. Once
 complete, one short transaction updates `repo_index_state` to publish that generation
 and deletes the old rows; failed waves leave the previous complete index live. The
-`INGEST_MAX_CHUNKS` cap rejects oversized repositories before further embedding. All
-chunk read queries must use the `live_code_chunks` view; direct `code_chunks` access is
-reserved for ingestion and deletion.
+`INGEST_MAX_CHUNKS` cap rejects oversized repositories before further embedding. Each
+wave and the final publication revalidate and lock the worker's job ownership, so a
+reclaimed or deleted job cannot commit more data. Single-statement reads use the
+`live_code_chunks` view; multi-statement hybrid search resolves one active generation
+and binds every retrieval and hydration query to it.
 
 Multiple processes can share the queue. If a worker dies, lease recovery returns its
 row to `pending` (or marks it `failed` at the attempt limit) after

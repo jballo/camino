@@ -1,16 +1,24 @@
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+import threading
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
+import pytest
 from sqlalchemy import exc
 
 from app.models.job import JobStatus, JobType
 from app.models.tour import TourArtifact, TourStep
 from app.services.repository_ingestion import (
+    IngestionCancelledError,
     PermanentRepositoryIngestionError,
     TransientRepositoryIngestionError,
 )
 from app.tour import TourGenerationError
-from app.worker import _requeue_or_fail, run_job, worker_loop
+from app.worker import (
+    _ensure_ingestion_owned,
+    _requeue_or_fail,
+    run_job,
+    worker_loop,
+)
 
 WORKER_ID = "test-host:1:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
@@ -239,6 +247,7 @@ async def test_run_job_dispatches_repository_ingestion():
         session,
         repo_name="org/repo",
         installation_id=12345,
+        ensure_owned=ANY,
     )
     generate.assert_not_awaited()
     persist.assert_called_once_with(
@@ -304,6 +313,85 @@ async def test_run_job_fails_permanent_ingestion_failure():
         WORKER_ID,
         "Repository not found",
     )
+
+
+async def test_run_job_discards_cancelled_ingestion_without_updating_job():
+    job = _job(job_type=JobType.REPOSITORY_INGEST, topic=None)
+    session = MagicMock()
+    session.get.return_value = job
+    persist = MagicMock(return_value=True)
+    mark_failed = MagicMock(return_value=True)
+    requeue = MagicMock(return_value=True)
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._update_owned_job", persist),
+        patch("app.worker._mark_failed", mark_failed),
+        patch("app.worker._requeue_or_fail", requeue),
+        patch(
+            "app.worker.ingest_repository",
+            new_callable=AsyncMock,
+            side_effect=IngestionCancelledError("lease lost"),
+        ),
+    ):
+        await run_job(1, WORKER_ID)
+
+    persist.assert_not_called()
+    mark_failed.assert_not_called()
+    requeue.assert_not_called()
+    session.rollback.assert_called()
+
+
+def test_ingestion_ownership_guard_locks_owned_job_and_checks_installation():
+    session = MagicMock()
+    session.execute.return_value.scalar_one_or_none.return_value = 1
+
+    _ensure_ingestion_owned(
+        session,
+        job_id=1,
+        worker_id=WORKER_ID,
+        installation_id=12345,
+        lease_lost=threading.Event(),
+    )
+
+    sql = " ".join(str(session.execute.call_args.args[0]).split())
+    assert "j.status = 'running'" in sql
+    assert "j.claimed_by = :worker_id" in sql
+    assert "githubconnections" in sql
+    assert 'gc."installationId" = :installation_id' in sql
+    assert "FOR SHARE OF j" in sql
+
+
+def test_ingestion_ownership_guard_rejects_missing_or_reclaimed_job():
+    session = MagicMock()
+    session.execute.return_value.scalar_one_or_none.return_value = None
+
+    with pytest.raises(IngestionCancelledError, match="no longer active"):
+        _ensure_ingestion_owned(
+            session,
+            job_id=1,
+            worker_id=WORKER_ID,
+            installation_id=12345,
+            lease_lost=threading.Event(),
+        )
+
+
+def test_ingestion_ownership_guard_rejects_known_lease_loss_without_query():
+    session = MagicMock()
+    lease_lost = threading.Event()
+    lease_lost.set()
+
+    with pytest.raises(IngestionCancelledError, match="lease was lost"):
+        _ensure_ingestion_owned(
+            session,
+            job_id=1,
+            worker_id=WORKER_ID,
+            installation_id=12345,
+            lease_lost=lease_lost,
+        )
+
+    session.execute.assert_not_called()
 
 
 def test_retryable_failure_requeues_before_attempt_limit():

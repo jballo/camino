@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   enqueueRepositoryIngestion,
+  IngestionTimeoutError,
+  isAbortError,
   pollRepositoryIngestion,
 } from "./repository-ingestion";
 import type { RepositoryIngestionJob } from "../types/repository-ingestion";
@@ -39,6 +41,7 @@ describe("repository ingestion jobs", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     fetchMock.mockReset();
   });
@@ -113,6 +116,42 @@ describe("repository ingestion jobs", () => {
         { intervalMs: 0 },
       ),
     ).resolves.toEqual(failed);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("times out when a job never reaches a terminal state", async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValue(mockResponse(job("pending")));
+    const polling = pollRepositoryIngestion(
+      42,
+      vi.fn().mockResolvedValue("my-token"),
+      { intervalMs: 100, timeoutMs: 250 },
+    );
+    const rejection = expect(polling).rejects.toBeInstanceOf(
+      IngestionTimeoutError,
+    );
+
+    await vi.advanceTimersByTimeAsync(250);
+
+    await rejection;
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("stops polling when the caller aborts", async () => {
+    const controller = new AbortController();
+    fetchMock.mockResolvedValue(mockResponse(job("pending")));
+
+    const polling = pollRepositoryIngestion(
+      42,
+      vi.fn().mockResolvedValue("my-token"),
+      {
+        intervalMs: 1000,
+        signal: controller.signal,
+        onUpdate: () => controller.abort(),
+      },
+    );
+
+    await expect(polling).rejects.toSatisfy(isAbortError);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

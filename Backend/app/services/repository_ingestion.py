@@ -8,7 +8,7 @@ from pathlib import Path
 import tarfile
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from uuid import uuid4
 
 from github import Auth, GithubException, GithubIntegration
@@ -85,6 +85,10 @@ class PermanentRepositoryIngestionError(RepositoryIngestionError):
     """Invalid input or deterministic failure that should not be retried."""
 
 
+class IngestionCancelledError(RepositoryIngestionError):
+    """Ingestion stopped because its job is no longer valid or owned."""
+
+
 @dataclass
 class _RepositoryWalkStats:
     files_seen: int
@@ -131,7 +135,22 @@ def _download_tarball(repo_name: str, token: str, destination: Path) -> None:
 
 def _extract_tarball(archive_path: Path, destination: Path) -> tuple[Path, str]:
     with tarfile.open(archive_path) as archive:
-        archive.extractall(destination, filter="data")
+        extracted_bytes = 0
+        entry_count = 0
+        for member in archive:
+            entry_count += 1
+            if entry_count > settings.ingest_max_archive_entries:
+                raise PermanentRepositoryIngestionError(
+                    "Repository archive contains too many entries"
+                )
+
+            extracted_bytes += max(member.size, 0)
+            if extracted_bytes > settings.ingest_max_extracted_bytes:
+                raise PermanentRepositoryIngestionError(
+                    "Repository archive expands beyond the allowed size"
+                )
+
+            archive.extract(member, destination, filter="data")
 
     roots = [entry for entry in destination.iterdir() if entry.is_dir()]
     if len(roots) != 1:
@@ -212,9 +231,12 @@ async def _persist_wave(
     repo_name: str,
     installation_id: int,
     generation: str,
+    ensure_owned: Callable[[Session], None] | None = None,
 ) -> int:
     """Embed and commit one bounded wave, returning its row count."""
     vectors = await embed_all([build_embedding_text(chunk) for chunk in chunks])
+    if ensure_owned is not None:
+        ensure_owned(session)
     chunk_models = [
         CodeChunkModel.from_parsed(
             chunk,
@@ -246,6 +268,7 @@ async def ingest_repository(
     *,
     repo_name: str,
     installation_id: int,
+    ensure_owned: Callable[[Session], None] | None = None,
 ) -> dict[str, int]:
     """Stage a repository index in bounded waves, then publish it atomically."""
     phase = "init"
@@ -265,6 +288,8 @@ async def ingest_repository(
         )
 
         phase = "cleanup"
+        if ensure_owned is not None:
+            ensure_owned(session)
         session.execute(
             _CLEANUP_STAGED_SQL,
             {
@@ -314,6 +339,7 @@ async def ingest_repository(
                     repo_name=repo_name,
                     installation_id=installation_id,
                     generation=generation,
+                    ensure_owned=ensure_owned,
                 )
                 embeddings_created += persisted
                 logger.info(
@@ -338,6 +364,7 @@ async def ingest_repository(
                     repo_name=repo_name,
                     installation_id=installation_id,
                     generation=generation,
+                    ensure_owned=ensure_owned,
                 )
                 embeddings_created += persisted
                 logger.info(
@@ -364,6 +391,8 @@ async def ingest_repository(
         )
 
         phase = "search_vector"
+        if ensure_owned is not None:
+            ensure_owned(session)
         session.execute(
             text(populate_search_vector_sql(only_null=True)).bindparams(
                 repo_name=repo_name,
@@ -374,6 +403,8 @@ async def ingest_repository(
         session.commit()
 
         phase = "swap"
+        if ensure_owned is not None:
+            ensure_owned(session)
         publish_params = {
             "repo_name": repo_name,
             "installation_id": installation_id,

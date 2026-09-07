@@ -5,12 +5,21 @@ import type {
 } from "../types/repository-ingestion";
 
 const DEFAULT_POLL_INTERVAL_MS = 2000;
+const DEFAULT_POLL_TIMEOUT_MS = 10 * 60 * 1000;
 
 type PollRepositoryIngestionOptions = {
   intervalMs?: number;
+  timeoutMs?: number;
   signal?: AbortSignal;
   onUpdate?: (job: RepositoryIngestionJob) => void;
 };
+
+export class IngestionTimeoutError extends Error {
+  constructor() {
+    super("Repository ingestion polling timed out");
+    this.name = "IngestionTimeoutError";
+  }
+}
 
 function abortError(): DOMException {
   return new DOMException(
@@ -60,12 +69,15 @@ export async function pollRepositoryIngestion(
 ): Promise<RepositoryIngestionJob> {
   const {
     intervalMs = DEFAULT_POLL_INTERVAL_MS,
+    timeoutMs = DEFAULT_POLL_TIMEOUT_MS,
     signal,
     onUpdate,
   } = options;
+  const deadline = Date.now() + timeoutMs;
 
   while (true) {
     if (signal?.aborted) throw abortError();
+    if (Date.now() >= deadline) throw new IngestionTimeoutError();
 
     const token = await getToken();
     if (!token) throw new ApiError(401, "Not authenticated");
@@ -79,7 +91,9 @@ export async function pollRepositoryIngestion(
 
     if (job.status === "complete" || job.status === "failed") return job;
 
-    await wait(intervalMs, signal);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new IngestionTimeoutError();
+    await wait(Math.min(intervalMs, remainingMs), signal);
   }
 }
 

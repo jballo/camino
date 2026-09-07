@@ -34,7 +34,13 @@ from app.models.tour import TourArtifact, TourStep
 from app.models.job import Job, JobStatus, JobType
 from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
 from app.security import get_authenticated_user_id
-from app.worker import claim_next_job, recover_stale_jobs, run_job
+from app.services.repository_ingestion import IngestionCancelledError
+from app.worker import (
+    _ensure_ingestion_owned,
+    claim_next_job,
+    recover_stale_jobs,
+    run_job,
+)
 
 SCRATCH_DB_PREFIX = "camino_worker_test"
 
@@ -339,6 +345,87 @@ def test_fresh_generating_job_is_untouched(pg_engine_clean):
     assert row.status == JobStatus.RUNNING
     assert row.claimed_by == WORKER_A
     assert row.claimed_at is not None
+
+
+def test_ingestion_guard_requires_current_claim_and_installation(pg_engine_clean):
+    now = dt.datetime.now(dt.timezone.utc)
+    installation_id = uuid.uuid4().int % 2_000_000_000
+    with Session(pg_engine_clean) as session:
+        session.add(
+            GithubConnections(
+                userId=f"guard_{uuid.uuid4().hex}",
+                githubUsername="octocat",
+                githubUserId=installation_id,
+                installationId=installation_id,
+                encryptedAccessToken="tok",
+                encryptedRefreshToken="rtok",
+                tokenExpiresAt=now + dt.timedelta(hours=1),
+                refreshTokenExpiresAt=now + dt.timedelta(days=30),
+            )
+        )
+        session.commit()
+        job_id = _insert_job(
+            session,
+            installation_id=installation_id,
+            status=JobStatus.RUNNING,
+            claimed_at=now,
+            claimed_by=WORKER_A,
+        ).id
+
+    with Session(pg_engine_clean) as session:
+        _ensure_ingestion_owned(
+            session,
+            job_id=job_id,
+            worker_id=WORKER_A,
+            installation_id=installation_id,
+            lease_lost=threading.Event(),
+        )
+        session.rollback()
+
+    with Session(pg_engine_clean) as session:
+        session.execute(
+            text("UPDATE jobs SET claimed_by = :worker WHERE id = :job_id"),
+            {"worker": WORKER_B, "job_id": job_id},
+        )
+        session.commit()
+
+    with (
+        Session(pg_engine_clean) as session,
+        pytest.raises(IngestionCancelledError, match="no longer active"),
+    ):
+        _ensure_ingestion_owned(
+            session,
+            job_id=job_id,
+            worker_id=WORKER_A,
+            installation_id=installation_id,
+            lease_lost=threading.Event(),
+        )
+
+    with Session(pg_engine_clean) as session:
+        session.execute(
+            text("UPDATE jobs SET claimed_by = :worker WHERE id = :job_id"),
+            {"worker": WORKER_A, "job_id": job_id},
+        )
+        session.execute(
+            text(
+                'DELETE FROM githubconnections WHERE "installationId" = '
+                ":installation_id"
+            ),
+            {"installation_id": installation_id},
+        )
+        session.commit()
+
+    with (
+        Session(pg_engine_clean) as session,
+        pytest.raises(IngestionCancelledError, match="no longer active"),
+    ):
+        _ensure_ingestion_owned(
+            session,
+            job_id=job_id,
+            worker_id=WORKER_A,
+            installation_id=installation_id,
+            lease_lost=threading.Event(),
+        )
 
 
 # ── E. Happy-path DB-queue handoff ──────────────────────────────────

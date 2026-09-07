@@ -12,6 +12,7 @@ from app.config import settings
 from app.services.embeddings import EmbeddingError
 from app.services.parser import MAX_FILE_BYTES
 from app.services.repository_ingestion import (
+    IngestionCancelledError,
     PermanentRepositoryIngestionError,
     TransientRepositoryIngestionError,
     _extract_tarball,
@@ -71,6 +72,7 @@ def _repository_installation(repo_name: str = "org/repo"):
 
 async def test_ingestion_stages_publishes_and_returns_counts():
     session = MagicMock()
+    ensure_owned = MagicMock()
     github_patch, integration = _github(_repository_installation())
     response = _StreamingResponse(
         _tarball(
@@ -99,6 +101,7 @@ async def test_ingestion_stages_publishes_and_returns_counts():
             session,
             repo_name="org/repo",
             installation_id=123,
+            ensure_owned=ensure_owned,
         )
 
     assert result == {"chunks_inserted": 1, "embeddings_created": 1}
@@ -113,6 +116,8 @@ async def test_ingestion_stages_publishes_and_returns_counts():
     assert chunk_models[0].generation
     # Cleanup, one wave, search-vector population, then atomic publish.
     assert session.commit.call_count == 4
+    assert ensure_owned.call_count == session.commit.call_count
+    ensure_owned.assert_called_with(session)
     executed_sql = [" ".join(str(call.args[0]).split()) for call in session.execute.call_args_list]
     assert executed_sql[0].startswith("DELETE FROM code_chunks AS c")
     assert "INSERT INTO repo_index_state" in executed_sql[-2]
@@ -330,6 +335,40 @@ def test_tarball_path_traversal_is_rejected(tmp_path):
     assert not (tmp_path / "outside.py").exists()
 
 
+def test_tarball_expanded_size_is_bounded(tmp_path):
+    archive_path = tmp_path / "repo.tar.gz"
+    archive_path.write_bytes(_tarball({"src/large.py": b"x" * 11}))
+    extract_path = tmp_path / "extract"
+    extract_path.mkdir()
+
+    with (
+        patch.object(settings, "ingest_max_extracted_bytes", 10),
+        pytest.raises(
+            PermanentRepositoryIngestionError,
+            match="expands beyond the allowed size",
+        ),
+    ):
+        _extract_tarball(archive_path, extract_path)
+
+
+def test_tarball_entry_count_is_bounded(tmp_path):
+    archive_path = tmp_path / "repo.tar.gz"
+    archive_path.write_bytes(
+        _tarball({"src/a.py": b"a", "src/b.py": b"b"})
+    )
+    extract_path = tmp_path / "extract"
+    extract_path.mkdir()
+
+    with (
+        patch.object(settings, "ingest_max_archive_entries", 2),
+        pytest.raises(
+            PermanentRepositoryIngestionError,
+            match="too many entries",
+        ),
+    ):
+        _extract_tarball(archive_path, extract_path)
+
+
 async def test_corrupt_archive_is_transient():
     session = MagicMock()
     github_patch, _ = _github(_repository_installation())
@@ -496,5 +535,44 @@ async def test_second_wave_failure_leaves_generation_unpublished():
     assert embed.await_count == 2
     assert session.commit.call_count == 2
     executed_sql = [" ".join(str(call.args[0]).split()) for call in session.execute.call_args_list]
+    assert not any("INSERT INTO repo_index_state" in sql for sql in executed_sql)
+    session.rollback.assert_called_once_with()
+
+
+async def test_ownership_loss_before_wave_commit_prevents_publication():
+    session = MagicMock()
+    github_patch, _ = _github(_repository_installation())
+    ensure_owned = MagicMock(
+        side_effect=[None, IngestionCancelledError("lease lost")]
+    )
+
+    with (
+        github_patch,
+        patch(
+            "app.services.repository_ingestion.requests.get",
+            return_value=_StreamingResponse(
+                _tarball({"src/example.py": b"def example():\n    return True\n"})
+            ),
+        ),
+        patch(
+            "app.services.repository_ingestion.embed_all",
+            new_callable=AsyncMock,
+            return_value=[[0.1]],
+        ),
+        pytest.raises(IngestionCancelledError, match="lease lost"),
+    ):
+        await ingest_repository(
+            session,
+            repo_name="org/repo",
+            installation_id=123,
+            ensure_owned=ensure_owned,
+        )
+
+    assert ensure_owned.call_count == 2
+    assert session.commit.call_count == 1
+    executed_sql = [
+        " ".join(str(call.args[0]).split())
+        for call in session.execute.call_args_list
+    ]
     assert not any("INSERT INTO repo_index_state" in sql for sql in executed_sql)
     session.rollback.assert_called_once_with()

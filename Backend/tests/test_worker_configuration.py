@@ -26,11 +26,15 @@ def test_worker_defaults_use_standalone_topology_and_ten_minute_lease():
     assert environment["WORKER_LEASE_TIMEOUT"] == "600"
 
 
-def test_ingestion_wave_and_chunk_cap_defaults_are_documented():
+def test_ingestion_resource_cap_defaults_are_documented():
+    assert Settings.model_fields["ingest_max_extracted_bytes"].default == 1024**3
+    assert Settings.model_fields["ingest_max_archive_entries"].default == 100_000
     assert Settings.model_fields["ingest_wave_chunks"].default == 256
     assert Settings.model_fields["ingest_max_chunks"].default == 25_000
 
     environment = _example_environment()
+    assert environment["INGEST_MAX_EXTRACTED_BYTES"] == "1073741824"
+    assert environment["INGEST_MAX_ARCHIVE_ENTRIES"] == "100000"
     assert environment["INGEST_WAVE_CHUNKS"] == "256"
     assert environment["INGEST_MAX_CHUNKS"] == "25000"
 

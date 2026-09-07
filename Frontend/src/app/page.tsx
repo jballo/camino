@@ -20,6 +20,7 @@ import { useAuth } from "@clerk/nextjs";
 import { ApiError, backendFetch } from "@/lib/api";
 import {
   enqueueRepositoryIngestion,
+  IngestionTimeoutError,
   isAbortError,
   pollRepositoryIngestion,
 } from "@/lib/repository-ingestion";
@@ -168,7 +169,11 @@ export default function Home() {
     } catch (error) {
       if (isAbortError(error)) return;
       console.log("Error: ", error);
-      if (
+      if (error instanceof IngestionTimeoutError) {
+        setProcessingError(
+          "Still queued — the ingestion worker may be unavailable. Try again later.",
+        );
+      } else if (
         error instanceof ApiError &&
         (error.status === 401 || error.status === 403)
       ) {
@@ -337,10 +342,15 @@ export default function Home() {
                     <div className="flex justify-between gap-3 pt-2">
                       <Button
                         className="rounded-sm px-3 py-1.5 text-sm hover:bg-accent"
-                        onClick={() => setRepoSelectionDialog(false)}
-                        disabled={processing}
+                        onClick={() => {
+                          if (processing) {
+                            ingestionAbortRef.current?.abort();
+                          } else {
+                            setRepoSelectionDialog(false);
+                          }
+                        }}
                       >
-                        Cancel
+                        {processing ? "Stop waiting" : "Cancel"}
                       </Button>
                       <div className="flex gap-2">
                         <Button

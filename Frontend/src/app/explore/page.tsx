@@ -18,6 +18,7 @@ import ReactMarkdown from "react-markdown";
 import { ApiError, backendFetch } from "@/lib/api";
 import {
   enqueueRepositoryIngestion,
+  IngestionTimeoutError,
   isAbortError,
   pollRepositoryIngestion,
 } from "@/lib/repository-ingestion";
@@ -177,7 +178,11 @@ export default function Explore() {
       } catch (error) {
         if (isAbortError(error)) return;
         console.log("Error: ", error);
-        if (
+        if (error instanceof IngestionTimeoutError) {
+          setProcessError(
+            "Still queued — the ingestion worker may be unavailable. Try again later.",
+          );
+        } else if (
           error instanceof ApiError &&
           (error.status === 401 || error.status === 403)
         ) {
@@ -320,16 +325,17 @@ export default function Explore() {
                   <Button
                     onClick={(e) => {
                       e.stopPropagation();
-                      processRepo(repo);
+                      if (isProcessing) {
+                        ingestionAbortRef.current?.abort();
+                      } else {
+                        processRepo(repo);
+                      }
                     }}
-                    disabled={processingRepo !== undefined}
+                    disabled={processingRepo !== undefined && !isProcessing}
                     className="flex items-center justify-center gap-2 h-8 rounded-md bg-primary text-primary-foreground text-sm disabled:opacity-60"
                   >
                     {isProcessing ? (
-                      <>
-                        <Loader2 className="size-4 animate-spin" />
-                        {jobStatus === "pending" ? "Queued…" : "Processing…"}
-                      </>
+                      "Cancel"
                     ) : isProcessed ? (
                       <>
                         <RefreshCw className="size-3.5" />

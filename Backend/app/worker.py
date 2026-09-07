@@ -30,6 +30,7 @@ from app.config import settings
 from app.db import engine
 from app.models.job import Job, JobStatus, JobType
 from app.services.repository_ingestion import (
+    IngestionCancelledError,
     PermanentRepositoryIngestionError,
     TransientRepositoryIngestionError,
     ingest_repository,
@@ -77,6 +78,20 @@ SET claimed_at = now()
 WHERE id = :job_id
   AND status = 'running'
   AND claimed_by = :worker_id
+""")
+
+ENSURE_INGESTION_OWNED_SQL = text("""
+SELECT 1
+FROM jobs AS j
+WHERE j.id = :job_id
+  AND j.status = 'running'
+  AND j.claimed_by = :worker_id
+  AND EXISTS (
+      SELECT 1
+      FROM githubconnections AS gc
+      WHERE gc."installationId" = :installation_id
+  )
+FOR SHARE OF j
 """)
 
 
@@ -138,6 +153,32 @@ def _renew_job_lease(job_id: int, worker_id: str) -> bool:
         )
         session.commit()
         return result.rowcount == 1
+
+
+def _ensure_ingestion_owned(
+    session: Session,
+    *,
+    job_id: int,
+    worker_id: str,
+    installation_id: int,
+    lease_lost: threading.Event,
+) -> None:
+    """Lock and verify the job claim before an ingestion transaction commits."""
+    if lease_lost.is_set():
+        raise IngestionCancelledError("Ingestion job lease was lost")
+
+    owned = session.execute(
+        ENSURE_INGESTION_OWNED_SQL,
+        {
+            "job_id": job_id,
+            "worker_id": worker_id,
+            "installation_id": installation_id,
+        },
+    ).scalar_one_or_none()
+    if owned is None:
+        raise IngestionCancelledError(
+            "Ingestion job or GitHub installation is no longer active"
+        )
 
 
 def _heartbeat_job_lease(
@@ -343,6 +384,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
         result: dict | None = None
         transient_error: str | None = None
         permanent_error: str | None = None
+        ingestion_cancelled = False
         try:
             if job_type == JobType.TOUR:
                 if topic is None:
@@ -355,13 +397,32 @@ async def run_job(job_id: int, worker_id: str) -> None:
                 )
                 result = artifact.model_dump()
             elif job_type == JobType.REPOSITORY_INGEST:
+                def ensure_ingestion_owned(guard_session: Session) -> None:
+                    _ensure_ingestion_owned(
+                        guard_session,
+                        job_id=job_id,
+                        worker_id=worker_id,
+                        installation_id=installation_id,
+                        lease_lost=lease_lost,
+                    )
+
                 result = await ingest_repository(
                     session,
                     repo_name=repo_name,
                     installation_id=installation_id,
+                    ensure_owned=ensure_ingestion_owned,
                 )
             else:
                 permanent_error = f"Unsupported job type: {job_type}"
+        except IngestionCancelledError as error:
+            logger.warning(
+                "ingestion cancelled | id=%s repo=%r: %s",
+                job_id,
+                repo_name,
+                error,
+            )
+            session.rollback()
+            ingestion_cancelled = True
         except (TourGenerationError, PermanentRepositoryIngestionError) as error:
             logger.warning(
                 "job failed permanently | id=%s type=%s repo=%r: %s",
@@ -395,10 +456,11 @@ async def run_job(job_id: int, worker_id: str) -> None:
             heartbeat_stop.set()
             heartbeat.join()
 
-        if lease_lost.is_set():
+        if ingestion_cancelled or lease_lost.is_set():
             session.rollback()
             logger.warning(
-                "discarded job outcome after lease ownership changed | id=%s worker=%s",
+                "discarded job outcome after ingestion cancellation or lease "
+                "ownership change | id=%s worker=%s",
                 job_id,
                 worker_id,
             )
