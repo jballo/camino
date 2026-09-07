@@ -414,3 +414,63 @@ async def test_hybrid_search_retries_once_when_generation_changes():
         "generation-1",
         "generation-2",
     ]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_search_discards_results_when_generation_changes_again():
+    hydrated = SearchResult(
+        chunk_id=FAKE_ROW["id"],
+        **{key: value for key, value in FAKE_ROW.items() if key != "id"},
+        score=0.05,
+    )
+
+    with (
+        patch(
+            "app.services.search._get_active_generation",
+            side_effect=["generation-1", "generation-2", "generation-3"],
+        ),
+        patch(
+            "app.services.search.embed_batch",
+            new_callable=AsyncMock,
+            return_value=[[0.1] * 1536],
+        ),
+        patch(
+            "app.services.search._vector_search",
+            return_value=[(10, 1)],
+        ) as vector,
+        patch(
+            "app.services.search._fts_search",
+            return_value=[(10, 1)],
+        ) as fts,
+        patch(
+            "app.services.search._demote_paths",
+            side_effect=lambda _session, fused, _penalty, **_kwargs: fused,
+        ),
+        patch(
+            "app.services.search._load_chunks",
+            return_value=[hydrated],
+        ) as load,
+    ):
+        results, debug = await hybrid_search_debug(
+            MagicMock(),
+            "query",
+            "org/repo",
+            installation_id=1,
+        )
+
+    assert results == []
+    assert debug.vector_ranks == {}
+    assert debug.fts_ranks == {}
+    assert debug.fused == []
+    assert [call.kwargs["generation"] for call in vector.call_args_list] == [
+        "generation-1",
+        "generation-2",
+    ]
+    assert [call.kwargs["generation"] for call in fts.call_args_list] == [
+        "generation-1",
+        "generation-2",
+    ]
+    assert [call.kwargs["generation"] for call in load.call_args_list] == [
+        "generation-1",
+        "generation-2",
+    ]

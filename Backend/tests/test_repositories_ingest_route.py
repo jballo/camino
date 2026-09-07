@@ -116,3 +116,82 @@ def test_get_rejects_a_different_job_type():
     response = client.get(f"{URL}/12")
 
     assert response.status_code == 404
+
+
+def test_get_allows_non_owner_with_access_to_repository():
+    job = _job(userId="other_user")
+    connection = MagicMock(installationId=INSTALLATION_ID)
+    installation = MagicMock()
+    installation.get_repos.return_value = [
+        MagicMock(full_name="ORG/REPO"),
+    ]
+    integration = MagicMock()
+    integration.get_app_installation.return_value = installation
+
+    def session_with_job():
+        session = MagicMock()
+        session.get.return_value = job
+        session.exec.return_value.first.return_value = connection
+        yield session
+
+    app.dependency_overrides[get_session] = session_with_job
+    with (
+        patch("app.api.repositories.Auth.AppAuth", return_value=MagicMock()),
+        patch(
+            "app.api.repositories.GithubIntegration",
+            return_value=integration,
+        ),
+    ):
+        response = client.get(f"{URL}/12")
+
+    assert response.status_code == 200
+    assert response.json()["repoName"] == "org/repo"
+    integration.get_app_installation.assert_called_once_with(INSTALLATION_ID)
+
+
+def test_get_hides_non_owner_job_without_repository_access():
+    job = _job(userId="other_user")
+    connection = MagicMock(installationId=INSTALLATION_ID)
+    installation = MagicMock()
+    installation.get_repos.return_value = [
+        MagicMock(full_name="org/different-repo"),
+    ]
+    integration = MagicMock()
+    integration.get_app_installation.return_value = installation
+
+    def session_with_job():
+        session = MagicMock()
+        session.get.return_value = job
+        session.exec.return_value.first.return_value = connection
+        yield session
+
+    app.dependency_overrides[get_session] = session_with_job
+    with (
+        patch("app.api.repositories.Auth.AppAuth", return_value=MagicMock()),
+        patch(
+            "app.api.repositories.GithubIntegration",
+            return_value=integration,
+        ),
+    ):
+        response = client.get(f"{URL}/12")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Ingestion job not found"}
+
+
+def test_get_hides_non_owner_job_without_matching_installation():
+    job = _job(userId="other_user")
+
+    def session_with_job():
+        session = MagicMock()
+        session.get.return_value = job
+        session.exec.return_value.first.return_value = None
+        yield session
+
+    app.dependency_overrides[get_session] = session_with_job
+    with patch("app.api.repositories.GithubIntegration") as integration:
+        response = client.get(f"{URL}/12")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Ingestion job not found"}
+    integration.assert_not_called()

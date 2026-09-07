@@ -420,12 +420,19 @@ async def hybrid_search_debug(
             continue
 
         # The repository was deleted, or changed again during the one retry.
-        # Never combine the already-hydrated generation with another one.
-        if current_generation is None:
-            vector_ranked = []
-            fts_ranked = []
-            fused = []
-            results = []
+        # Never return results from a generation that is no longer active.
+        logger.warning(
+            "repository generation remained unstable during search; "
+            "discarding results | repo=%r searched_generation=%s "
+            "active_generation=%s",
+            repo_name,
+            generation,
+            current_generation,
+        )
+        vector_ranked = []
+        fts_ranked = []
+        fused = []
+        results = []
         break
 
     if rerank and results:

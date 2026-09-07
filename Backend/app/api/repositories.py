@@ -199,7 +199,26 @@ async def get_repository_ingest(
             session.rollback()
             raise HTTPException(status_code=500, detail="Database error")
         if connection is None:
-            raise HTTPException(status_code=403, detail="Forbidden")
+            raise HTTPException(status_code=404, detail="Ingestion job not found")
+
+        try:
+            app_auth = Auth.AppAuth(
+                app_id=settings.gh_app_id,
+                private_key=settings.gh_app_private_key,
+            )
+            installation = GithubIntegration(
+                auth=app_auth
+            ).get_app_installation(connection.installationId)
+            target_repo = job.repo_name.casefold()
+            repository_is_accessible = any(
+                repo.full_name.casefold() == target_repo
+                for repo in installation.get_repos()
+            )
+        except GithubException:
+            raise HTTPException(status_code=500, detail="Github error")
+
+        if not repository_is_accessible:
+            raise HTTPException(status_code=404, detail="Ingestion job not found")
 
     return RepoIngestStatusResponse(
         id=job.id,
