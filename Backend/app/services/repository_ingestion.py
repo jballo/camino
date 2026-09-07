@@ -334,33 +334,34 @@ async def ingest_repository(
                     raise PermanentRepositoryIngestionError(
                         "Repository exceeds the maximum indexable size"
                     )
-                wave.extend(file_chunks)
-                if len(wave) < settings.ingest_wave_chunks:
-                    continue
+                for chunk in file_chunks:
+                    wave.append(chunk)
+                    if len(wave) < settings.ingest_wave_chunks:
+                        continue
 
-                phase = "wave"
-                wave_number += 1
-                persisted = await _persist_wave(
-                    session,
-                    wave,
-                    repo_name=repo_name,
-                    installation_id=installation_id,
-                    generation=generation,
-                    ensure_owned=ensure_owned,
-                )
-                embeddings_created += persisted
-                logger.info(
-                    "ingest wave complete | repo=%r generation=%s wave=%d "
-                    "wave_chunks=%d cumulative_chunks=%d elapsed=%.2fs",
-                    repo_name,
-                    generation,
-                    wave_number,
-                    persisted,
-                    chunks_inserted,
-                    time.monotonic() - started,
-                )
-                wave = []
-                phase = "walk"
+                    phase = "wave"
+                    wave_number += 1
+                    persisted = await _persist_wave(
+                        session,
+                        wave,
+                        repo_name=repo_name,
+                        installation_id=installation_id,
+                        generation=generation,
+                        ensure_owned=ensure_owned,
+                    )
+                    embeddings_created += persisted
+                    logger.info(
+                        "ingest wave complete | repo=%r generation=%s wave=%d "
+                        "wave_chunks=%d cumulative_chunks=%d elapsed=%.2fs",
+                        repo_name,
+                        generation,
+                        wave_number,
+                        persisted,
+                        chunks_inserted,
+                        time.monotonic() - started,
+                    )
+                    wave = []
+                    phase = "walk"
 
             if wave:
                 phase = "wave"

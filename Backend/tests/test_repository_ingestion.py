@@ -458,6 +458,41 @@ async def test_ingestion_commits_multiple_bounded_waves():
     assert session.commit.call_count == 5
 
 
+async def test_single_file_chunks_are_split_into_bounded_waves():
+    session = MagicMock()
+    github_patch, _ = _github(_repository_installation())
+    source = b"\n".join(
+        f"def function_{index}():\n    return {index}\n".encode()
+        for index in range(5)
+    )
+    wave_sizes: list[int] = []
+
+    async def embed_wave(texts: list[str]) -> list[list[float]]:
+        wave_sizes.append(len(texts))
+        return [[0.1] for _ in texts]
+
+    with (
+        github_patch,
+        patch.object(settings, "ingest_wave_chunks", 2),
+        patch(
+            "app.services.repository_ingestion.requests.get",
+            return_value=_StreamingResponse(_tarball({"src/generated.py": source})),
+        ),
+        patch(
+            "app.services.repository_ingestion.embed_all",
+            new=embed_wave,
+        ),
+    ):
+        result = await ingest_repository(
+            session,
+            repo_name="org/repo",
+            installation_id=123,
+        )
+
+    assert result == {"chunks_inserted": 5, "embeddings_created": 5}
+    assert wave_sizes == [2, 2, 1]
+
+
 async def test_chunk_cap_fails_permanently_without_publishing():
     session = MagicMock()
     github_patch, _ = _github(_repository_installation())
