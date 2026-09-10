@@ -35,7 +35,11 @@ from app.services.repository_ingestion import (
     TransientRepositoryIngestionError,
     ingest_repository,
 )
-from app.tour import TourGenerationError, generate_tour
+from app.tour import (
+    TourGenerationCancelledError,
+    TourGenerationError,
+    generate_tour,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -409,7 +413,10 @@ async def run_job(job_id: int, worker_id: str) -> None:
             kwargs={
                 "job_id": job_id,
                 "worker_id": worker_id,
-                "interval": settings.worker_lease_timeout / 3,
+                "interval": min(
+                    settings.worker_lease_timeout / 3,
+                    settings.worker_poll_interval,
+                ),
                 "stop_event": heartbeat_stop,
                 "lease_lost": lease_lost,
             },
@@ -421,7 +428,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
         result: dict | None = None
         transient_error: str | None = None
         permanent_error: str | None = None
-        ingestion_cancelled = False
+        job_cancelled = False
         ingestion_completed = False
         try:
             if job_type == JobType.TOUR:
@@ -432,6 +439,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     topic=topic,
                     repo_name=repo_name,
                     installation_id=installation_id,
+                    cancel_event=lease_lost,
                 )
                 result = artifact.model_dump()
             elif job_type == JobType.REPOSITORY_INGEST:
@@ -465,15 +473,16 @@ async def run_job(job_id: int, worker_id: str) -> None:
                 ingestion_completed = True
             else:
                 permanent_error = f"Unsupported job type: {job_type}"
-        except IngestionCancelledError as error:
+        except (IngestionCancelledError, TourGenerationCancelledError) as error:
             logger.warning(
-                "ingestion cancelled | id=%s repo=%r: %s",
+                "job cancelled | id=%s type=%s repo=%r: %s",
                 job_id,
+                job_type,
                 repo_name,
                 error,
             )
             session.rollback()
-            ingestion_cancelled = True
+            job_cancelled = True
         except (TourGenerationError, PermanentRepositoryIngestionError) as error:
             logger.warning(
                 "job failed permanently | id=%s type=%s repo=%r: %s",
@@ -516,11 +525,11 @@ async def run_job(job_id: int, worker_id: str) -> None:
             )
             return
 
-        if ingestion_cancelled or lease_lost.is_set():
+        if job_cancelled or lease_lost.is_set():
             session.rollback()
             logger.warning(
-                "discarded job outcome after ingestion cancellation or lease "
-                "ownership change | id=%s worker=%s",
+                "discarded job outcome after cancellation or lease ownership "
+                "change | id=%s worker=%s",
                 job_id,
                 worker_id,
             )

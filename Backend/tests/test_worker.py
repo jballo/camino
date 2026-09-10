@@ -12,7 +12,7 @@ from app.services.repository_ingestion import (
     PermanentRepositoryIngestionError,
     TransientRepositoryIngestionError,
 )
-from app.tour import TourGenerationError
+from app.tour import TourGenerationCancelledError, TourGenerationError
 from app.worker import (
     _ensure_ingestion_owned,
     _requeue_or_fail,
@@ -222,6 +222,36 @@ async def test_run_job_discards_result_after_lease_is_lost():
         await run_job(1, WORKER_ID)
 
     persist.assert_not_called()
+
+
+async def test_run_job_propagates_lease_loss_to_running_tour():
+    job = _job()
+    session = MagicMock()
+    session.get.return_value = job
+    persist = MagicMock(return_value=True)
+    mark_failed = MagicMock(return_value=True)
+    requeue = MagicMock(return_value=True)
+
+    async def _cancel_when_lease_is_lost(*_args, cancel_event, **_kwargs):
+        while not cancel_event.is_set():
+            await asyncio.sleep(0.001)
+        raise TourGenerationCancelledError("Tour generation was cancelled")
+
+    with (
+        _patch_session(session),
+        patch("app.worker.settings.worker_lease_timeout", 0.03),
+        patch("app.worker._renew_job_lease", side_effect=[True, False]),
+        patch("app.worker._update_owned_job", persist),
+        patch("app.worker._mark_failed", mark_failed),
+        patch("app.worker._requeue_or_fail", requeue),
+        patch("app.worker.generate_tour", side_effect=_cancel_when_lease_is_lost),
+    ):
+        await asyncio.wait_for(run_job(1, WORKER_ID), timeout=1)
+
+    persist.assert_not_called()
+    mark_failed.assert_not_called()
+    requeue.assert_not_called()
+    session.rollback.assert_called()
 
 
 async def test_run_job_dispatches_repository_ingestion():

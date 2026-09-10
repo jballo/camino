@@ -1,6 +1,9 @@
 """Entry point for guided tour generation."""
 
+import asyncio
 import logging
+import threading
+from contextlib import suppress
 
 from langchain_openai import ChatOpenAI
 from sqlmodel import Session
@@ -20,6 +23,13 @@ class TourGenerationError(RuntimeError):
     """Raised when the pipeline cannot produce a usable tour."""
 
 
+class TourGenerationCancelledError(TourGenerationError):
+    """Raised when a caller asks an in-flight tour pipeline to stop."""
+
+
+CANCELLATION_POLL_INTERVAL = 0.1
+
+
 async def generate_tour(
     session: Session,
     *,
@@ -29,6 +39,7 @@ async def generate_tour(
     model: str | None = None,
     search_limit: int = DEFAULT_SEARCH_LIMIT,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    cancel_event: threading.Event | None = None,
 ) -> TourArtifact:
     """Run Plan -> Retrieve -> Draft -> Review and return a grounded ``TourArtifact``.
 
@@ -48,13 +59,34 @@ async def generate_tour(
         session, llm, search_limit=search_limit, max_attempts=max_attempts
     )
 
-    final = await graph.ainvoke(
-        {
-            "topic": topic,
-            "repo_name": repo_name,
-            "installation_id": installation_id,
-        }
+    invocation = asyncio.create_task(
+        graph.ainvoke(
+            {
+                "topic": topic,
+                "repo_name": repo_name,
+                "installation_id": installation_id,
+            }
+        )
     )
+    try:
+        while not invocation.done():
+            if cancel_event is not None and cancel_event.is_set():
+                invocation.cancel()
+                try:
+                    await invocation
+                except asyncio.CancelledError:
+                    pass
+                raise TourGenerationCancelledError("Tour generation was cancelled")
+            await asyncio.wait(
+                {invocation},
+                timeout=CANCELLATION_POLL_INTERVAL,
+            )
+        final = await invocation
+    finally:
+        if not invocation.done():
+            invocation.cancel()
+            with suppress(asyncio.CancelledError):
+                await invocation
 
     steps = final.get("steps") or []
     if not steps:
