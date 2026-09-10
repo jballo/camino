@@ -15,6 +15,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 
 const POLL_INTERVAL_MS = 2000;
+const POLL_TIMEOUT_MS = 10 * 60 * 1000;
 
 const STEPS: { status: JourneyStatus; label: string }[] = [
   { status: "pending", label: "Queued" },
@@ -46,6 +47,8 @@ function GenerateInner() {
   const [error, setError] = useState<string | undefined>(undefined);
   const [cancelError, setCancelError] = useState<string | undefined>(undefined);
   const [stopping, setStopping] = useState(false);
+  const [timedOut, setTimedOut] = useState(false);
+  const [pollingSession, setPollingSession] = useState(0);
   const pollingStoppedRef = useRef(false);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
@@ -59,9 +62,16 @@ function GenerateInner() {
 
     let cancelled = false;
     pollingStoppedRef.current = false;
+    const deadline = Date.now() + POLL_TIMEOUT_MS;
 
     const poll = async () => {
       if (pollingStoppedRef.current) return;
+      if (Date.now() >= deadline) {
+        pollingStoppedRef.current = true;
+        setTimedOut(true);
+        return;
+      }
+
       try {
         const token = await getToken();
         if (!token) throw new ApiError(401, "Not authenticated");
@@ -87,7 +97,17 @@ function GenerateInner() {
           return;
         }
 
-        pollTimerRef.current = setTimeout(poll, POLL_INTERVAL_MS);
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) {
+          pollingStoppedRef.current = true;
+          setTimedOut(true);
+          return;
+        }
+
+        pollTimerRef.current = setTimeout(
+          poll,
+          Math.min(POLL_INTERVAL_MS, remainingMs),
+        );
       } catch (err) {
         if (cancelled) return;
         console.log("Error: ", err);
@@ -117,7 +137,12 @@ function GenerateInner() {
       pollingStoppedRef.current = true;
       if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
     };
-  }, [getToken, id, router]);
+  }, [getToken, id, pollingSession, router]);
+
+  const keepWaiting = () => {
+    setTimedOut(false);
+    setPollingSession((session) => session + 1);
+  };
 
   const stopGenerating = async () => {
     if (!id || !journey) return;
@@ -184,6 +209,30 @@ function GenerateInner() {
               >
                 Start over
               </Link>
+            </div>
+          ) : timedOut ? (
+            <div className="flex flex-col items-center gap-4 text-center">
+              <AlertTriangle className="size-10 text-muted-foreground" />
+              <h2 className="text-xl font-semibold">
+                This is taking longer than expected
+              </h2>
+              <p className="text-sm text-muted-foreground">
+                Your tour may still be generating in the background.
+              </p>
+              <div className="flex items-center gap-3">
+                <Button
+                  onClick={keepWaiting}
+                  className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground"
+                >
+                  Keep waiting
+                </Button>
+                <Link
+                  href="/"
+                  className="rounded-md border border-border px-4 py-2 text-sm"
+                >
+                  Start over
+                </Link>
+              </div>
             </div>
           ) : (
             <>
