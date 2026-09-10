@@ -8,10 +8,11 @@ from sqlmodel import select
 
 from app.db import SessionDep
 from app.models.github_connection import GithubConnections
-from app.models.job import Job, JobType
+from app.models.job import Job, JobStatus, JobType
 from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
 from app.security import get_authenticated_user_id
 from app.services.jobs import (
+    cancel_job,
     enqueue_job,
     normalize_repository_name,
     tour_dedupe_key,
@@ -49,6 +50,37 @@ class JourneySummaryResponse(BaseModel):
     repoName: str
     topic: str
     createdAt: dt.datetime
+
+
+def _get_authorized_journey(
+    session: SessionDep,
+    job_id: int,
+    auth_user_id: str,
+) -> Job:
+    try:
+        job = session.get(Job, job_id)
+    except exc.OperationalError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+
+    if job is None:
+        raise HTTPException(status_code=404, detail="Journey not found")
+    if job.userId != auth_user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if job.job_type != JobType.TOUR:
+        raise HTTPException(status_code=404, detail="Journey not found")
+    return job
+
+
+def _journey_response(job: Job) -> JourneyResponse:
+    return JourneyResponse(
+        id=job.id,
+        status=job.status,
+        repoName=job.repo_name,
+        topic=job.topic,
+        artifact=job.artifact,
+        error=job.error,
+    )
 
 
 @router.post("", dependencies=[Depends(JOURNEY_CREATE_RATE_LIMIT)])
@@ -104,27 +136,39 @@ async def get_journey(
     session: SessionDep,
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> JourneyResponse:
+    job = _get_authorized_journey(session, job_id, auth_user_id)
+    return _journey_response(job)
+
+
+@router.post("/{job_id}/cancel")
+async def cancel_journey(
+    job_id: int,
+    session: SessionDep,
+    auth_user_id: str = Depends(get_authenticated_user_id),
+) -> JourneyResponse:
+    job = _get_authorized_journey(session, job_id, auth_user_id)
+
+    if job.status == JobStatus.CANCELLED:
+        return _journey_response(job)
+    if job.status not in JobStatus.ACTIVE:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot cancel journey with status '{job.status}'",
+        )
+
     try:
-        job = session.get(Job, job_id)
-    except exc.OperationalError:
+        cancel_job(session, job_id)
+        session.refresh(job)
+    except exc.SQLAlchemyError:
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
 
-    if job is None:
-        raise HTTPException(status_code=404, detail="Journey not found")
-    if job.userId != auth_user_id:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    if job.job_type != JobType.TOUR:
-        raise HTTPException(status_code=404, detail="Journey not found")
-
-    return JourneyResponse(
-        id=job.id,
-        status=job.status,
-        repoName=job.repo_name,
-        topic=job.topic,
-        artifact=job.artifact,
-        error=job.error,
-    )
+    if job.status != JobStatus.CANCELLED:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot cancel journey with status '{job.status}'",
+        )
+    return _journey_response(job)
 
 
 @router.get("")

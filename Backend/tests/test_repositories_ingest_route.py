@@ -195,3 +195,95 @@ def test_get_hides_non_owner_job_without_matching_installation():
     assert response.status_code == 404
     assert response.json() == {"detail": "Ingestion job not found"}
     integration.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [JobStatus.PENDING, JobStatus.RUNNING])
+def test_cancel_transitions_active_ingestion_job(status):
+    job = _job(status=status)
+
+    def session_with_job():
+        session = MagicMock()
+        session.get.return_value = job
+        yield session
+
+    def transition(_session, job_id):
+        assert job_id == job.id
+        job.status = JobStatus.CANCELLED
+        return True
+
+    app.dependency_overrides[get_session] = session_with_job
+    with patch("app.api.repositories.cancel_job", side_effect=transition) as cancel:
+        response = client.post(f"{URL}/12/cancel")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == JobStatus.CANCELLED
+    cancel.assert_called_once()
+
+
+def test_cancel_is_idempotent_for_cancelled_ingestion_job():
+    job = _job(status=JobStatus.CANCELLED)
+
+    def session_with_job():
+        session = MagicMock()
+        session.get.return_value = job
+        yield session
+
+    app.dependency_overrides[get_session] = session_with_job
+    with patch("app.api.repositories.cancel_job") as cancel:
+        response = client.post(f"{URL}/12/cancel")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == JobStatus.CANCELLED
+    cancel.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [JobStatus.COMPLETE, JobStatus.FAILED])
+def test_cancel_rejects_terminal_ingestion_job(status):
+    job = _job(status=status)
+
+    def session_with_job():
+        session = MagicMock()
+        session.get.return_value = job
+        yield session
+
+    app.dependency_overrides[get_session] = session_with_job
+    response = client.post(f"{URL}/12/cancel")
+
+    assert response.status_code == 409
+    assert status in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "job",
+    [
+        None,
+        _job(job_type=JobType.TOUR),
+    ],
+)
+def test_cancel_hides_unknown_or_wrong_type_ingestion_job(job):
+    def session_with_job():
+        session = MagicMock()
+        session.get.return_value = job
+        yield session
+
+    app.dependency_overrides[get_session] = session_with_job
+    response = client.post(f"{URL}/12/cancel")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Ingestion job not found"}
+
+
+def test_cancel_hides_unauthorized_ingestion_job():
+    job = _job(userId="other_user")
+
+    def session_with_job():
+        session = MagicMock()
+        session.get.return_value = job
+        session.exec.return_value.first.return_value = None
+        yield session
+
+    app.dependency_overrides[get_session] = session_with_job
+    response = client.post(f"{URL}/12/cancel")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Ingestion job not found"}

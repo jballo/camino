@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import exc
+from sqlalchemy import exc, update
 from sqlmodel import Session, select
 
 from app.models.job import Job, JobStatus, JobType
@@ -29,6 +29,24 @@ def repository_ingest_dedupe_key(
         f"{JobType.REPOSITORY_INGEST}:{installation_id}:"
         f"{normalized_repo_name}"
     )
+
+
+def cancel_job(session: Session, job_id: int) -> bool:
+    """Atomically cancel a pending or running job. Returns True if it transitioned."""
+    result = session.exec(
+        update(Job)
+        .where(
+            Job.id == job_id,
+            Job.status.in_(JobStatus.ACTIVE),
+        )
+        .values(
+            status=JobStatus.CANCELLED,
+            claimed_at=None,
+            claimed_by=None,
+        )
+    )
+    session.commit()
+    return result.rowcount == 1
 
 
 def _active_job(session: Session, dedupe_key: str) -> Job | None:

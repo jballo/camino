@@ -29,6 +29,11 @@ function StatusBadge({ status }: { status: JourneyStatus }) {
       className: "bg-accent text-muted-foreground",
       icon: <Loader2 className="size-3 animate-spin" />,
     },
+    running: {
+      label: "Generating",
+      className: "bg-accent text-muted-foreground",
+      icon: <Loader2 className="size-3 animate-spin" />,
+    },
     pending: {
       label: "Queued",
       className: "bg-accent text-muted-foreground",
@@ -37,6 +42,11 @@ function StatusBadge({ status }: { status: JourneyStatus }) {
     failed: {
       label: "Failed",
       className: "bg-destructive/15 text-destructive",
+      icon: <AlertTriangle className="size-3" />,
+    },
+    cancelled: {
+      label: "Cancelled",
+      className: "bg-accent text-muted-foreground",
       icon: <AlertTriangle className="size-3" />,
     },
   };

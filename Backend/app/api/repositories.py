@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from github import Auth, GithubException, GithubIntegration
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import exc, text
-from sqlmodel import select
+from sqlmodel import Session, select
 
 import logging
 
@@ -10,13 +10,14 @@ from app.config import settings
 from app.services.embeddings import EmbeddingError
 from app.db import SessionDep
 from app.models.github_connection import GithubConnections
-from app.models.job import Job, JobType
+from app.models.job import Job, JobStatus, JobType
 from app.rate_limit import (
     REPOSITORY_INGEST_RATE_LIMIT,
     REPOSITORY_SEARCH_RATE_LIMIT,
 )
 from app.security import get_authenticated_user_id
 from app.services.jobs import (
+    cancel_job,
     enqueue_job,
     normalize_repository_name,
     repository_ingest_dedupe_key,
@@ -69,6 +70,67 @@ class RepoIngestStatusResponse(BaseModel):
     attempts: int
     result: dict | None = None
     error: str | None = None
+
+
+def _get_authorized_repository_ingest(
+    session: Session,
+    job_id: int,
+    auth_user_id: str,
+) -> Job:
+    try:
+        job = session.get(Job, job_id)
+    except exc.OperationalError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+
+    if job is None or job.job_type != JobType.REPOSITORY_INGEST:
+        raise HTTPException(status_code=404, detail="Ingestion job not found")
+    if job.userId == auth_user_id:
+        return job
+
+    try:
+        connection = session.exec(
+            select(GithubConnections).where(
+                GithubConnections.userId == auth_user_id,
+                GithubConnections.installationId == job.installation_id,
+            )
+        ).first()
+    except exc.SQLAlchemyError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+    if connection is None:
+        raise HTTPException(status_code=404, detail="Ingestion job not found")
+
+    try:
+        app_auth = Auth.AppAuth(
+            app_id=settings.gh_app_id,
+            private_key=settings.gh_app_private_key,
+        )
+        installation = GithubIntegration(
+            auth=app_auth
+        ).get_app_installation(connection.installationId)
+        target_repo = normalize_repository_name(job.repo_name)
+        repository_is_accessible = any(
+            normalize_repository_name(repo.full_name) == target_repo
+            for repo in installation.get_repos()
+        )
+    except GithubException:
+        raise HTTPException(status_code=500, detail="Github error")
+
+    if not repository_is_accessible:
+        raise HTTPException(status_code=404, detail="Ingestion job not found")
+    return job
+
+
+def _repository_ingest_response(job: Job) -> RepoIngestStatusResponse:
+    return RepoIngestStatusResponse(
+        id=job.id,
+        status=job.status,
+        repoName=job.repo_name,
+        attempts=job.attempts,
+        result=job.artifact,
+        error=job.error,
+    )
 
 
 @router.get("")
@@ -183,55 +245,39 @@ async def get_repository_ingest(
     session: SessionDep,
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> RepoIngestStatusResponse:
+    job = _get_authorized_repository_ingest(session, job_id, auth_user_id)
+    return _repository_ingest_response(job)
+
+
+@router.post("/ingest/{job_id}/cancel")
+async def cancel_repository_ingest(
+    job_id: int,
+    session: SessionDep,
+    auth_user_id: str = Depends(get_authenticated_user_id),
+) -> RepoIngestStatusResponse:
+    job = _get_authorized_repository_ingest(session, job_id, auth_user_id)
+
+    if job.status == JobStatus.CANCELLED:
+        return _repository_ingest_response(job)
+    if job.status not in JobStatus.ACTIVE:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot cancel ingestion job with status '{job.status}'",
+        )
+
     try:
-        job = session.get(Job, job_id)
-    except exc.OperationalError:
+        cancel_job(session, job_id)
+        session.refresh(job)
+    except exc.SQLAlchemyError:
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
 
-    if job is None or job.job_type != JobType.REPOSITORY_INGEST:
-        raise HTTPException(status_code=404, detail="Ingestion job not found")
-    if job.userId != auth_user_id:
-        try:
-            connection = session.exec(
-                select(GithubConnections).where(
-                    GithubConnections.userId == auth_user_id,
-                    GithubConnections.installationId == job.installation_id,
-                )
-            ).first()
-        except exc.SQLAlchemyError:
-            session.rollback()
-            raise HTTPException(status_code=500, detail="Database error")
-        if connection is None:
-            raise HTTPException(status_code=404, detail="Ingestion job not found")
-
-        try:
-            app_auth = Auth.AppAuth(
-                app_id=settings.gh_app_id,
-                private_key=settings.gh_app_private_key,
-            )
-            installation = GithubIntegration(
-                auth=app_auth
-            ).get_app_installation(connection.installationId)
-            target_repo = normalize_repository_name(job.repo_name)
-            repository_is_accessible = any(
-                normalize_repository_name(repo.full_name) == target_repo
-                for repo in installation.get_repos()
-            )
-        except GithubException:
-            raise HTTPException(status_code=500, detail="Github error")
-
-        if not repository_is_accessible:
-            raise HTTPException(status_code=404, detail="Ingestion job not found")
-
-    return RepoIngestStatusResponse(
-        id=job.id,
-        status=job.status,
-        repoName=job.repo_name,
-        attempts=job.attempts,
-        result=job.artifact,
-        error=job.error,
-    )
+    if job.status != JobStatus.CANCELLED:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot cancel ingestion job with status '{job.status}'",
+        )
+    return _repository_ingest_response(job)
 
 
 @router.post("/search", dependencies=[Depends(REPOSITORY_SEARCH_RATE_LIMIT)])

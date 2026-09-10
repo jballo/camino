@@ -2,7 +2,8 @@ export type RepositoryIngestionStatus =
   | "pending"
   | "running"
   | "complete"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 export type RepositoryIngestionResult = {
   chunks_inserted: number;

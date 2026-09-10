@@ -166,6 +166,95 @@ def test_get_forbidden_when_owner_mismatch():
     assert resp.status_code == 403
 
 
+@pytest.mark.parametrize("status", [JobStatus.PENDING, JobStatus.RUNNING])
+def test_cancel_transitions_active_journey(status):
+    job = _make_job(status=status)
+
+    def _session_with_job():
+        session = MagicMock()
+        session.get.return_value = job
+        yield session
+
+    def transition(_session, job_id):
+        assert job_id == job.id
+        job.status = JobStatus.CANCELLED
+        return True
+
+    app.dependency_overrides[get_session] = _session_with_job
+    with patch("app.api.journeys.cancel_job", side_effect=transition) as cancel:
+        resp = client.post(f"{JOURNEYS_URL}/1/cancel")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == JobStatus.CANCELLED
+    cancel.assert_called_once()
+
+
+def test_cancel_is_idempotent_for_cancelled_journey():
+    job = _make_job(status=JobStatus.CANCELLED)
+
+    def _session_with_job():
+        session = MagicMock()
+        session.get.return_value = job
+        yield session
+
+    app.dependency_overrides[get_session] = _session_with_job
+    with patch("app.api.journeys.cancel_job") as cancel:
+        resp = client.post(f"{JOURNEYS_URL}/1/cancel")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == JobStatus.CANCELLED
+    cancel.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [JobStatus.COMPLETE, JobStatus.FAILED])
+def test_cancel_rejects_terminal_journey(status):
+    job = _make_job(status=status)
+
+    def _session_with_job():
+        session = MagicMock()
+        session.get.return_value = job
+        yield session
+
+    app.dependency_overrides[get_session] = _session_with_job
+    resp = client.post(f"{JOURNEYS_URL}/1/cancel")
+
+    assert resp.status_code == 409
+    assert status in resp.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "job",
+    [
+        None,
+        _make_job(job_type=JobType.REPOSITORY_INGEST),
+    ],
+)
+def test_cancel_returns_404_for_unknown_or_wrong_type_journey(job):
+    def _session_with_job():
+        session = MagicMock()
+        session.get.return_value = job
+        yield session
+
+    app.dependency_overrides[get_session] = _session_with_job
+    resp = client.post(f"{JOURNEYS_URL}/1/cancel")
+
+    assert resp.status_code == 404
+
+
+def test_cancel_returns_403_for_another_users_journey():
+    job = _make_job(status=JobStatus.RUNNING, userId="someone_else")
+
+    def _session_with_job():
+        session = MagicMock()
+        session.get.return_value = job
+        yield session
+
+    app.dependency_overrides[get_session] = _session_with_job
+    resp = client.post(f"{JOURNEYS_URL}/1/cancel")
+
+    assert resp.status_code == 403
+
+
 # ── list (GET) ──────────────────────────────────────────────────────
 
 def test_list_returns_summaries():

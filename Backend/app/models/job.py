@@ -16,6 +16,7 @@ class JobStatus:
     GENERATING = RUNNING  # Backward-compatible name for older callers.
     COMPLETE = "complete"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
     ACTIVE = (PENDING, RUNNING)
 

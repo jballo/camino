@@ -17,6 +17,7 @@ import ReactMarkdown from "react-markdown";
 
 import { ApiError, backendFetch } from "@/lib/api";
 import {
+  cancelRepositoryIngestion,
   enqueueRepositoryIngestion,
   IngestionTimeoutError,
   isAbortError,
@@ -162,6 +163,7 @@ export default function Explore() {
           signal: controller.signal,
           onUpdate: setIngestionJob,
         });
+        if (job.status === "cancelled") return;
         if (job.status === "failed") {
           throw new Error(job.error ?? "Repository ingestion failed.");
         }
@@ -205,6 +207,37 @@ export default function Explore() {
     },
     [getToken, loadProcessed],
   );
+
+  const stopRepositoryIngestion = useCallback(async () => {
+    const job = ingestionJob;
+    const controller = ingestionAbortRef.current;
+    if (!job || !controller) return;
+
+    setProcessError(undefined);
+    try {
+      const token = await getToken();
+      if (!token) throw new ApiError(401, "Not authenticated");
+
+      const cancelledJob = await cancelRepositoryIngestion(job.id, token);
+      setIngestionJob(cancelledJob);
+    } catch (error) {
+      if (!(error instanceof ApiError && error.status === 409)) {
+        setProcessError(
+          error instanceof Error
+            ? `Failed to stop ${job.repoName}: ${error.message}`
+            : `Failed to stop ${job.repoName}`,
+        );
+        return;
+      }
+    }
+
+    controller.abort();
+    if (ingestionAbortRef.current === controller) {
+      ingestionAbortRef.current = null;
+      setProcessingRepo(undefined);
+    }
+    void loadProcessed();
+  }, [getToken, ingestionJob, loadProcessed]);
 
   const askAgent = useCallback(async () => {
     if (!selectedRepo || query.trim().length === 0) return;
@@ -326,7 +359,7 @@ export default function Explore() {
                     onClick={(e) => {
                       e.stopPropagation();
                       if (isProcessing) {
-                        ingestionAbortRef.current?.abort();
+                        void stopRepositoryIngestion();
                       } else {
                         processRepo(repo);
                       }
@@ -335,7 +368,7 @@ export default function Explore() {
                     className="flex items-center justify-center gap-2 h-8 rounded-md bg-primary text-primary-foreground text-sm disabled:opacity-60"
                   >
                     {isProcessing ? (
-                      "Stop waiting"
+                      "Stop"
                     ) : isProcessed ? (
                       <>
                         <RefreshCw className="size-3.5" />

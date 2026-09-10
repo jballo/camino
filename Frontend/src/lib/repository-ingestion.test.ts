@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  cancelRepositoryIngestion,
   enqueueRepositoryIngestion,
   IngestionTimeoutError,
   isAbortError,
@@ -66,6 +67,24 @@ describe("repository ingestion jobs", () => {
     );
   });
 
+  it("cancels an ingestion job", async () => {
+    const cancelled = job("cancelled");
+    fetchMock.mockResolvedValue(mockResponse(cancelled));
+
+    await expect(
+      cancelRepositoryIngestion(42, "my-token"),
+    ).resolves.toEqual(cancelled);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${BACKEND_URL}/api/v1/repositories/ingest/42/cancel`,
+      {
+        method: "POST",
+        headers: { Authorization: "Bearer my-token" },
+        body: undefined,
+      },
+    );
+  });
+
   it("polls through queued and running updates until completion", async () => {
     const pending = job("pending");
     const running = job("running");
@@ -116,6 +135,20 @@ describe("repository ingestion jobs", () => {
         { intervalMs: 0 },
       ),
     ).resolves.toEqual(failed);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops polling when the job is cancelled", async () => {
+    const cancelled = job("cancelled");
+    fetchMock.mockResolvedValue(mockResponse(cancelled));
+
+    await expect(
+      pollRepositoryIngestion(
+        42,
+        vi.fn().mockResolvedValue("my-token"),
+        { intervalMs: 0 },
+      ),
+    ).resolves.toEqual(cancelled);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 

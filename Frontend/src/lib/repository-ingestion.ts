@@ -62,6 +62,21 @@ export function enqueueRepositoryIngestion(
   );
 }
 
+export function cancelRepositoryIngestion(
+  jobId: number,
+  token: string,
+  signal?: AbortSignal,
+): Promise<RepositoryIngestionJob> {
+  return backendFetch<RepositoryIngestionJob>(
+    `/api/v1/repositories/ingest/${encodeURIComponent(jobId)}/cancel`,
+    token,
+    {
+      method: "POST",
+      signal,
+    },
+  );
+}
+
 export async function pollRepositoryIngestion(
   jobId: number,
   getToken: () => Promise<string | null>,
@@ -89,7 +104,13 @@ export async function pollRepositoryIngestion(
     );
     onUpdate?.(job);
 
-    if (job.status === "complete" || job.status === "failed") return job;
+    if (
+      job.status === "complete" ||
+      job.status === "failed" ||
+      job.status === "cancelled"
+    ) {
+      return job;
+    }
 
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw new IngestionTimeoutError();

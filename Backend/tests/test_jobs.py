@@ -4,6 +4,7 @@ from sqlalchemy import exc
 
 from app.models.job import JobStatus, JobType
 from app.services.jobs import (
+    cancel_job,
     enqueue_job,
     normalize_repository_name,
     repository_ingest_dedupe_key,
@@ -105,3 +106,42 @@ def test_enqueue_recovers_concurrent_unique_index_loser():
     assert job is winner
     assert created is False
     session.rollback.assert_called_once_with()
+
+
+def test_cancel_job_cancels_pending_job_and_clears_claim():
+    session = MagicMock()
+    session.exec.return_value.rowcount = 1
+
+    transitioned = cancel_job(session, 17)
+
+    assert transitioned is True
+    statement = session.exec.call_args.args[0]
+    compiled = statement.compile()
+    assert compiled.params["id_1"] == 17
+    assert compiled.params["status"] == JobStatus.CANCELLED
+    assert compiled.params["claimed_at"] is None
+    assert compiled.params["claimed_by"] is None
+    assert set(compiled.params["status_1"]) == set(JobStatus.ACTIVE)
+    session.commit.assert_called_once_with()
+
+
+def test_cancel_job_cancels_running_job_with_one_atomic_update():
+    session = MagicMock()
+    session.exec.return_value.rowcount = 1
+
+    assert cancel_job(session, 18) is True
+
+    statement = session.exec.call_args.args[0]
+    assert str(statement).startswith("UPDATE jobs SET")
+    assert session.exec.call_count == 1
+    session.commit.assert_called_once_with()
+
+
+def test_cancel_job_returns_false_for_terminal_job_and_still_commits_once():
+    session = MagicMock()
+    session.exec.return_value.rowcount = 0
+
+    assert cancel_job(session, 19) is False
+
+    session.exec.assert_called_once()
+    session.commit.assert_called_once_with()

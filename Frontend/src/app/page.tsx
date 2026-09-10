@@ -19,6 +19,7 @@ import { useAuth } from "@clerk/nextjs";
 
 import { ApiError, backendFetch } from "@/lib/api";
 import {
+  cancelRepositoryIngestion,
   enqueueRepositoryIngestion,
   IngestionTimeoutError,
   isAbortError,
@@ -158,6 +159,7 @@ export default function Home() {
         signal: controller.signal,
         onUpdate: setIngestionJob,
       });
+      if (job.status === "cancelled") return;
       if (job.status === "failed") {
         throw new Error(job.error ?? "Repository ingestion failed.");
       }
@@ -194,6 +196,37 @@ export default function Home() {
       }
     }
   }, [getToken, repoSelected]);
+
+  const stopRepositoryIngestion = useCallback(async () => {
+    const job = ingestionJob;
+    const controller = ingestionAbortRef.current;
+    if (!job || !controller) return;
+
+    setProcessingError(undefined);
+    try {
+      const token = await getToken();
+      if (!token) throw new ApiError(401, "Not authenticated");
+
+      const cancelledJob = await cancelRepositoryIngestion(job.id, token);
+      setIngestionJob(cancelledJob);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        return;
+      }
+      setProcessingError(
+        error instanceof Error
+          ? `Failed to stop repository ingestion: ${error.message}`
+          : "Failed to stop repository ingestion.",
+      );
+      return;
+    }
+
+    controller.abort();
+    if (ingestionAbortRef.current === controller) {
+      ingestionAbortRef.current = null;
+      setProcessing(false);
+    }
+  }, [getToken, ingestionJob]);
 
   useEffect(
     () => () => {
@@ -344,13 +377,13 @@ export default function Home() {
                         className="rounded-sm px-3 py-1.5 text-sm hover:bg-accent"
                         onClick={() => {
                           if (processing) {
-                            ingestionAbortRef.current?.abort();
+                            void stopRepositoryIngestion();
                           } else {
                             setRepoSelectionDialog(false);
                           }
                         }}
                       >
-                        {processing ? "Stop waiting" : "Cancel"}
+                        {processing ? "Stop" : "Cancel"}
                       </Button>
                       <div className="flex gap-2">
                         <Button
