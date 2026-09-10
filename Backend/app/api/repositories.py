@@ -256,6 +256,11 @@ async def cancel_repository_ingest(
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> RepoIngestStatusResponse:
     job = _get_authorized_repository_ingest(session, job_id, auth_user_id)
+    if job.userId != auth_user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the job owner can cancel this ingestion",
+        )
 
     if job.status == JobStatus.CANCELLED:
         return _repository_ingest_response(job)

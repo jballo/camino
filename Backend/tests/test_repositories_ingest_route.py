@@ -197,6 +197,40 @@ def test_get_hides_non_owner_job_without_matching_installation():
     integration.assert_not_called()
 
 
+def test_cancel_rejects_non_owner_with_repository_access():
+    job = _job(userId="other_user")
+    connection = MagicMock(installationId=INSTALLATION_ID)
+    installation = MagicMock()
+    installation.get_repos.return_value = [
+        MagicMock(full_name="ORG/REPO"),
+    ]
+    integration = MagicMock()
+    integration.get_app_installation.return_value = installation
+
+    def session_with_job():
+        session = MagicMock()
+        session.get.return_value = job
+        session.exec.return_value.first.return_value = connection
+        yield session
+
+    app.dependency_overrides[get_session] = session_with_job
+    with (
+        patch("app.api.repositories.Auth.AppAuth", return_value=MagicMock()),
+        patch(
+            "app.api.repositories.GithubIntegration",
+            return_value=integration,
+        ),
+        patch("app.api.repositories.cancel_job") as cancel,
+    ):
+        response = client.post(f"{URL}/12/cancel")
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "detail": "Only the job owner can cancel this ingestion"
+    }
+    cancel.assert_not_called()
+
+
 @pytest.mark.parametrize("status", [JobStatus.PENDING, JobStatus.RUNNING])
 def test_cancel_transitions_active_ingestion_job(status):
     job = _job(status=status)
