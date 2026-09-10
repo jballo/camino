@@ -13,7 +13,9 @@ def _normalized_sql(connection: MagicMock) -> list[str]:
     ]
 
 
-async def test_lifespan_migrates_github_user_id_for_existing_tables():
+async def test_lifespan_provisions_schema_extras():
+    """create_all() cannot express the view or the composite/partial/vector
+    indexes, so lifespan must create them explicitly on every startup."""
     connection = MagicMock()
     mock_engine = MagicMock()
     mock_engine.connect.return_value.__enter__.return_value = connection
@@ -27,62 +29,13 @@ async def test_lifespan_migrates_github_user_id_for_existing_tables():
 
     create_all.assert_called_once_with(mock_engine)
     statements = _normalized_sql(connection)
-    assert "ALTER TABLE code_chunks ADD COLUMN IF NOT EXISTS generation TEXT" in statements
+    assert "CREATE EXTENSION IF NOT EXISTS vector" in statements
     assert (
-        "UPDATE code_chunks SET generation = 'legacy' WHERE generation IS NULL"
+        "CREATE INDEX IF NOT EXISTS ix_chunks_repo_generation "
+        "ON code_chunks (installation_id, repo_name, generation)"
         in statements
     )
-    assert (
-        "UPDATE code_chunks SET repo_name = lower(repo_name) "
-        "WHERE repo_name <> lower(repo_name)"
-        in statements
-    )
-    assert any(
-        "INSERT INTO repo_index_state" in sql
-        and "SELECT installation_id, lower(repo_name), active_generation" in sql
-        and "WHERE repo_name <> lower(repo_name)" in sql
-        and "ON CONFLICT (installation_id, repo_name) DO NOTHING" in sql
-        for sql in statements
-    )
-    assert (
-        "DELETE FROM repo_index_state WHERE repo_name <> lower(repo_name)"
-        in statements
-    )
-    assert (
-        "ALTER TABLE code_chunks ALTER COLUMN generation SET NOT NULL"
-        in statements
-    )
-    assert any(
-        "INSERT INTO repo_index_state" in sql
-        and "SELECT DISTINCT installation_id, lower(repo_name), 'legacy'" in sql
-        for sql in statements
-    )
-    assert any("DROP CONSTRAINT IF EXISTS uq_chunk_identity" in sql for sql in statements)
-    assert any("CREATE UNIQUE INDEX IF NOT EXISTS uq_chunk_identity_gen" in sql for sql in statements)
-    assert any("CREATE INDEX IF NOT EXISTS ix_chunks_repo_generation" in sql for sql in statements)
     assert any("CREATE OR REPLACE VIEW live_code_chunks AS" in sql for sql in statements)
-    assert (
-        'ALTER TABLE githubconnections ADD COLUMN IF NOT EXISTS "githubUserId" INTEGER'
-        in statements
-    )
-    assert (
-        'CREATE INDEX IF NOT EXISTS "ix_githubconnections_githubUserId" '
-        'ON githubconnections ("githubUserId")'
-        in statements
-    )
-    assert any("ALTER TABLE tour_jobs RENAME TO jobs" in sql for sql in statements)
-    assert "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ" in statements
-    assert "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_by TEXT" in statements
-    assert (
-        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0"
-        in statements
-    )
-    assert (
-        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS job_type TEXT NOT NULL DEFAULT 'tour'"
-        in statements
-    )
-    assert "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dedupe_key TEXT" in statements
-    assert "ALTER TABLE jobs ALTER COLUMN topic DROP NOT NULL" in statements
     assert (
         'CREATE INDEX IF NOT EXISTS ix_jobs_pending '
         'ON jobs ("createdAt") WHERE status = \'pending\''
@@ -93,6 +46,14 @@ async def test_lifespan_migrates_github_user_id_for_existing_tables():
         "ON jobs (dedupe_key) WHERE status IN ('pending', 'running') "
         "AND dedupe_key IS NOT NULL"
         in statements
+    )
+    assert any(
+        "CREATE INDEX IF NOT EXISTS ix_embeddings_hnsw" in sql
+        for sql in statements
+    )
+    assert any(
+        "CREATE INDEX IF NOT EXISTS ix_chunks_search" in sql
+        for sql in statements
     )
 
 
