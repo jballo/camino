@@ -16,7 +16,13 @@ export type TourArtifact = {
   steps: TourStep[];
 };
 
-export type JourneyStatus = "pending" | "generating" | "complete" | "failed";
+export type JourneyStatus =
+  | "pending"
+  | "generating"
+  | "running"
+  | "complete"
+  | "failed"
+  | "cancelled";
 
 export type JourneyResponse = {
   id: number;

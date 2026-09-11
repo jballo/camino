@@ -25,12 +25,11 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from sqlalchemy import func
-from sqlmodel import Session, create_engine, select
+from sqlalchemy import text
+from sqlmodel import Session, create_engine
 
 from app.agent.runner import answer_question
 from app.config import settings
-from app.models.code import CodeChunkModel
 from eval.ingest_local import (
     DEFAULT_FIXTURE_PATH,
     EVAL_INSTALLATION_ID,
@@ -107,15 +106,18 @@ def _resolve_questions(wanted_ids: list[str] | None) -> tuple[list[dict], str, d
 
 
 def _chunk_count(session: Session, repo_name: str, installation_id: int) -> int:
-    statement = (
-        select(func.count())
-        .select_from(CodeChunkModel)
-        .where(
-            CodeChunkModel.repo_name == repo_name,
-            CodeChunkModel.installation_id == installation_id,
-        )
-    )
-    return session.exec(statement).one()
+    return session.execute(
+        text("""
+            SELECT count(*)
+            FROM live_code_chunks
+            WHERE repo_name = :repo_name
+              AND installation_id = :installation_id
+        """),
+        {
+            "repo_name": repo_name,
+            "installation_id": installation_id,
+        },
+    ).scalar_one()
 
 
 def _citation_dicts(citations: list[CitationRef]) -> list[dict]:

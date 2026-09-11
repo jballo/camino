@@ -117,7 +117,7 @@ def _resolve_relevant_ids(
     }
     sql = text("""
         SELECT id, file_path, symbol_name
-        FROM   code_chunks
+        FROM   live_code_chunks
         WHERE  repo_name = :repo_name
           AND  installation_id = :installation_id
     """)

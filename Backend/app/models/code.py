@@ -10,14 +10,22 @@ from app.services.embeddings import EMBED_DIMENSIONS
 class CodeChunkModel(SQLModel, table=True):
     __tablename__ = "code_chunks"
     __table_args__ = (
-        UniqueConstraint("installation_id", "repo_name", "file_path", "symbol_name", "start_line",
-                        name="uq_chunk_identity"),
+        UniqueConstraint(
+            "installation_id",
+            "repo_name",
+            "generation",
+            "file_path",
+            "symbol_name",
+            "start_line",
+            name="uq_chunk_identity_gen",
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True)
 
     installation_id: int = Field(index=True)
     repo_name: str = Field(index=True)
+    generation: str = Field(index=False)
 
     file_path: str
     symbol_name: str
@@ -36,10 +44,18 @@ class CodeChunkModel(SQLModel, table=True):
     )
 
     @classmethod
-    def from_parsed(cls, chunk: CodeChunk, *, repo_name: str, installation_id: int) -> "CodeChunkModel":
+    def from_parsed(
+        cls,
+        chunk: CodeChunk,
+        *,
+        repo_name: str,
+        installation_id: int,
+        generation: str,
+    ) -> "CodeChunkModel":
         return cls(
             installation_id=installation_id,
             repo_name=repo_name,
+            generation=generation,
             file_path=chunk.file_path,
             symbol_name=chunk.symbol_name,
             symbol_type=chunk.symbol_type,
@@ -51,6 +67,22 @@ class CodeChunkModel(SQLModel, table=True):
             docstring=chunk.docstring,
             parent_class=chunk.parent_class,
         )
+
+
+class RepoIndexState(SQLModel, table=True):
+    __tablename__ = "repo_index_state"
+    __table_args__ = (
+        UniqueConstraint(
+            "installation_id",
+            "repo_name",
+            name="uq_repo_index_state",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    installation_id: int = Field(index=True)
+    repo_name: str
+    active_generation: str
 
 
 class CodeChunkEmbedding(SQLModel, table=True):

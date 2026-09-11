@@ -23,14 +23,19 @@ class Settings(BaseSettings):
     rate_limit_agent_ask_window_seconds: int = 600
     rate_limit_repository_ingest_requests: int = 2
     rate_limit_repository_ingest_window_seconds: int = 3600
+    ingest_max_tarball_bytes: int = Field(default=200 * 1024 * 1024, gt=0)
+    ingest_max_extracted_bytes: int = Field(default=1024 * 1024 * 1024, gt=0)
+    ingest_max_archive_entries: int = Field(default=100_000, gt=0)
+    ingest_wave_chunks: int = Field(default=256, gt=0)
+    ingest_max_chunks: int = Field(default=25_000, gt=0)
     rate_limit_repository_search_requests: int = 60
     rate_limit_repository_search_window_seconds: int = 60
     rate_limit_journey_create_requests: int = 5
     rate_limit_journey_create_window_seconds: int = 3600
     cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
-    run_worker: bool = True
+    run_worker: bool = False
     worker_poll_interval: float = Field(default=1.5, gt=0)
-    worker_lease_timeout: float = Field(default=1800, gt=0)
+    worker_lease_timeout: float = Field(default=600, gt=0)
     worker_max_attempts: int = Field(default=3, gt=0)
     model_config = SettingsConfigDict(env_file=".env")
 

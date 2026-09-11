@@ -16,9 +16,9 @@ Built for new hires, OSS contributors, and anyone who's opened a repo and though
 The core indexing and hybrid-search pipeline is **built and tuned**. A LangGraph ReAct
 agent can answer natural-language questions about an ingested repo, grounded in retrieved
 code chunks. Phase 2 now has the full guided-tour path: a Plan → Retrieve → Draft →
-Review generator, a durable Postgres-backed job queue, polling/list APIs, authenticated
-direct browser calls, the `/generate` polling page, the `/tours` library, and the
-`/tours/{id}` reader UI.
+Review generator, a durable shared Postgres job queue for ingestion and tours,
+polling/cancellation/list APIs, authenticated direct browser calls, the `/generate`
+polling page, the `/tours` library, and the `/tours/{id}` reader UI.
 
 What works today:
 
@@ -26,7 +26,7 @@ What works today:
 | Layer                                       | Status                                                    |
 | ------------------------------------------- | --------------------------------------------------------- |
 | GitHub App + Clerk auth                     | ✅ wired end-to-end                                        |
-| Repo ingest (clone → parse → embed → index) | ✅ Python, JS, TS/TSX                                      |
+| Repo ingest (snapshot → parse → embed → publish) | ✅ queued, bounded Python/JS/TS/TSX indexing          |
 | Hybrid retrieval (pgvector + FTS + RRF)     | ✅ shipped stack (exp1–5)                                  |
 | Retrieval eval harness                      | ✅ 20-question FastAPI golden set                          |
 | Agent smoke eval                            | ✅ live agent + citation validity checks                   |
@@ -34,7 +34,7 @@ What works today:
 | LLM-as-judge tour eval                      | ✅ faithfulness/relevance/completeness/ordering + baseline |
 | ReAct Q&A agent                             | ✅ `/explore` + `/api/v1/agent/ask`                        |
 | Guided tour generation                      | ✅ backend pipeline + jobs/API + frontend flow             |
-| Durable tour-job execution                  | ✅ Postgres claims, leases, retries, and stale recovery     |
+| Durable background-job execution            | ✅ shared Postgres queue, leases, retries, and cancellation |
 | Direct browser API access                   | ✅ Clerk JWT calls from React pages to FastAPI              |
 | Per-user API rate limiting                  | ✅ PostgreSQL fixed windows on costly POST routes           |
 | Clerk account-deletion webhook cleanup      | ✅ idempotent, transactional local-data cleanup             |
@@ -93,13 +93,13 @@ flowchart TB
   subgraph backend [Backend — FastAPI]
     API["/api/v1/* — Clerk JWT verification"]
     GH[GitHub App API]
-    Ingest[Ingest pipeline]
+    Ingest["Ingest pipeline<br/>snapshot → staged waves → publish"]
     Parser[tree-sitter parser]
     Embed[OpenAI embeddings]
     Search[Hybrid search — pgvector + FTS + RRF]
     Agent[LangGraph ReAct agent]
-    Journeys["/api/v1/journeys — jobs + polling"]
-    Worker["Tour worker<br/>claim + lease recovery"]
+    JobAPIs["Ingest + journey job APIs<br/>enqueue · poll · cancel · list"]
+    Worker["Shared worker<br/>claim + lease recovery"]
     TourGraph["Tour graph<br/>Plan → Retrieve → Draft → Review"]
     Limits["Per-user fixed-window rate limits"]
   end
@@ -107,7 +107,7 @@ flowchart TB
   subgraph data [Postgres + pgvector]
     Chunks[(code_chunks)]
     Vectors[(code_chunk_embeddings)]
-    Jobs[(tour_jobs)]
+    Jobs[(jobs)]
     Counters[(rate_limits)]
   end
 
@@ -123,16 +123,17 @@ flowchart TB
   API --> GH
   API --> Limits
   Limits --> Agent
-  Limits --> Ingest
   Limits --> Search
-  Limits -->|create| Journeys
-  API -->|poll/list| Journeys
+  Limits -->|enqueue| JobAPIs
+  API -->|poll/cancel/list| JobAPIs
   Limits --> Counters
+  Ingest --> GH
   Ingest --> Parser --> Embed --> Chunks
   Embed --> Vectors
   Agent --> Search
-  Journeys --> Jobs
+  JobAPIs --> Jobs
   Worker -->|"FOR UPDATE SKIP LOCKED"| Jobs
+  Worker --> Ingest
   Worker --> TourGraph
   TourGraph --> Search
   Search --> Chunks
@@ -185,12 +186,21 @@ cp .env.example .env   # fill in secrets
 uv sync
 uv run fastapi dev app/main.py --port 8000
 
-# 3. Frontend
+# 3. Worker (in a second terminal)
+cd Backend
+uv run python -m app.worker
+
+# 4. Frontend
 cd ../Frontend
 cp .env.example .env.local
 npm install
 npm run dev            # http://localhost:3000
 ```
+
+Instead of the standalone worker command, you can run the supervised Compose worker
+from the repository root with `docker compose --profile worker up -d worker`. With
+`RUN_WORKER=false` by default, ingestion and tour jobs remain queued unless either
+worker option is running.
 
 The defaults expect the frontend at `http://localhost:3000` and FastAPI at
 `http://127.0.0.1:8000`. Browser origins are matched exactly: if you open the frontend
@@ -212,14 +222,16 @@ Clerk and GitHub cannot reach localhost webhooks directly; use a tunnel such as 
 or Cloudflare Tunnel when testing deletion flows locally. The install route currently
 targets the `camino-onboarder` GitHub App slug until `GITHUB_APP_SLUG` is configurable.
 
-When upgrading an existing local database, startup adds the nullable `githubUserId`
-compatibility column plus the tour-worker lease columns (`claimed_at`, `claimed_by`,
-`attempts`) and pending-job index. Reconnect GitHub from **Settings** to populate
-`githubUserId` on a legacy connection.
+Startup creates missing tables and provisions pgvector, custom indexes, and the
+`live_code_chunks` view, but it does not migrate an older schema. A database created
+before the shared `jobs` table and generation-based indexes must be recreated for local
+development or upgraded with an explicit migration; `SQLModel.metadata.create_all()`
+does not add, rename, or remove columns on existing tables.
 
 1. Sign in → open **Settings** → connect or manage the GitHub App.
-2. Open **Explore** → select a repo → **Process** (ingest). The repo must be indexed
-  before Q&A or tour generation can use it.
+2. Open **Explore** → select a repo → **Process**. Camino queues ingestion and polls its
+  status; **Stop** cancels an active job. The repo must be indexed before Q&A or tour
+  generation can use it.
 3. Ask a question in **Explore**, or go back to **Home** to generate a tour:
   select the processed repo, enter a topic such as "authentication flow", and click
    **Generate tour**.
@@ -245,14 +257,15 @@ npm run lint
 ```
 
 Backend coverage includes API/auth behavior, webhook cleanup, rate limiting, retrieval,
-tour generation, eval helpers, worker lifecycle, and startup schema compatibility. When
+staged ingestion, tour generation/cancellation, shared-job lifecycle, and startup schema
+provisioning. When
 the docker-compose Postgres is available, the same command automatically creates and
 drops a uniquely named `camino_worker_test_*` scratch database for real concurrent
 claim/recovery tests without deleting a pre-existing database; it never truncates
 `onboarding_agent`, and rejects a `TEST_DATABASE_URL` whose database name matches
 `DATABASE_URL` (even through a different host alias). Frontend Vitest coverage exercises
-the shared direct-to-FastAPI client, including authenticated JSON requests and
-FastAPI/non-JSON error responses.
+the shared direct-to-FastAPI client plus queued-ingestion polling, timeout,
+cancellation, and error behavior.
 
 ---
 
@@ -292,9 +305,12 @@ npx cdk deploy CaminoBackendStack
 - Generate database credentials in Secrets Manager and inject application secrets into
   the task definition. Never put secret values in CDK source, CloudFormation outputs, or
   committed environment files.
-- Tour jobs are claimed from Postgres, so more than one Fargate task can share the
-  queue. A killed worker leaves its current job in `generating` until lease recovery
-  requeues or fails it; size `WORKER_LEASE_TIMEOUT` above the longest generation.
+- Run the API and `python -m app.worker` as separate services, with `RUN_WORKER=false`
+  on the API and an always-restart policy on the worker.
+- Jobs are claimed from Postgres, so more than one worker can share the queue. A killed
+  worker leaves its current job in `running` until the 600-second lease expires and
+  recovery requeues or fails it. Active jobs renew their lease every one-third of the
+  lease timeout (200 seconds with the defaults), independently of empty-queue polling.
 
 ### Deployment gates
 
@@ -306,8 +322,9 @@ Before the first backend deployment:
 - [ ] Add `/health` and readiness behavior for the ALB.
 - [ ] Add Alembic and commit an initial schema migration, including `vector` and indexes.
 - [ ] Run migrations as a one-off ECS task; do not run schema creation in every web task.
-- [ ] Add explicit LLM timeouts and repository-size/file-count limits.
-- [x] Recover tour jobs left `generating` after a task restart with expiring leases,
+- [~] Add explicit LLM timeouts and a parsed source-file-count limit; compressed
+  tarballs, expanded archive bytes, archive entries, and generated chunks are capped.
+- [x] Recover shared jobs left `running` after a task restart with expiring leases,
   bounded attempts, and periodic requeue/fail sweeps.
 - [ ] Add CI checks for backend tests, frontend lint/build, CDK synthesis, and migrations.
 - [ ] Run a deployed smoke test: auth → GitHub connect → ingest → ask → generate tour.
@@ -364,7 +381,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 
 ### Indexing & retrieval (the engine)
 
-- [x] Repo cloning via GitHub App (shallow tree walk, source-file filter)
+- [x] GitHub tarball snapshots with bounded download/extraction and source-file filtering
 - [x] tree-sitter parsing → symbol-level chunks (path, name, type, lines, source, signature/docstring)
 - [x] Postgres + pgvector: chunks table (HNSW embedding col + tsvector col)
 - [x] Embedding pipeline (OpenAI `text-embedding-3-small`, enriched NL headers)
@@ -380,8 +397,8 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [x] Tour graph — Plan → Retrieve → Draft → Review with bounded repair loop
 - [x] Structured tour artifact (steps: title, explanation, snippet, path, lines, "why")
 - [x] Deterministic grounding — snippets/path/lines extracted from retrieved chunks
-- [x] Journey persistence/API — `tour_jobs`, `POST /api/v1/journeys`, `GET /{id}`, `GET ?repo=`
-- [x] Durable execution — atomic Postgres claims, worker leases/retries, and stale-job recovery
+- [x] Journey persistence/API — shared `jobs`, create/poll/list/cancel journey routes
+- [x] Durable execution — atomic Postgres claims, worker leases/retries, cancellation, and stale-job recovery
 
 - [~] Model routing — single model (`gpt-4o-mini`); no cheap/expensive split yet
 
@@ -400,7 +417,9 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [~] Account deletion — Clerk provides authenticated typed confirmation and identity deletion, and the verified webhook removes local data; external GitHub App revocation remains
 - [ ] Shareable tour URLs
 
-- [~] Error handling — tour flow (`/`, `/generate`, `/tours`, `/tours/{id}`) surfaces expired-session (401/403), not-found (404), and backend errors distinctly; still needs clone-fail / repo-too-large / bad-LLM paths
+- [~] Error handling — ingestion and tour flows surface terminal cancellation, expired
+  sessions, backend errors, and ten-minute polling timeouts; still needs richer
+  clone-fail / repo-too-large / bad-LLM paths
 
 - [x] Direct browser → FastAPI integration — shared `backendFetch`/`ApiError`, six migrated pages, JWT-derived identity, CORS, and only the three GitHub OAuth redirect routes retained in Next.js
 - [x] Frontend API client tests — Vitest covers successful JSON requests, authenticated POST bodies, FastAPI `detail` errors, and malformed/non-JSON error responses

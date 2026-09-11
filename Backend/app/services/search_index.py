@@ -16,7 +16,10 @@ the raw symbol via the ``simple`` config for exact-symbol lookups.
 from __future__ import annotations
 
 from sqlalchemy import text
-from sqlmodel import Session
+from sqlmodel import Session, select
+
+from app.models.code import RepoIndexState
+from app.services.jobs import normalize_repository_name
 
 # Split camelCase, PascalCase, ACRONYMBoundaries, and snake_case into words.
 # Two passes: lower/digit -> Upper ("getOpenapi" -> "get Openapi") and
@@ -51,7 +54,7 @@ def populate_search_vector_sql(*, only_null: bool) -> str:
 
     ``only_null=True`` is for first-time ingest (don't clobber existing rows);
     ``only_null=False`` recomputes every row (used by the FTS rebuild path).
-    Bind params: ``repo_name`` and ``installation_id``.
+    Bind params: ``repo_name``, ``installation_id``, and ``generation``.
     """
     guard = "AND search_vector IS NULL" if only_null else ""
     return f"""
@@ -59,6 +62,7 @@ def populate_search_vector_sql(*, only_null: bool) -> str:
         SET search_vector = {SEARCH_VECTOR_EXPR}
         WHERE repo_name = :repo_name
           AND installation_id = :installation_id
+          AND generation = :generation
           {guard}
     """
 
@@ -66,10 +70,22 @@ def populate_search_vector_sql(*, only_null: bool) -> str:
 def rebuild_search_vector(
     session: Session, repo_name: str, installation_id: int
 ) -> None:
-    """Recompute ``search_vector`` for all chunks of a repo (no re-embedding)."""
+    """Recompute ``search_vector`` for a repo's live generation."""
+    repo_name = normalize_repository_name(repo_name)
+    generation = session.exec(
+        select(RepoIndexState.active_generation).where(
+            RepoIndexState.repo_name == repo_name,
+            RepoIndexState.installation_id == installation_id,
+        )
+    ).one_or_none()
+    if generation is None:
+        return
+
     session.execute(
         text(populate_search_vector_sql(only_null=False)).bindparams(
-            repo_name=repo_name, installation_id=installation_id
+            repo_name=repo_name,
+            installation_id=installation_id,
+            generation=generation,
         )
     )
     session.commit()

@@ -13,7 +13,9 @@ def _normalized_sql(connection: MagicMock) -> list[str]:
     ]
 
 
-async def test_lifespan_migrates_github_user_id_for_existing_tables():
+async def test_lifespan_provisions_schema_extras():
+    """create_all() cannot express the view or the composite/partial/vector
+    indexes, so lifespan must create them explicitly on every startup."""
     connection = MagicMock()
     mock_engine = MagicMock()
     mock_engine.connect.return_value.__enter__.return_value = connection
@@ -27,25 +29,31 @@ async def test_lifespan_migrates_github_user_id_for_existing_tables():
 
     create_all.assert_called_once_with(mock_engine)
     statements = _normalized_sql(connection)
+    assert "CREATE EXTENSION IF NOT EXISTS vector" in statements
     assert (
-        'ALTER TABLE githubconnections ADD COLUMN IF NOT EXISTS "githubUserId" INTEGER'
+        "CREATE INDEX IF NOT EXISTS ix_chunks_repo_generation "
+        "ON code_chunks (installation_id, repo_name, generation)"
+        in statements
+    )
+    assert any("CREATE OR REPLACE VIEW live_code_chunks AS" in sql for sql in statements)
+    assert (
+        'CREATE INDEX IF NOT EXISTS ix_jobs_pending '
+        'ON jobs ("createdAt") WHERE status = \'pending\''
         in statements
     )
     assert (
-        'CREATE INDEX IF NOT EXISTS "ix_githubconnections_githubUserId" '
-        'ON githubconnections ("githubUserId")'
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_active_dedupe "
+        "ON jobs (dedupe_key) WHERE status IN ('pending', 'running') "
+        "AND dedupe_key IS NOT NULL"
         in statements
     )
-    assert "ALTER TABLE tour_jobs ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ" in statements
-    assert "ALTER TABLE tour_jobs ADD COLUMN IF NOT EXISTS claimed_by TEXT" in statements
-    assert (
-        "ALTER TABLE tour_jobs ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0"
-        in statements
+    assert any(
+        "CREATE INDEX IF NOT EXISTS ix_embeddings_hnsw" in sql
+        for sql in statements
     )
-    assert (
-        'CREATE INDEX IF NOT EXISTS ix_tour_jobs_pending '
-        'ON tour_jobs ("createdAt") WHERE status = \'pending\''
-        in statements
+    assert any(
+        "CREATE INDEX IF NOT EXISTS ix_chunks_search" in sql
+        for sql in statements
     )
 
 

@@ -4,6 +4,7 @@ const BACKEND_URL =
 type BackendFetchOptions = {
   method?: "GET" | "POST";
   body?: unknown;
+  signal?: AbortSignal;
 };
 
 export class ApiError extends Error {
@@ -31,6 +32,7 @@ export async function backendFetch<T>(
     },
     body:
       options.body === undefined ? undefined : JSON.stringify(options.body),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
   });
 
   if (!response.ok) {

@@ -1,10 +1,10 @@
 from sqlalchemy import delete
 from sqlmodel import Session, select
 
-from app.models.code import CodeChunkModel
+from app.models.code import CodeChunkModel, RepoIndexState
 from app.models.github_connection import GithubConnections
+from app.models.job import Job
 from app.models.rate_limit import RateLimit
-from app.models.tour_job import TourJob
 from app.models.user import User
 
 
@@ -27,11 +27,24 @@ def delete_local_account_data(session: Session, user_id: str) -> None:
             ).all()
         )
 
-        session.exec(delete(TourJob).where(TourJob.userId == user_id))
-        session.exec(delete(RateLimit).where(RateLimit.user_id == user_id))
+        if installation_ids:
+            session.exec(
+                select(GithubConnections.id)
+                .where(
+                    GithubConnections.installationId.in_(installation_ids)
+                )
+                .order_by(
+                    GithubConnections.installationId,
+                    GithubConnections.id,
+                )
+                .with_for_update()
+            ).all()
+
         session.exec(
             delete(GithubConnections).where(GithubConnections.userId == user_id)
         )
+        session.exec(delete(Job).where(Job.userId == user_id))
+        session.exec(delete(RateLimit).where(RateLimit.user_id == user_id))
         session.exec(delete(User).where(User.id == user_id))
 
         if installation_ids:
@@ -47,8 +60,22 @@ def delete_local_account_data(session: Session, user_id: str) -> None:
             )
             if unreferenced_installation_ids:
                 session.exec(
+                    delete(Job).where(
+                        Job.installation_id.in_(
+                            unreferenced_installation_ids
+                        )
+                    )
+                )
+                session.exec(
                     delete(CodeChunkModel).where(
                         CodeChunkModel.installation_id.in_(
+                            unreferenced_installation_ids
+                        )
+                    )
+                )
+                session.exec(
+                    delete(RepoIndexState).where(
+                        RepoIndexState.installation_id.in_(
                             unreferenced_installation_ids
                         )
                     )

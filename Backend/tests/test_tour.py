@@ -1,12 +1,19 @@
-import pytest
+import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from app.models.tour import TourArtifact, TourStep
 from app.services.search import SearchResult
 from app.tour.extract import _clamp_span, build_grounded_step
 from app.tour.graph import _format_candidates, _pick_chunk
 from app.tour.review import coverage_issues, review_tour
-from app.tour.runner import TourGenerationError, generate_tour
+from app.tour.runner import (
+    TourGenerationCancelledError,
+    TourGenerationError,
+    generate_tour,
+)
 from app.tour.schemas import DraftedStep, PlannedStep, TourPlan
 from eval.structural.validate import CheckKind
 
@@ -224,6 +231,44 @@ async def test_generate_tour_raises_when_no_candidates(mock_chat, mock_search):
             repo_name="org/repo",
             installation_id=1,
         )
+
+
+@pytest.mark.asyncio
+@patch("app.tour.runner.CANCELLATION_POLL_INTERVAL", 0.001)
+@patch("app.tour.runner.ChatOpenAI")
+async def test_generate_tour_cancels_in_flight_graph(mock_chat):
+    started = asyncio.Event()
+    invocation_cancelled = asyncio.Event()
+    cancel_event = threading.Event()
+
+    class _BlockingStructured:
+        async def ainvoke(self, _messages):
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                invocation_cancelled.set()
+                raise
+
+    llm = MagicMock()
+    llm.with_structured_output.return_value = _BlockingStructured()
+    mock_chat.return_value = llm
+
+    task = asyncio.create_task(
+        generate_tour(
+            MagicMock(),
+            topic="topic",
+            repo_name="org/repo",
+            installation_id=1,
+            cancel_event=cancel_event,
+        )
+    )
+    await started.wait()
+    cancel_event.set()
+
+    with pytest.raises(TourGenerationCancelledError, match="cancelled"):
+        await asyncio.wait_for(task, timeout=1)
+    assert invocation_cancelled.is_set()
 
 
 # ── coverage checks ─────────────────────────────────────────────────

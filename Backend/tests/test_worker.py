@@ -1,12 +1,25 @@
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+import threading
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
+import pytest
 from sqlalchemy import exc
 
+from app.models.job import JobStatus, JobType
 from app.models.tour import TourArtifact, TourStep
-from app.models.tour_job import TourJobStatus
-from app.tour import TourGenerationError
-from app.worker import run_job, worker_loop
+from app.services.repository_ingestion import (
+    IngestionCancelledError,
+    PermanentRepositoryIngestionError,
+    TransientRepositoryIngestionError,
+)
+from app.tour import TourGenerationCancelledError, TourGenerationError
+from app.worker import (
+    _ensure_ingestion_owned,
+    _requeue_or_fail,
+    _stage_owned_ingestion_completion,
+    run_job,
+    worker_loop,
+)
 
 WORKER_ID = "test-host:1:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
@@ -35,8 +48,10 @@ def _job(**overrides) -> MagicMock:
     job.topic = "authentication flow"
     job.repo_name = "org/repo"
     job.installation_id = 12345
-    job.status = TourJobStatus.GENERATING
+    job.job_type = JobType.TOUR
+    job.status = JobStatus.RUNNING
     job.claimed_by = WORKER_ID
+    job.attempts = 1
     job.artifact = None
     job.error = None
     for key, value in overrides.items():
@@ -70,9 +85,11 @@ async def test_run_job_success_persists_artifact():
         session,
         1,
         WORKER_ID,
-        status=TourJobStatus.COMPLETE,
+        status=JobStatus.COMPLETE,
         artifact=artifact.model_dump(),
         error=None,
+        claimed_at=None,
+        claimed_by=None,
     )
 
 
@@ -118,7 +135,7 @@ async def test_run_job_unexpected_exception_does_not_propagate():
         await run_job(1, WORKER_ID)
 
     mark_failed.assert_called_once_with(
-        session, 1, WORKER_ID, "Internal generation error"
+        session, 1, WORKER_ID, "Internal tour error"
     )
 
 
@@ -126,7 +143,7 @@ async def test_run_job_commit_failure_falls_back_to_failed():
     job = _job()
     session = MagicMock()
     session.get.return_value = job
-    mark_failed = MagicMock(return_value=True)
+    requeue = MagicMock(return_value=True)
 
     with (
         _patch_session(session),
@@ -135,13 +152,16 @@ async def test_run_job_commit_failure_falls_back_to_failed():
             "app.worker._update_owned_job",
             side_effect=exc.SQLAlchemyError("persist failed"),
         ),
-        patch("app.worker._mark_failed", mark_failed),
+        patch("app.worker._requeue_or_fail", requeue),
         patch("app.worker.generate_tour", new_callable=AsyncMock, return_value=_artifact()),
     ):
         await run_job(1, WORKER_ID)
 
-    mark_failed.assert_called_once_with(
-        session, 1, WORKER_ID, "Failed to persist generated tour"
+    requeue.assert_called_once()
+    assert requeue.call_args.args == (session, 1, WORKER_ID)
+    assert requeue.call_args.kwargs["attempts"] == 1
+    assert requeue.call_args.kwargs["error"].startswith(
+        "Failed to persist job result:"
     )
 
 
@@ -182,6 +202,28 @@ async def test_run_job_renews_lease_during_generation():
     assert renew.call_count >= 2
 
 
+async def test_run_job_heartbeat_interval_is_based_only_on_lease_timeout():
+    job = _job()
+    session = MagicMock()
+    session.get.return_value = job
+    heartbeat = MagicMock()
+
+    with (
+        _patch_session(session),
+        patch("app.worker.settings.worker_lease_timeout", 600),
+        patch("app.worker.settings.worker_poll_interval", 0.01),
+        patch("app.worker.threading.Thread", return_value=heartbeat) as thread,
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._update_owned_job", return_value=True),
+        patch("app.worker.generate_tour", new_callable=AsyncMock, return_value=_artifact()),
+    ):
+        await run_job(1, WORKER_ID)
+
+    assert thread.call_args.kwargs["kwargs"]["interval"] == 200
+    heartbeat.start.assert_called_once_with()
+    heartbeat.join.assert_called_once_with()
+
+
 async def test_run_job_discards_result_after_lease_is_lost():
     job = _job()
     session = MagicMock()
@@ -202,6 +244,317 @@ async def test_run_job_discards_result_after_lease_is_lost():
         await run_job(1, WORKER_ID)
 
     persist.assert_not_called()
+
+
+async def test_run_job_propagates_lease_loss_to_running_tour():
+    job = _job()
+    session = MagicMock()
+    session.get.return_value = job
+    persist = MagicMock(return_value=True)
+    mark_failed = MagicMock(return_value=True)
+    requeue = MagicMock(return_value=True)
+
+    async def _cancel_when_lease_is_lost(*_args, cancel_event, **_kwargs):
+        while not cancel_event.is_set():
+            await asyncio.sleep(0.001)
+        raise TourGenerationCancelledError("Tour generation was cancelled")
+
+    with (
+        _patch_session(session),
+        patch("app.worker.settings.worker_lease_timeout", 0.03),
+        patch("app.worker._renew_job_lease", side_effect=[True, False]),
+        patch("app.worker._update_owned_job", persist),
+        patch("app.worker._mark_failed", mark_failed),
+        patch("app.worker._requeue_or_fail", requeue),
+        patch("app.worker.generate_tour", side_effect=_cancel_when_lease_is_lost),
+    ):
+        await asyncio.wait_for(run_job(1, WORKER_ID), timeout=1)
+
+    persist.assert_not_called()
+    mark_failed.assert_not_called()
+    requeue.assert_not_called()
+    session.rollback.assert_called()
+
+
+async def test_run_job_dispatches_repository_ingestion():
+    job = _job(job_type=JobType.REPOSITORY_INGEST, topic=None)
+    session = MagicMock()
+    session.get.return_value = job
+    result = {"chunks_inserted": 12, "embeddings_created": 12}
+    persist = MagicMock(return_value=True)
+    stage_completion = MagicMock()
+
+    async def ingest_and_finalize(
+        _session,
+        *,
+        finalize_publication,
+        **_kwargs,
+    ):
+        finalize_publication(_session, result)
+        return result
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._update_owned_job", persist),
+        patch(
+            "app.worker._stage_owned_ingestion_completion",
+            stage_completion,
+        ),
+        patch(
+            "app.worker.ingest_repository",
+            side_effect=ingest_and_finalize,
+        ) as ingest,
+        patch("app.worker.generate_tour", new_callable=AsyncMock) as generate,
+    ):
+        await run_job(1, WORKER_ID)
+
+    ingest.assert_awaited_once_with(
+        session,
+        repo_name="org/repo",
+        installation_id=12345,
+        ensure_owned=ANY,
+        finalize_publication=ANY,
+    )
+    generate.assert_not_awaited()
+    stage_completion.assert_called_once_with(
+        session,
+        job_id=1,
+        worker_id=WORKER_ID,
+        artifact=result,
+    )
+    persist.assert_not_called()
+
+
+def test_ingestion_completion_is_staged_without_a_separate_commit():
+    session = MagicMock()
+    session.execute.return_value.rowcount = 1
+    artifact = {"chunks_inserted": 12, "embeddings_created": 12}
+
+    _stage_owned_ingestion_completion(
+        session,
+        job_id=1,
+        worker_id=WORKER_ID,
+        artifact=artifact,
+    )
+
+    statement = session.execute.call_args.args[0]
+    compiled = str(statement.compile(compile_kwargs={"literal_binds": False}))
+    assert "jobs.id = :id_1" in compiled
+    assert "jobs.status = :status_1" in compiled
+    assert "jobs.claimed_by = :claimed_by_1" in compiled
+    session.commit.assert_not_called()
+
+
+async def test_run_job_requeues_transient_ingestion_failure():
+    job = _job(job_type=JobType.REPOSITORY_INGEST, topic=None, attempts=2)
+    session = MagicMock()
+    session.get.return_value = job
+    requeue = MagicMock(return_value=True)
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._requeue_or_fail", requeue),
+        patch(
+            "app.worker.ingest_repository",
+            new_callable=AsyncMock,
+            side_effect=TransientRepositoryIngestionError("GitHub unavailable"),
+        ),
+    ):
+        await run_job(1, WORKER_ID)
+
+    requeue.assert_called_once_with(
+        session,
+        1,
+        WORKER_ID,
+        attempts=2,
+        error="GitHub unavailable",
+    )
+
+
+async def test_run_job_fails_permanent_ingestion_failure():
+    job = _job(job_type=JobType.REPOSITORY_INGEST, topic=None)
+    session = MagicMock()
+    session.get.return_value = job
+    mark_failed = MagicMock(return_value=True)
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._mark_failed", mark_failed),
+        patch(
+            "app.worker.ingest_repository",
+            new_callable=AsyncMock,
+            side_effect=PermanentRepositoryIngestionError("Repository not found"),
+        ),
+    ):
+        await run_job(1, WORKER_ID)
+
+    mark_failed.assert_called_once_with(
+        session,
+        1,
+        WORKER_ID,
+        "Repository not found",
+    )
+
+
+async def test_run_job_discards_cancelled_ingestion_without_updating_job():
+    job = _job(job_type=JobType.REPOSITORY_INGEST, topic=None)
+    session = MagicMock()
+    session.get.return_value = job
+    persist = MagicMock(return_value=True)
+    mark_failed = MagicMock(return_value=True)
+    requeue = MagicMock(return_value=True)
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._update_owned_job", persist),
+        patch("app.worker._mark_failed", mark_failed),
+        patch("app.worker._requeue_or_fail", requeue),
+        patch(
+            "app.worker.ingest_repository",
+            new_callable=AsyncMock,
+            side_effect=IngestionCancelledError("lease lost"),
+        ),
+    ):
+        await run_job(1, WORKER_ID)
+
+    persist.assert_not_called()
+    mark_failed.assert_not_called()
+    requeue.assert_not_called()
+    session.rollback.assert_called()
+
+
+def test_ingestion_ownership_guard_locks_owned_job_and_checks_installation():
+    session = MagicMock()
+    session.execute.return_value.scalar_one_or_none.return_value = 1
+
+    _ensure_ingestion_owned(
+        session,
+        job_id=1,
+        worker_id=WORKER_ID,
+        installation_id=12345,
+        lease_lost=threading.Event(),
+    )
+
+    installation_sql = " ".join(
+        str(session.execute.call_args_list[0].args[0]).split()
+    )
+    job_sql = " ".join(str(session.execute.call_args_list[1].args[0]).split())
+    assert "j.status = 'running'" in job_sql
+    assert "j.claimed_by = :worker_id" in job_sql
+    assert "FOR SHARE OF j" in job_sql
+    assert "FROM githubconnections" in installation_sql
+    assert '"installationId" = :installation_id' in installation_sql
+    assert "FOR SHARE" in installation_sql
+
+
+def test_ingestion_ownership_guard_rejects_missing_or_reclaimed_job():
+    session = MagicMock()
+    existing_installation = MagicMock()
+    existing_installation.scalar_one_or_none.return_value = 1
+    missing_job = MagicMock()
+    missing_job.scalar_one_or_none.return_value = None
+    session.execute.side_effect = [existing_installation, missing_job]
+
+    with pytest.raises(IngestionCancelledError, match="no longer active"):
+        _ensure_ingestion_owned(
+            session,
+            job_id=1,
+            worker_id=WORKER_ID,
+            installation_id=12345,
+            lease_lost=threading.Event(),
+        )
+
+    assert session.execute.call_count == 2
+
+
+def test_ingestion_ownership_guard_rejects_missing_installation():
+    session = MagicMock()
+    session.execute.return_value.scalar_one_or_none.return_value = None
+
+    with pytest.raises(
+        IngestionCancelledError,
+        match="installation is no longer active",
+    ):
+        _ensure_ingestion_owned(
+            session,
+            job_id=1,
+            worker_id=WORKER_ID,
+            installation_id=12345,
+            lease_lost=threading.Event(),
+        )
+
+    assert session.execute.call_count == 1
+
+
+def test_ingestion_ownership_guard_rejects_known_lease_loss_without_query():
+    session = MagicMock()
+    lease_lost = threading.Event()
+    lease_lost.set()
+
+    with pytest.raises(IngestionCancelledError, match="lease was lost"):
+        _ensure_ingestion_owned(
+            session,
+            job_id=1,
+            worker_id=WORKER_ID,
+            installation_id=12345,
+            lease_lost=lease_lost,
+        )
+
+    session.execute.assert_not_called()
+
+
+def test_retryable_failure_requeues_before_attempt_limit():
+    session = MagicMock()
+    with (
+        patch("app.worker.settings.worker_max_attempts", 3),
+        patch("app.worker._update_owned_job", return_value=True) as update,
+    ):
+        assert _requeue_or_fail(
+            session,
+            1,
+            WORKER_ID,
+            attempts=2,
+            error="temporary outage",
+        )
+
+    update.assert_called_once_with(
+        session,
+        1,
+        WORKER_ID,
+        status=JobStatus.PENDING,
+        error="temporary outage",
+        claimed_at=None,
+        claimed_by=None,
+    )
+
+
+def test_retryable_failure_fails_at_attempt_limit():
+    session = MagicMock()
+    with (
+        patch("app.worker.settings.worker_max_attempts", 3),
+        patch("app.worker._update_owned_job", return_value=True) as update,
+    ):
+        assert _requeue_or_fail(
+            session,
+            1,
+            WORKER_ID,
+            attempts=3,
+            error="temporary outage",
+        )
+
+    update.assert_called_once_with(
+        session,
+        1,
+        WORKER_ID,
+        status=JobStatus.FAILED,
+        error="Exceeded max attempts: temporary outage",
+        claimed_at=None,
+        claimed_by=None,
+    )
 
 
 async def test_worker_loop_sleeps_when_idle_and_stops_promptly():

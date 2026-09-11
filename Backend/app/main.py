@@ -12,9 +12,9 @@ from app.db import engine
 
 from app.api import agent, github, journeys, repositories
 from app.webhooks import clerk, github as github_webhook
-from app.models.code import CodeChunkModel, CodeChunkEmbedding
+from app.models.code import CodeChunkEmbedding, CodeChunkModel, RepoIndexState
+from app.models.job import Job
 from app.models.rate_limit import RateLimit
-from app.models.tour_job import TourJob
 from app.worker import WORKER_SHUTDOWN_TIMEOUT, worker_loop
 
 logger = logging.getLogger(__name__)
@@ -28,32 +28,29 @@ async def lifespan(app: FastAPI):
     SQLModel.metadata.create_all(engine)
 
     with engine.connect() as conn:
-        # create_all() does not evolve existing tables. Keep this nullable for
-        # legacy connections because a numeric GitHub user ID cannot be derived
-        # reliably from the data already stored; reconnecting fills it in.
+        # create_all() cannot express these: the composite, partial, HNSW, and
+        # GIN indexes, and the view that exposes only live index generations.
         conn.execute(text("""
-            ALTER TABLE githubconnections
-            ADD COLUMN IF NOT EXISTS "githubUserId" INTEGER
+            CREATE INDEX IF NOT EXISTS ix_chunks_repo_generation
+            ON code_chunks (installation_id, repo_name, generation)
         """))
         conn.execute(text("""
-            CREATE INDEX IF NOT EXISTS "ix_githubconnections_githubUserId"
-            ON githubconnections ("githubUserId")
+            CREATE OR REPLACE VIEW live_code_chunks AS
+            SELECT c.*
+            FROM code_chunks c
+            JOIN repo_index_state s
+              ON s.installation_id = c.installation_id
+             AND s.repo_name = c.repo_name
+             AND s.active_generation = c.generation
         """))
         conn.execute(text("""
-            ALTER TABLE tour_jobs
-            ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ
+            CREATE INDEX IF NOT EXISTS ix_jobs_pending
+            ON jobs ("createdAt") WHERE status = 'pending'
         """))
         conn.execute(text("""
-            ALTER TABLE tour_jobs
-            ADD COLUMN IF NOT EXISTS claimed_by TEXT
-        """))
-        conn.execute(text("""
-            ALTER TABLE tour_jobs
-            ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0
-        """))
-        conn.execute(text("""
-            CREATE INDEX IF NOT EXISTS ix_tour_jobs_pending
-            ON tour_jobs ("createdAt") WHERE status = 'pending'
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_active_dedupe
+            ON jobs (dedupe_key)
+            WHERE status IN ('pending', 'running') AND dedupe_key IS NOT NULL
         """))
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS ix_embeddings_hnsw
@@ -70,7 +67,7 @@ async def lifespan(app: FastAPI):
     worker_task = None
     if settings.run_worker:
         worker_task = asyncio.create_task(
-            worker_loop(stop_event), name="tour-job-worker"
+            worker_loop(stop_event), name="job-worker"
         )
     app.state.worker_stop_event = stop_event
     app.state.worker_task = worker_task
@@ -82,7 +79,7 @@ async def lifespan(app: FastAPI):
         try:
             await asyncio.wait_for(worker_task, timeout=WORKER_SHUTDOWN_TIMEOUT)
         except TimeoutError:
-            logger.warning("tour worker did not stop in time; cancelling")
+            logger.warning("job worker did not stop in time; cancelling")
             worker_task.cancel()
             try:
                 await worker_task
