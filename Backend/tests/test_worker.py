@@ -202,6 +202,28 @@ async def test_run_job_renews_lease_during_generation():
     assert renew.call_count >= 2
 
 
+async def test_run_job_heartbeat_interval_is_based_only_on_lease_timeout():
+    job = _job()
+    session = MagicMock()
+    session.get.return_value = job
+    heartbeat = MagicMock()
+
+    with (
+        _patch_session(session),
+        patch("app.worker.settings.worker_lease_timeout", 600),
+        patch("app.worker.settings.worker_poll_interval", 0.01),
+        patch("app.worker.threading.Thread", return_value=heartbeat) as thread,
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._update_owned_job", return_value=True),
+        patch("app.worker.generate_tour", new_callable=AsyncMock, return_value=_artifact()),
+    ):
+        await run_job(1, WORKER_ID)
+
+    assert thread.call_args.kwargs["kwargs"]["interval"] == 200
+    heartbeat.start.assert_called_once_with()
+    heartbeat.join.assert_called_once_with()
+
+
 async def test_run_job_discards_result_after_lease_is_lost():
     job = _job()
     session = MagicMock()

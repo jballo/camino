@@ -413,10 +413,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
             kwargs={
                 "job_id": job_id,
                 "worker_id": worker_id,
-                "interval": min(
-                    settings.worker_lease_timeout / 3,
-                    settings.worker_poll_interval,
-                ),
+                "interval": settings.worker_lease_timeout / 3,
                 "stop_event": heartbeat_stop,
                 "lease_lost": lease_lost,
             },

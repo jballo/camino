@@ -87,8 +87,8 @@ configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
 | `RATE_LIMIT_REPOSITORY_SEARCH_REQUESTS` / `RATE_LIMIT_REPOSITORY_SEARCH_WINDOW_SECONDS` | Direct-search limit (default 60 requests / 60 seconds) |
 | `RATE_LIMIT_JOURNEY_CREATE_REQUESTS` / `RATE_LIMIT_JOURNEY_CREATE_WINDOW_SECONDS` | Journey creation limit (default 5 requests / 3600 seconds) |
 | `RUN_WORKER` | Start the shared job worker in the API process (default `false`; use only for an explicitly combined deployment) |
-| `WORKER_POLL_INTERVAL` | Seconds between empty-queue polls and maximum heartbeat interval (default `1.5`) |
-| `WORKER_LEASE_TIMEOUT` | Seconds before a dead worker's claim is stale (default `600`) |
+| `WORKER_POLL_INTERVAL` | Seconds between empty-queue polls (default `1.5`) |
+| `WORKER_LEASE_TIMEOUT` | Seconds before a dead worker's claim is stale (default `600`); active jobs renew their lease every one-third of this interval |
 | `WORKER_MAX_ATTEMPTS` | Claims allowed before stale recovery marks a job failed (default `3`) |
 
 Generate `ENCRYPTION_KEY` with:
@@ -194,9 +194,9 @@ and binds every retrieval and hydration query to it.
 
 Multiple processes can share the queue. If a worker dies, lease recovery returns its
 row to `pending` (or marks it `failed` at the attempt limit) after
-`WORKER_LEASE_TIMEOUT`. The heartbeat runs at the smaller of one-third of the lease
-timeout and `WORKER_POLL_INTERVAL` (1.5 seconds with the defaults); stale recovery scans
-every 60 seconds.
+`WORKER_LEASE_TIMEOUT`. The heartbeat runs every one-third of the lease timeout
+(200 seconds with the defaults), independently of empty-queue polling; stale recovery
+scans every 60 seconds.
 
 Pending or running jobs can be cancelled through their type-specific API endpoint.
 Cancellation changes the row to `cancelled` and clears its claim. The heartbeat then

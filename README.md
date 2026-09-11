@@ -309,8 +309,8 @@ npx cdk deploy CaminoBackendStack
   on the API and an always-restart policy on the worker.
 - Jobs are claimed from Postgres, so more than one worker can share the queue. A killed
   worker leaves its current job in `running` until the 600-second lease expires and
-  recovery requeues or fails it. The heartbeat interval is the smaller of one-third of
-  the lease timeout and `WORKER_POLL_INTERVAL` (1.5 seconds with the defaults).
+  recovery requeues or fails it. Active jobs renew their lease every one-third of the
+  lease timeout (200 seconds with the defaults), independently of empty-queue polling.
 
 ### Deployment gates
 
