@@ -16,7 +16,9 @@ path.
 ## Files
 
 - `golden_dataset.json` — 20 questions, each with hand-labeled relevant `(file, symbol)` chunks. Pinned to FastAPI `0.115.6`.
-- `ingest_local.py` — ingests a local repo through the **real** production pipeline (same parser, embeddings, and `search_vector` SQL as `app/api/repositories.py`), reading from disk instead of GitHub.
+- `ingest_local.py` — ingests a local fixture with the production parser, embedding
+  text, `search_vector` SQL, generation tags, and active-generation registry. It reads
+  from disk and bypasses the GitHub snapshot and shared job queue.
 - `run_eval.py` — runs each question through `hybrid_search` and reports hit rate, recall@k, precision@k, MRR.
 - `run_agent_smoke_eval.py` — runs the live LangGraph agent on selected golden questions, parses answer citations, and validates citation paths/line ranges.
 - `run_structural_eval.py` — runs tour JSON fixtures through schema + repo-grounding validators.
@@ -34,6 +36,10 @@ path.
 The FastAPI source is not committed. `ingest_local.py` auto-clones the pinned
 version into `.data/` (gitignored) on first run, so reproduction is two commands:
 
+Start the API once against a fresh database before running the harnesses so startup
+creates `repo_index_state`, `live_code_chunks`, and the required indexes. The API does
+not need to remain running during eval commands.
+
 ```bash
 cd Backend
 uv run python -m eval.ingest_local      # clones FastAPI 0.115.6 if missing, then ingests
@@ -41,6 +47,12 @@ uv run python -m eval.run_eval --k 5 --limit 10
 ```
 
 Both steps need network: ingest calls OpenAI to embed chunks, eval embeds each query.
+Eval preflight checks and retrieval read through `live_code_chunks`, so only the
+generation published by `ingest_local.py` is visible to the harnesses.
+Unlike production ingestion, which bounds memory with `INGEST_WAVE_CHUNKS` and commits
+staged waves, the fixture ingester builds the fixture in memory and replaces/publishes
+it in one transaction. It exercises generation-scoped search, but not worker leases,
+wave retries, or cancellation.
 
 Use `--no-clone` to ingest an already-present path only. To re-fetch a clean
 fixture, delete `eval/.data/` and re-run.

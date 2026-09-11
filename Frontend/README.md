@@ -5,17 +5,27 @@ backend directly with Clerk session JWTs. Next.js routes remain only for the Git
 install and OAuth redirect flow.
 
 **What works:** sign-in, account deletion through Clerk's UserButton, GitHub connection
-management, repo ingest/reprocess, processed-repo status, ask-the-codebase on `/explore`,
-and guided-tour generation from the home page through `/generate` and `/tours/{id}`.
-Costly backend POST routes are protected by per-user rate limits.
+management, queued repo ingest/reprocess with progress and cancellation,
+processed-repo status, ask-the-codebase on `/explore`, and guided-tour generation from
+the home page through `/generate` and `/tours/{id}`. Costly backend POST routes are
+protected by per-user rate limits.
 
 **Tour flow:** select a repo, make sure it has been processed, enter a topic, and click
 **Generate tour**. The app creates a journey through FastAPI, polls progress on
-`/generate?id=...`, then opens the completed reader at `/tours/{id}`.
+`/generate?id=...`, then opens the completed reader at `/tours/{id}`. Active jobs can
+be stopped from the progress page. Polling pauses after ten minutes with options to
+start another ten-minute polling window or leave; the server job continues unless the
+user explicitly selects **Stop generating**.
 
-Every tour page distinguishes an expired Clerk session (401/403) from a missing tour
-(404) and other backend errors, so users see an actionable message instead of one
-generic failure.
+Tour pages distinguish an expired Clerk session (401/403), a missing tour (404),
+cancelled and failed jobs, polling timeouts, and other backend errors, so users see an
+actionable message instead of one generic failure. The tours library also retains
+cancelled jobs with a distinct status badge.
+
+**Repository processing:** both the home-page repository dialog and `/explore` enqueue
+an ingestion job, poll it every two seconds, and show its queue/running state. Polling
+times out after ten minutes without cancelling the backend job. **Stop** sends a
+server-side cancellation request before stopping browser polling.
 
 **Account deletion:** open Clerk's UserButton, select **Security**, and choose
 **Delete account**. Clerk requires the user to type `Delete account`, deletes the Clerk
@@ -38,7 +48,13 @@ npm install
 npm run dev        # http://localhost:3000
 ```
 
-The backend must be running on port 8000 (see [Backend/README.md](../Backend/README.md)).
+The backend must be running on port 8000, and a shared job worker must be running for
+repository processing and tour generation (see
+[Backend/README.md](../Backend/README.md)). Start it with
+`uv run python -m app.worker` from `Backend/`, or use
+`docker compose --profile worker up -d worker` from the repository root. Without a
+worker, jobs remain queued and the UI eventually reports its ten-minute polling timeout.
+
 Open the frontend at `http://localhost:3000` to match the backend's default
 `CORS_ORIGINS`; `http://127.0.0.1:3000` is a different origin and must be added
 explicitly.
@@ -83,8 +99,9 @@ the Fargate backend is deployed:
 - Make production builds fail when required URLs or credentials are absent instead of
   falling back to localhost.
 
-After deployment, smoke-test the complete browser flow: sign in, connect GitHub, list
-and ingest a repository, ask a question, generate a tour, and poll it to completion.
+After deploying both the API and worker, smoke-test the complete browser flow: sign in,
+connect GitHub, list and ingest a repository, ask a question, generate a tour, and poll
+it to completion.
 
 ---
 
@@ -92,11 +109,11 @@ and ingest a repository, ask a question, generate a tour, and poll it to complet
 
 | Route | Status | Description |
 |---|---|---|
-| `/` | live | Guided tour request form — select repo, enter topic, create journey |
-| `/explore` | **live** | Select repo → ingest → ask questions with cited sources |
+| `/` | live | Guided tour request form plus queued repository processing dialog |
+| `/explore` | **live** | Select repo → queue/poll/cancel ingest → ask questions with cited sources |
 | `/sign-in` | live | Clerk sign-in |
-| `/generate` | live | Poll journey status and redirect to reader on completion |
-| `/tours` | live | Library of the user's generated tours |
+| `/generate` | live | Poll, time out, resume, or cancel generation; redirect on completion |
+| `/tours` | live | Library with queued, generating, ready, failed, and cancelled statuses |
 | `/tours/{id}` | live | Guided tour reader with TOC, explanations, why callouts, and snippets |
 | `/settings` | live | GitHub connection status plus install/manage-repositories entry point |
 
@@ -125,6 +142,14 @@ The only remaining Next.js API routes are:
   and redirects back to settings.
 - `/api/github/setup`, which handles GitHub App installation updates.
 
+`src/lib/repository-ingestion.ts` owns the asynchronous ingestion client:
+`POST /api/v1/repositories/ingest` enqueues work, `GET .../ingest/{id}` polls status,
+and `POST .../ingest/{id}/cancel` stops an owned active job. Its poller refreshes the
+Clerk token on every request, reports `pending`, `running`, `complete`, `failed`, and
+`cancelled`, and treats client aborts separately from ten-minute timeouts. The
+`/generate` page follows the same two-second/ten-minute polling cadence for journeys
+and cancels through `POST /api/v1/journeys/{id}/cancel`.
+
 Completed tour artifacts render directly from the backend `TourArtifact` shape:
 `title`, `topic`, `repo_name`, and ordered `steps` with file paths, line ranges,
 snippets, explanations, and optional "why" notes.
@@ -141,3 +166,5 @@ npm run lint
 
 `src/lib/api.test.ts` covers successful JSON responses, bearer-token requests, JSON
 POST bodies, FastAPI `detail` errors, unexpected error shapes, and non-JSON responses.
+`src/lib/repository-ingestion.test.ts` covers enqueue/cancel requests, status updates,
+terminal states, token refresh, polling timeouts, and abort behavior.
