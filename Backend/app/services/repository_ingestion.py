@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable, Iterator
 from uuid import uuid4
 
-from github import Auth, GithubException, GithubIntegration
+from github import GithubException
 import requests
 from requests.exceptions import RequestException
 from sqlalchemy import exc, text
@@ -27,6 +27,7 @@ from app.services.embeddings import (
     embed_all,
 )
 from app.services.jobs import normalize_repository_name
+from app.services.github_app import github_integration, installation_access_token
 from app.services.parser import (
     LANGUAGES,
     MAX_FILE_BYTES,
@@ -59,11 +60,16 @@ _PUBLISH_GENERATION_SQL = text("""
     INSERT INTO repo_index_state (
         installation_id,
         repo_name,
-        active_generation
+        active_generation,
+        indexed_sha,
+        indexed_at
     )
-    VALUES (:installation_id, :repo_name, :generation)
+    VALUES (:installation_id, :repo_name, :generation, :commit_sha, now())
     ON CONFLICT (installation_id, repo_name)
-    DO UPDATE SET active_generation = EXCLUDED.active_generation
+    DO UPDATE SET
+        active_generation = EXCLUDED.active_generation,
+        indexed_sha = EXCLUDED.indexed_sha,
+        indexed_at = EXCLUDED.indexed_at
 """)
 
 _DELETE_OLD_GENERATIONS_SQL = text("""
@@ -206,11 +212,7 @@ def _prepare_repository(
     temp_path: Path,
 ) -> tuple[Path, str]:
     """Synchronously verify access, download, and extract one snapshot."""
-    app_auth = Auth.AppAuth(
-        app_id=settings.gh_app_id,
-        private_key=settings.gh_app_private_key,
-    )
-    integration = GithubIntegration(auth=app_auth)
+    integration = github_integration()
     installation = integration.get_app_installation(installation_id)
     normalized_repo_name = normalize_repository_name(repo_name)
     repo_selected = next(
@@ -224,7 +226,10 @@ def _prepare_repository(
     if repo_selected is None:
         raise PermanentRepositoryIngestionError("Repository not found")
 
-    token = integration.get_access_token(installation_id).token
+    token = installation_access_token(
+        installation_id,
+        integration=integration,
+    )
     archive_path = temp_path / "repo.tar.gz"
     _download_tarball(repo_selected.full_name, token, archive_path)
     return _extract_tarball(archive_path, temp_path)
@@ -424,6 +429,7 @@ async def ingest_repository(
             "repo_name": repo_name,
             "installation_id": installation_id,
             "generation": generation,
+            "commit_sha": commit_sha,
         }
         session.execute(_PUBLISH_GENERATION_SQL, publish_params)
         session.execute(_DELETE_OLD_GENERATIONS_SQL, publish_params)

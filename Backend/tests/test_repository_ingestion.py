@@ -57,7 +57,7 @@ def _github(installation):
     integration.get_access_token.return_value.token = "installation-token"
     return (
         patch(
-            "app.services.repository_ingestion.GithubIntegration",
+            "app.services.repository_ingestion.github_integration",
             return_value=integration,
         ),
         integration,
@@ -131,6 +131,8 @@ async def test_ingestion_stages_publishes_and_returns_counts():
     executed_sql = [" ".join(str(call.args[0]).split()) for call in session.execute.call_args_list]
     assert executed_sql[0].startswith("DELETE FROM code_chunks AS c")
     assert "INSERT INTO repo_index_state" in executed_sql[-2]
+    publish_params = session.execute.call_args_list[-2].args[1]
+    assert publish_params["commit_sha"] == "deadbeef"
     assert executed_sql[-1].startswith("DELETE FROM code_chunks")
     finalize_publication.assert_called_once_with(session, result)
     session.rollback.assert_not_called()
@@ -183,7 +185,7 @@ async def test_download_extract_and_parse_run_outside_the_event_loop_thread():
 
     with (
         patch(
-            "app.services.repository_ingestion.GithubIntegration",
+            "app.services.repository_ingestion.github_integration",
             return_value=integration,
         ),
         patch(

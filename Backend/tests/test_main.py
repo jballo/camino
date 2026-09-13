@@ -31,6 +31,16 @@ async def test_lifespan_provisions_schema_extras():
     statements = _normalized_sql(connection)
     assert "CREATE EXTENSION IF NOT EXISTS vector" in statements
     assert (
+        "ALTER TABLE repo_index_state "
+        "ADD COLUMN IF NOT EXISTS indexed_sha VARCHAR"
+        in statements
+    )
+    assert (
+        "ALTER TABLE repo_index_state "
+        "ADD COLUMN IF NOT EXISTS indexed_at TIMESTAMP WITH TIME ZONE"
+        in statements
+    )
+    assert (
         "CREATE INDEX IF NOT EXISTS ix_chunks_repo_generation "
         "ON code_chunks (installation_id, repo_name, generation)"
         in statements

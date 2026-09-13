@@ -30,6 +30,15 @@ async def lifespan(app: FastAPI):
     with engine.connect() as conn:
         # create_all() cannot express these: the composite, partial, HNSW, and
         # GIN indexes, and the view that exposes only live index generations.
+        # It also cannot add columns to tables created by older releases.
+        conn.execute(text("""
+            ALTER TABLE repo_index_state
+            ADD COLUMN IF NOT EXISTS indexed_sha VARCHAR
+        """))
+        conn.execute(text("""
+            ALTER TABLE repo_index_state
+            ADD COLUMN IF NOT EXISTS indexed_at TIMESTAMP WITH TIME ZONE
+        """))
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS ix_chunks_repo_generation
             ON code_chunks (installation_id, repo_name, generation)

@@ -1,5 +1,7 @@
 """Structured tour artifact — the contract for guided-tour generation."""
 
+import datetime as dt
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -19,8 +21,18 @@ class TourStep(BaseModel):
         return self
 
 
+class TourFreshness(BaseModel):
+    indexed_sha: str | None = None
+    head_sha: str | None = None
+    commits_behind: int | None = Field(default=None, ge=0)
+    measurable: bool
+    changed_cited_files: list[str] = Field(default_factory=list)
+    checked_at: dt.datetime
+
+
 class TourArtifact(BaseModel):
     title: str = Field(min_length=1)
     topic: str = Field(min_length=1)
     repo_name: str = Field(min_length=1)
     steps: list[TourStep] = Field(min_length=1)
+    freshness: TourFreshness | None = None

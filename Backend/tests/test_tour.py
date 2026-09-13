@@ -37,6 +37,28 @@ def _result(chunk_id: int, **overrides) -> SearchResult:
     return SearchResult(**base)
 
 
+def test_artifact_schema_accepts_missing_freshness():
+    artifact = TourArtifact.model_validate(
+        {
+            "title": "Legacy tour",
+            "topic": "authentication",
+            "repo_name": "org/repo",
+            "steps": [
+                {
+                    "title": "Login",
+                    "explanation": "Entry point.",
+                    "file_path": "auth.py",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "snippet": "def login(): ...",
+                }
+            ],
+        }
+    )
+
+    assert artifact.freshness is None
+
+
 # ── _clamp_span (pure logic) ────────────────────────────────────────
 
 def test_clamp_span_maps_absolute_to_relative():

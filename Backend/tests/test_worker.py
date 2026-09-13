@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
@@ -7,6 +8,7 @@ from sqlalchemy import exc
 
 from app.models.job import JobStatus, JobType
 from app.models.tour import TourArtifact, TourStep
+from app.services.staleness import ChangedFile, HeadComparison
 from app.services.repository_ingestion import (
     IngestionCancelledError,
     PermanentRepositoryIngestionError,
@@ -91,6 +93,65 @@ async def test_run_job_success_persists_artifact():
         claimed_at=None,
         claimed_by=None,
     )
+
+
+async def test_run_job_stamps_tour_freshness():
+    job = _job()
+    session = MagicMock()
+    session.get.return_value = job
+    session.exec.return_value.one_or_none.return_value = SimpleNamespace(
+        indexed_sha="abc123456789"
+    )
+    artifact = _artifact()
+    persist = MagicMock(return_value=True)
+    comparison = HeadComparison(
+        head_sha="def987654321",
+        commits_behind=3,
+        changed_files=(
+            ChangedFile("auth.py", "modified"),
+            ChangedFile("unrelated.py", "added"),
+        ),
+        measurable=True,
+    )
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._update_owned_job", persist),
+        patch("app.worker.compare_to_head", return_value=comparison) as compare,
+        patch("app.worker.generate_tour", new_callable=AsyncMock, return_value=artifact),
+    ):
+        await run_job(1, WORKER_ID)
+
+    compare.assert_called_once_with("org/repo", 12345, "abc123456789")
+    persisted = persist.call_args.kwargs["artifact"]
+    assert persisted["freshness"]["indexed_sha"] == "abc123456789"
+    assert persisted["freshness"]["head_sha"] == "def987654321"
+    assert persisted["freshness"]["commits_behind"] == 3
+    assert persisted["freshness"]["changed_cited_files"] == ["auth.py"]
+    assert isinstance(persisted["freshness"]["checked_at"], str)
+
+
+async def test_run_job_tolerates_freshness_compare_failure():
+    job = _job()
+    session = MagicMock()
+    session.get.return_value = job
+    session.exec.return_value.one_or_none.return_value = SimpleNamespace(
+        indexed_sha="abc123"
+    )
+    persist = MagicMock(return_value=True)
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._update_owned_job", persist),
+        patch("app.worker.compare_to_head", side_effect=RuntimeError("GitHub down")),
+        patch("app.worker.generate_tour", new_callable=AsyncMock, return_value=_artifact()),
+    ):
+        await run_job(1, WORKER_ID)
+
+    assert persist.call_args.kwargs["status"] == JobStatus.COMPLETE
+    assert persist.call_args.kwargs["artifact"]["freshness"] is None
 
 
 async def test_run_job_tour_generation_error_marks_failed():

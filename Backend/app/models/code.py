@@ -1,7 +1,8 @@
+import datetime as dt
 from typing import Any
 from pgvector.sqlalchemy import Vector
 from sqlmodel import Column, Field, SQLModel
-from sqlalchemy import Integer, UniqueConstraint, ForeignKey
+from sqlalchemy import DateTime, Integer, UniqueConstraint, ForeignKey
 from sqlalchemy.dialects.postgresql import TSVECTOR
 
 from app.services.parser import CodeChunk
@@ -83,6 +84,11 @@ class RepoIndexState(SQLModel, table=True):
     installation_id: int = Field(index=True)
     repo_name: str
     active_generation: str
+    indexed_sha: str | None = None
+    indexed_at: dt.datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
 
 
 class CodeChunkEmbedding(SQLModel, table=True):

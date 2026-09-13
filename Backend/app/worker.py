@@ -8,6 +8,7 @@ dedicated ``python -m app.worker``) cannot double-run the same job.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 import os
 import signal
@@ -24,17 +25,20 @@ from openai import (
 )
 from requests.exceptions import RequestException
 from sqlalchemy import exc, text, update
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.config import settings
 from app.db import engine
 from app.models.job import Job, JobStatus, JobType
+from app.models.code import RepoIndexState
+from app.models.tour import TourArtifact, TourFreshness
 from app.services.repository_ingestion import (
     IngestionCancelledError,
     PermanentRepositoryIngestionError,
     TransientRepositoryIngestionError,
     ingest_repository,
 )
+from app.services.staleness import compare_to_head
 from app.tour import (
     TourGenerationCancelledError,
     TourGenerationError,
@@ -367,6 +371,68 @@ _TRANSIENT_JOB_ERRORS = (
 )
 
 
+async def _stamp_tour_freshness(
+    session: Session,
+    artifact: TourArtifact,
+    *,
+    repo_name: str,
+    installation_id: int,
+) -> None:
+    """Attach a best-effort generation-time freshness disclosure."""
+    try:
+        state = session.exec(
+            select(RepoIndexState).where(
+                RepoIndexState.installation_id == installation_id,
+                RepoIndexState.repo_name == repo_name,
+            )
+        ).one_or_none()
+    except exc.SQLAlchemyError:
+        session.rollback()
+        artifact.freshness = None
+        logger.exception(
+            "tour freshness check failed | repo=%r reason=index_state_read",
+            repo_name,
+        )
+        return
+
+    try:
+        indexed_sha = state.indexed_sha if state is not None else None
+        if not isinstance(indexed_sha, str) or not indexed_sha:
+            logger.info(
+                "tour freshness unknown | repo=%r reason=missing_indexed_sha",
+                repo_name,
+            )
+            return
+
+        comparison = await asyncio.to_thread(
+            compare_to_head,
+            repo_name,
+            installation_id,
+            indexed_sha,
+        )
+        cited_paths = {step.file_path.lstrip("./") for step in artifact.steps}
+        changed_cited_files = sorted(
+            {
+                changed.path
+                for changed in comparison.changed_files
+                if changed.path.lstrip("./") in cited_paths
+            }
+        )
+        artifact.freshness = TourFreshness(
+            indexed_sha=indexed_sha,
+            head_sha=comparison.head_sha,
+            commits_behind=comparison.commits_behind,
+            measurable=comparison.measurable,
+            changed_cited_files=changed_cited_files,
+            checked_at=dt.datetime.now(dt.UTC),
+        )
+    except Exception:
+        # Freshness is disclosure metadata, never a reason to retry an otherwise
+        # valid and expensive tour generation.
+        artifact.freshness = None
+        logger.exception("tour freshness check failed | repo=%r", repo_name)
+
+
 async def run_job(job_id: int, worker_id: str) -> None:
     """Dispatch one claimed job and persist its outcome. Never raises."""
     with Session(engine) as session:
@@ -438,7 +504,13 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     installation_id=installation_id,
                     cancel_event=lease_lost,
                 )
-                result = artifact.model_dump()
+                await _stamp_tour_freshness(
+                    session,
+                    artifact,
+                    repo_name=repo_name,
+                    installation_id=installation_id,
+                )
+                result = artifact.model_dump(mode="json")
             elif job_type == JobType.REPOSITORY_INGEST:
                 def ensure_ingestion_owned(guard_session: Session) -> None:
                     _ensure_ingestion_owned(
