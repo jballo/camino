@@ -159,6 +159,11 @@ REPOSITORY_SEARCH_RATE_LIMIT = fixed_window_rate_limit(
     request_limit=settings.rate_limit_repository_search_requests,
     window_seconds=settings.rate_limit_repository_search_window_seconds,
 )
+CONTRIBUTION_TARGET_RATE_LIMIT = fixed_window_rate_limit(
+    "contribution_target",
+    request_limit=settings.rate_limit_contribution_target_requests,
+    window_seconds=settings.rate_limit_contribution_target_window_seconds,
+)
 JOURNEY_CREATE_RATE_LIMIT = fixed_window_rate_limit(
     "journey_create",
     request_limit=settings.rate_limit_journey_create_requests,

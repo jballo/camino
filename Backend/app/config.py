@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     ingest_max_chunks: int = Field(default=25_000, gt=0)
     rate_limit_repository_search_requests: int = 60
     rate_limit_repository_search_window_seconds: int = 60
+    rate_limit_contribution_target_requests: int = 60
+    rate_limit_contribution_target_window_seconds: int = 60
     rate_limit_journey_create_requests: int = 5
     rate_limit_journey_create_window_seconds: int = 3600
     cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:3000"]

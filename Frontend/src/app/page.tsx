@@ -18,6 +18,7 @@ import {
 import { useAuth } from "@clerk/nextjs";
 
 import { ApiError, backendFetch } from "@/lib/api";
+import { fetchContributionTarget } from "@/lib/contribution-target";
 import {
   cancelRepositoryIngestion,
   enqueueRepositoryIngestion,
@@ -26,6 +27,7 @@ import {
   pollRepositoryIngestion,
 } from "@/lib/repository-ingestion";
 import type { RepositoryIngestionJob } from "@/types/repository-ingestion";
+import type { ContributionTarget } from "@/types/contribution-target";
 
 const EXAMPLE_TOPICS = [
   "Authentication flow",
@@ -56,6 +58,11 @@ export default function Home() {
     RepositoryIngestionJob | undefined
   >(undefined);
   const ingestionAbortRef = useRef<AbortController | null>(null);
+  const [contributionTarget, setContributionTarget] = useState<
+    ContributionTarget | undefined
+  >(undefined);
+  const [contributionTargetLoading, setContributionTargetLoading] =
+    useState(false);
 
   const canSubmit = prompt.trim().length > 0 && !!repoSelected && !submitting;
 
@@ -235,6 +242,48 @@ export default function Home() {
     [],
   );
 
+  useEffect(() => {
+    setContributionTarget(undefined);
+    if (!repoSelected) {
+      setContributionTargetLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setContributionTargetLoading(true);
+    void fetchContributionTarget(repoSelected, getToken, controller.signal)
+      .then(setContributionTarget)
+      .catch((error: unknown) => {
+        if (!isAbortError(error)) {
+          console.log("Failed to discover contribution target: ", error);
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setContributionTargetLoading(false);
+      });
+
+    return () => controller.abort();
+  }, [getToken, repoSelected]);
+
+  const contributionTargetSource = (() => {
+    if (!contributionTarget?.targetBranch) return undefined;
+    if (
+      contributionTarget.source === "contributing_doc" ||
+      contributionTarget.source === "pr_template"
+    ) {
+      return contributionTarget.evidencePath
+        ? `from ${contributionTarget.evidencePath}`
+        : "from repository guidance";
+    }
+    if (contributionTarget.source === "merged_prs") {
+      return "based on recent merged PRs";
+    }
+    if (contributionTarget.source === "default_branch") {
+      return "repository default branch";
+    }
+    return undefined;
+  })();
+
   return (
     <div className="flex flex-col justify-center items-center w-full min-h-full">
       <div className="flex flex-col justify-center items-center w-full max-w-[760px] px-8 py-12 gap-3">
@@ -262,6 +311,24 @@ export default function Home() {
                   <span className="text-muted-foreground">Select a repository…</span>
                 )}
               </Button>
+              {repoSelected && contributionTargetLoading && (
+                <div
+                  aria-label="Discovering contribution target"
+                  className="h-4 w-64 animate-pulse rounded bg-accent"
+                />
+              )}
+              {repoSelected &&
+                !contributionTargetLoading &&
+                contributionTarget?.targetBranch &&
+                contributionTargetSource && (
+                  <div className="rounded-md border border-border bg-accent/30 px-3 py-2 text-xs text-muted-foreground">
+                    PRs to this project target{" "}
+                    <code className="font-mono text-foreground">
+                      {contributionTarget.targetBranch}
+                    </code>{" "}
+                    — {contributionTargetSource}
+                  </div>
+                )}
             </div>
 
             {/* Step 2: topic */}

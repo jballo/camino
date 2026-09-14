@@ -1,10 +1,12 @@
+import asyncio
+import datetime as dt
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from github import Auth, GithubException, GithubIntegration
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import exc, text
 from sqlmodel import Session, select
-
-import logging
 
 from app.config import settings
 from app.services.embeddings import EmbeddingError
@@ -12,6 +14,7 @@ from app.db import SessionDep
 from app.models.github_connection import GithubConnections
 from app.models.job import Job, JobStatus, JobType
 from app.rate_limit import (
+    CONTRIBUTION_TARGET_RATE_LIMIT,
     REPOSITORY_INGEST_RATE_LIMIT,
     REPOSITORY_SEARCH_RATE_LIMIT,
 )
@@ -23,6 +26,7 @@ from app.services.jobs import (
     repository_ingest_dedupe_key,
 )
 from app.services.search import hybrid_search
+from app.services.target_branch import resolve_target_branch
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +74,16 @@ class RepoIngestStatusResponse(BaseModel):
     attempts: int
     result: dict | None = None
     error: str | None = None
+
+
+class ContributionTargetResponse(BaseModel):
+    repoName: str
+    targetBranch: str | None
+    source: str
+    evidence: str | None
+    evidencePath: str | None
+    defaultBranch: str | None
+    checkedAt: dt.datetime
 
 
 def _get_authorized_repository_ingest(
@@ -194,6 +208,43 @@ async def list_processed_repositories(
         raise HTTPException(status_code=500, detail="Database error")
 
     return [{"repo_name": repo_name, "chunk_count": count} for repo_name, count in rows]
+
+
+@router.get(
+    "/contribution-target",
+    dependencies=[Depends(CONTRIBUTION_TARGET_RATE_LIMIT)],
+)
+async def get_contribution_target(
+    repoName: str,
+    session: SessionDep,
+    auth_user_id: str = Depends(get_authenticated_user_id),
+) -> ContributionTargetResponse:
+    try:
+        statement = select(GithubConnections).where(
+            GithubConnections.userId == auth_user_id
+        )
+        result = session.exec(statement)
+        gh_connection = result.one()
+    except exc.NoResultFound:
+        raise HTTPException(status_code=404, detail="Github connection not found for user")
+    except exc.OperationalError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+
+    resolution = await asyncio.to_thread(
+        resolve_target_branch,
+        repoName,
+        gh_connection.installationId,
+    )
+    return ContributionTargetResponse(
+        repoName=repoName,
+        targetBranch=resolution.branch,
+        source=resolution.source,
+        evidence=resolution.evidence,
+        evidencePath=resolution.evidence_path,
+        defaultBranch=resolution.default_branch,
+        checkedAt=resolution.checked_at,
+    )
 
 
 @router.post("/ingest", dependencies=[Depends(REPOSITORY_INGEST_RATE_LIMIT)])
