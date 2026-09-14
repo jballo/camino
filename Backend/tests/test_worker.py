@@ -49,6 +49,7 @@ def _job(**overrides) -> MagicMock:
     job.id = 1
     job.topic = "authentication flow"
     job.repo_name = "org/repo"
+    job.ref = "main"
     job.installation_id = 12345
     job.job_type = JobType.TOUR
     job.status = JobStatus.RUNNING
@@ -123,7 +124,7 @@ async def test_run_job_stamps_tour_freshness():
     ):
         await run_job(1, WORKER_ID)
 
-    compare.assert_called_once_with("org/repo", 12345, "abc123456789")
+    compare.assert_called_once_with("org/repo", 12345, "abc123456789", "main")
     persisted = persist.call_args.kwargs["artifact"]
     assert persisted["freshness"]["indexed_sha"] == "abc123456789"
     assert persisted["freshness"]["head_sha"] == "def987654321"
@@ -174,6 +175,26 @@ async def test_run_job_tour_generation_error_marks_failed():
 
     mark_failed.assert_called_once_with(
         session, 1, WORKER_ID, "no grounded steps"
+    )
+
+
+async def test_run_job_fails_legacy_row_without_ref_permanently():
+    job = _job(ref=None)
+    session = MagicMock()
+    session.get.return_value = job
+    mark_failed = MagicMock(return_value=True)
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._mark_failed", mark_failed),
+        patch("app.worker.generate_tour", new_callable=AsyncMock) as generate,
+    ):
+        await run_job(1, WORKER_ID)
+
+    generate.assert_not_awaited()
+    mark_failed.assert_called_once_with(
+        session, 1, WORKER_ID, "Legacy job is missing its repository ref"
     )
 
 
@@ -374,6 +395,7 @@ async def test_run_job_dispatches_repository_ingestion():
         session,
         repo_name="org/repo",
         installation_id=12345,
+        ref="main",
         ensure_owned=ANY,
         finalize_publication=ANY,
     )

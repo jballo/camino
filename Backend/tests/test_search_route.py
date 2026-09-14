@@ -8,6 +8,7 @@ from app.db import get_session
 from app.rate_limit import REPOSITORY_SEARCH_RATE_LIMIT
 from app.security import get_authenticated_user_id
 from app.services.search import SearchResult
+from app.models.code import RepoIndexState
 
 
 def _noop_verify():
@@ -19,9 +20,14 @@ FAKE_INSTALLATION_ID = 12345
 
 def _fake_session():
     session = MagicMock()
-    gh_conn = MagicMock()
-    gh_conn.installationId = FAKE_INSTALLATION_ID
-    session.exec.return_value.one.return_value = gh_conn
+    session.exec.return_value.all.return_value = [
+        RepoIndexState(
+            repo_name="org/repo",
+            ref="main",
+            visibility="public",
+            active_generation="gen-1",
+        )
+    ]
     yield session
 
 

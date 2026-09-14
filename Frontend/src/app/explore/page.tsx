@@ -71,7 +71,9 @@ export default function Explore() {
     RepositoryIngestionJob | undefined
   >(undefined);
   const ingestionAbortRef = useRef<AbortController | null>(null);
-  const [processedMap, setProcessedMap] = useState<Record<string, number>>({});
+  const [processedMap, setProcessedMap] = useState<
+    Record<string, { chunkCount: number; ref: string }>
+  >({});
   const [processedLoading, setProcessedLoading] = useState(false);
 
   const [query, setQuery] = useState("");
@@ -106,11 +108,16 @@ export default function Explore() {
       if (!token) throw new ApiError(401, "Not authenticated");
 
       const result = await backendFetch<
-        { repo_name: string; chunk_count: number }[]
+        { repo_name: string; ref: string; chunk_count: number }[]
       >("/api/v1/repositories/processed", token);
-      const map: Record<string, number> = {};
+      const map: Record<string, { chunkCount: number; ref: string }> = {};
       if (Array.isArray(result)) {
-        for (const row of result) map[row.repo_name] = row.chunk_count;
+        for (const row of result) {
+          map[row.repo_name] = {
+            chunkCount: row.chunk_count,
+            ref: row.ref,
+          };
+        }
       }
       setProcessedMap(map);
     } catch (error) {
@@ -148,12 +155,14 @@ export default function Explore() {
 
         const created = await enqueueRepositoryIngestion(
           repoName,
+          undefined,
           token,
           controller.signal,
         );
         setIngestionJob({
           ...created,
           repoName,
+          ref: null,
           attempts: 0,
           result: null,
           error: null,
@@ -174,7 +183,10 @@ export default function Explore() {
         setIngestResult({ repoName, ...job.result });
         setProcessedMap((prev) => ({
           ...prev,
-          [repoName]: job.result?.chunks_inserted ?? 0,
+          [repoName]: {
+            chunkCount: job.result?.chunks_inserted ?? 0,
+            ref: job.ref ?? "",
+          },
         }));
         void loadProcessed();
       } catch (error) {
@@ -253,7 +265,13 @@ export default function Explore() {
         token,
         {
           method: "POST",
-          body: { question: query, repoName: selectedRepo },
+          body: {
+            question: query,
+            repoName: selectedRepo,
+            ...(processedMap[selectedRepo]?.ref
+              ? { ref: processedMap[selectedRepo].ref }
+              : {}),
+          },
         },
       );
       setAnswer(result);
@@ -263,7 +281,7 @@ export default function Explore() {
     } finally {
       setAsking(false);
     }
-  }, [getToken, selectedRepo, query]);
+  }, [getToken, processedMap, selectedRepo, query]);
 
   return (
     <div className="flex flex-col w-full min-h-full">
@@ -305,7 +323,8 @@ export default function Explore() {
               const isSelected = repo === selectedRepo;
               const isProcessing = repo === processingRepo;
               const isProcessed = repo in processedMap;
-              const chunkCount = processedMap[repo];
+              const processed = processedMap[repo];
+              const chunkCount = processed?.chunkCount;
               const jobStatus = isProcessing ? ingestionJob?.status : undefined;
               return (
                 <div
@@ -347,6 +366,7 @@ export default function Explore() {
                         {typeof chunkCount === "number"
                           ? ` · ${chunkCount} chunks`
                           : ""}
+                        {processed?.ref ? ` · ${processed.ref}` : ""}
                       </span>
                     ) : (
                       <span className="inline-flex items-center gap-1 rounded-full bg-accent px-2 py-0.5 text-xs text-muted-foreground">

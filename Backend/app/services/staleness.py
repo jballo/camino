@@ -96,8 +96,9 @@ def compare_to_head(
     repo_name: str,
     installation_id: int,
     indexed_sha: str | None,
+    ref: str,
 ) -> HeadComparison:
-    """Compare an indexed SHA to GitHub's live default-branch ``HEAD``.
+    """Compare an indexed SHA to the live head of its indexed ref.
 
     GitHub comparison failures are deliberately data, not exceptions: callers
     must be able to publish a tour with an honest unknown-freshness disclosure.
@@ -117,32 +118,8 @@ def compare_to_head(
             "Authorization": f"Bearer {token}",
             "X-GitHub-Api-Version": _GITHUB_API_VERSION,
         }
-        repository_response = requests.get(
-            f"https://api.github.com/repos/{normalized_repo}",
-            headers=headers,
-            timeout=_COMPARE_TIMEOUT_SECONDS,
-        )
-        try:
-            if repository_response.status_code >= 400:
-                logger.warning(
-                    "freshness unmeasurable | repo=%r status=%s "
-                    "reason=repository_lookup_error",
-                    normalized_repo,
-                    repository_response.status_code,
-                )
-                return _unmeasurable()
-            default_branch = repository_response.json().get("default_branch")
-        finally:
-            repository_response.close()
-        if not isinstance(default_branch, str) or not default_branch:
-            logger.warning(
-                "freshness unmeasurable | repo=%r reason=missing_default_branch",
-                normalized_repo,
-            )
-            return _unmeasurable()
-
         base = quote(indexed_sha, safe="")
-        head = quote(default_branch, safe="")
+        head = quote(ref, safe="")
         response = requests.get(
             f"https://api.github.com/repos/{normalized_repo}/compare/{base}...{head}",
             headers=headers,

@@ -24,6 +24,23 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     with engine.connect() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        # The repository index is a disposable cache. Step 3 changes its
+        # identity from (installation, repo) to (repo, ref), so an old-shape
+        # cache is dropped once and rebuilt instead of migrated in place.
+        old_shape = conn.execute(text("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'code_chunks'
+                  AND column_name = 'installation_id'
+            )
+        """)).scalar_one()
+        if old_shape:
+            conn.execute(text("DROP VIEW IF EXISTS live_code_chunks"))
+            conn.execute(text("DROP TABLE IF EXISTS code_chunk_embeddings"))
+            conn.execute(text("DROP TABLE IF EXISTS code_chunks"))
+            conn.execute(text("DROP TABLE IF EXISTS repo_index_state CASCADE"))
         conn.commit()
     SQLModel.metadata.create_all(engine)
 
@@ -31,25 +48,18 @@ async def lifespan(app: FastAPI):
         # create_all() cannot express these: the composite, partial, HNSW, and
         # GIN indexes, and the view that exposes only live index generations.
         # It also cannot add columns to tables created by older releases.
-        conn.execute(text("""
-            ALTER TABLE repo_index_state
-            ADD COLUMN IF NOT EXISTS indexed_sha VARCHAR
-        """))
-        conn.execute(text("""
-            ALTER TABLE repo_index_state
-            ADD COLUMN IF NOT EXISTS indexed_at TIMESTAMP WITH TIME ZONE
-        """))
+        conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS ref VARCHAR"))
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS ix_chunks_repo_generation
-            ON code_chunks (installation_id, repo_name, generation)
+            ON code_chunks (repo_name, ref, generation)
         """))
         conn.execute(text("""
             CREATE OR REPLACE VIEW live_code_chunks AS
             SELECT c.*
             FROM code_chunks c
             JOIN repo_index_state s
-              ON s.installation_id = c.installation_id
-             AND s.repo_name = c.repo_name
+              ON s.repo_name = c.repo_name
+             AND s.ref = c.ref
              AND s.active_generation = c.generation
         """))
         conn.execute(text("""

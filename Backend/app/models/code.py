@@ -12,8 +12,8 @@ class CodeChunkModel(SQLModel, table=True):
     __tablename__ = "code_chunks"
     __table_args__ = (
         UniqueConstraint(
-            "installation_id",
             "repo_name",
+            "ref",
             "generation",
             "file_path",
             "symbol_name",
@@ -24,8 +24,8 @@ class CodeChunkModel(SQLModel, table=True):
 
     id: int | None = Field(default=None, primary_key=True)
 
-    installation_id: int = Field(index=True)
     repo_name: str = Field(index=True)
+    ref: str = Field(index=True)
     generation: str = Field(index=False)
 
     file_path: str
@@ -50,12 +50,12 @@ class CodeChunkModel(SQLModel, table=True):
         chunk: CodeChunk,
         *,
         repo_name: str,
-        installation_id: int,
+        ref: str,
         generation: str,
     ) -> "CodeChunkModel":
         return cls(
-            installation_id=installation_id,
             repo_name=repo_name,
+            ref=ref,
             generation=generation,
             file_path=chunk.file_path,
             symbol_name=chunk.symbol_name,
@@ -74,15 +74,16 @@ class RepoIndexState(SQLModel, table=True):
     __tablename__ = "repo_index_state"
     __table_args__ = (
         UniqueConstraint(
-            "installation_id",
             "repo_name",
+            "ref",
             name="uq_repo_index_state",
         ),
     )
 
     id: int | None = Field(default=None, primary_key=True)
-    installation_id: int = Field(index=True)
     repo_name: str
+    ref: str
+    visibility: str
     active_generation: str
     indexed_sha: str | None = None
     indexed_at: dt.datetime | None = Field(

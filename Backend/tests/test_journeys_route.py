@@ -8,6 +8,7 @@ from sqlalchemy import exc
 from app.db import get_session
 from app.main import app
 from app.models.job import JobStatus, JobType
+from app.models.code import RepoIndexState
 from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
 from app.security import get_authenticated_user_id
 
@@ -26,6 +27,14 @@ def _fake_session():
     gh_conn.installationId = FAKE_INSTALLATION_ID
     session.exec.return_value.one.return_value = gh_conn
     session.exec.return_value.first.return_value = None
+    session.exec.return_value.all.return_value = [
+        RepoIndexState(
+            repo_name="org/repo",
+            ref="main",
+            visibility="public",
+            active_generation="gen-1",
+        )
+    ]
 
     def _assign_id(obj):
         obj.id = 1
@@ -64,6 +73,7 @@ def _make_job(**overrides):
     job.job_type = overrides.get("job_type", JobType.TOUR)
     job.userId = overrides.get("userId", "user_123")
     job.repo_name = overrides.get("repo_name", "org/repo")
+    job.ref = overrides.get("ref", "main")
     job.topic = overrides.get("topic", "authentication flow")
     job.artifact = overrides.get("artifact", None)
     job.error = overrides.get("error", None)

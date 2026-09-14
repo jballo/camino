@@ -132,7 +132,7 @@ def build_tour_graph(
                 session,
                 query,
                 state["repo_name"],
-                installation_id=state["installation_id"],
+                ref=state["ref"],
                 limit=search_limit,
             )
 

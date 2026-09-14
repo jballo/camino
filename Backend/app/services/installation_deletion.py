@@ -1,7 +1,6 @@
 from sqlalchemy import delete
 from sqlmodel import Session
 
-from app.models.code import CodeChunkModel, RepoIndexState
 from app.models.github_connection import GithubConnections
 from app.models.job import Job
 
@@ -23,16 +22,6 @@ def delete_installation_local_data(session: Session, installation_id: int) -> No
         )
         session.exec(
             delete(Job).where(Job.installation_id == installation_id)
-        )
-        session.exec(
-            delete(CodeChunkModel).where(
-                CodeChunkModel.installation_id == installation_id
-            )
-        )
-        session.exec(
-            delete(RepoIndexState).where(
-                RepoIndexState.installation_id == installation_id
-            )
         )
         session.commit()
     except Exception as error:

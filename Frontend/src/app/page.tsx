@@ -44,6 +44,7 @@ export default function Home() {
     undefined,
   );
   const [repos, setRepos] = useState<string[]>([]);
+  const [publicRepo, setPublicRepo] = useState("");
   const [repoRetrievalError, setRepoRetrievalError] = useState<
     string | undefined
   >(undefined);
@@ -85,12 +86,16 @@ export default function Home() {
         "/api/v1/journeys",
         token,
         {
-        method: "POST",
-        body: {
-          repoName: repoSelected,
-          topic: prompt,
-        }
-      });
+          method: "POST",
+          body: {
+            repoName: repoSelected,
+            ...(contributionTarget?.targetBranch
+              ? { ref: contributionTarget.targetBranch }
+              : {}),
+            topic: prompt,
+          },
+        },
+      );
       router.push(`/generate?id=${result.id}`);
     } catch (error) {
       console.log("error: ", error);
@@ -111,7 +116,7 @@ export default function Home() {
     } finally {
       setSubmitting(false);
     }
-  }, [getToken, repoSelected, prompt, router]);
+  }, [contributionTarget, getToken, repoSelected, prompt, router]);
 
   const openDialog = async () => {
     setRepoSelectionDialog(true);
@@ -151,12 +156,14 @@ export default function Home() {
 
       const created = await enqueueRepositoryIngestion(
         repoSelected,
+        contributionTarget?.targetBranch ?? undefined,
         token,
         controller.signal,
       );
       setIngestionJob({
         ...created,
         repoName: repoSelected,
+        ref: contributionTarget?.targetBranch ?? null,
         attempts: 0,
         result: null,
         error: null,
@@ -202,7 +209,7 @@ export default function Home() {
         setProcessing(false);
       }
     }
-  }, [getToken, repoSelected]);
+  }, [contributionTarget, getToken, repoSelected]);
 
   const stopRepositoryIngestion = useCallback(async () => {
     const job = ingestionJob;
@@ -439,6 +446,35 @@ export default function Home() {
                         </Radio>
                       ))}
                     </RadioGroup>
+                    <div className="flex flex-col gap-2 border-t border-border pt-3">
+                      <label
+                        htmlFor="public-repository"
+                        className="text-xs font-medium text-muted-foreground"
+                      >
+                        Or enter any public repository
+                      </label>
+                      <div className="flex gap-2">
+                        <input
+                          id="public-repository"
+                          aria-label="Public repository"
+                          placeholder="owner/repo"
+                          value={publicRepo}
+                          onChange={(event) => setPublicRepo(event.target.value)}
+                          className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-3 py-2 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                          disabled={processing}
+                        />
+                        <Button
+                          className="rounded-md border border-border px-3 py-2 text-sm hover:bg-accent disabled:opacity-50"
+                          onClick={() => setRepoSelected(publicRepo.trim())}
+                          disabled={
+                            processing ||
+                            !/^[^/\s]+\/[^/\s]+$/.test(publicRepo.trim())
+                          }
+                        >
+                          Select
+                        </Button>
+                      </div>
+                    </div>
                     <div className="flex justify-between gap-3 pt-2">
                       <Button
                         className="rounded-sm px-3 py-1.5 text-sm hover:bg-accent"

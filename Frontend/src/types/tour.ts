@@ -38,6 +38,7 @@ export type JourneyResponse = {
   id: number;
   status: JourneyStatus;
   repoName: string;
+  ref: string | null;
   topic: string;
   artifact: TourArtifact | null;
   error: string | null;
@@ -47,6 +48,7 @@ export type JourneySummary = {
   id: number;
   status: JourneyStatus;
   repoName: string;
+  ref: string | null;
   topic: string;
   createdAt: string;
 };

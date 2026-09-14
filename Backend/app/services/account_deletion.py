@@ -1,7 +1,6 @@
 from sqlalchemy import delete
 from sqlmodel import Session, select
 
-from app.models.code import CodeChunkModel, RepoIndexState
 from app.models.github_connection import GithubConnections
 from app.models.job import Job
 from app.models.rate_limit import RateLimit
@@ -66,21 +65,6 @@ def delete_local_account_data(session: Session, user_id: str) -> None:
                         )
                     )
                 )
-                session.exec(
-                    delete(CodeChunkModel).where(
-                        CodeChunkModel.installation_id.in_(
-                            unreferenced_installation_ids
-                        )
-                    )
-                )
-                session.exec(
-                    delete(RepoIndexState).where(
-                        RepoIndexState.installation_id.in_(
-                            unreferenced_installation_ids
-                        )
-                    )
-                )
-
         session.commit()
     except Exception as error:
         session.rollback()

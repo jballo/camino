@@ -30,6 +30,7 @@ from app.config import settings
 from app.db import get_session
 from app.main import app
 from app.models.github_connection import GithubConnections
+from app.models.code import RepoIndexState
 from app.models.tour import TourArtifact, TourStep
 from app.models.job import Job, JobStatus, JobType
 from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
@@ -92,6 +93,7 @@ def pg_engine():
         engine.dispose()
         pytest.skip(f"Postgres not reachable ({e}); skipping claim integration tests")
     GithubConnections.__table__.create(engine, checkfirst=True)
+    RepoIndexState.__table__.create(engine, checkfirst=True)
     with engine.connect() as conn:
         conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ"))
         conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_by TEXT"))
@@ -121,7 +123,7 @@ def pg_engine():
 @pytest.fixture
 def pg_engine_clean(pg_engine):
     with Session(pg_engine) as session:
-        session.execute(text("TRUNCATE jobs RESTART IDENTITY CASCADE"))
+        session.execute(text("TRUNCATE jobs, repo_index_state RESTART IDENTITY CASCADE"))
         session.commit()
     return pg_engine
 
@@ -132,6 +134,7 @@ def _insert_job(session: Session, **overrides) -> Job:
         userId=overrides.get("userId", "user_1"),
         installation_id=overrides.get("installation_id", 1),
         repo_name=overrides.get("repo_name", "org/repo"),
+        ref=overrides.get("ref", "main"),
         topic=overrides.get("topic", "topic"),
         job_type=overrides.get("job_type", JobType.TOUR),
         dedupe_key=overrides.get("dedupe_key"),
@@ -363,6 +366,14 @@ def test_ingestion_guard_requires_current_claim_and_installation(pg_engine_clean
                 refreshTokenExpiresAt=now + dt.timedelta(days=30),
             )
         )
+        session.add(
+            RepoIndexState(
+                repo_name="org/repo",
+                ref="main",
+                visibility="public",
+                active_generation="generation-1",
+            )
+        )
         session.commit()
         job_id = _insert_job(
             session,
@@ -481,6 +492,14 @@ async def test_post_then_worker_then_get_completes(pg_engine_clean):
                 encryptedRefreshToken="rtok",
                 tokenExpiresAt=now + dt.timedelta(hours=1),
                 refreshTokenExpiresAt=now + dt.timedelta(days=30),
+            )
+        )
+        session.add(
+            RepoIndexState(
+                repo_name="org/repo",
+                ref="main",
+                visibility="public",
+                active_generation="generation-1",
             )
         )
         session.commit()

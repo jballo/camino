@@ -48,6 +48,7 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
 
 export function enqueueRepositoryIngestion(
   repoName: string,
+  ref: string | undefined,
   token: string,
   signal?: AbortSignal,
 ): Promise<RepositoryIngestionCreated> {
@@ -56,7 +57,7 @@ export function enqueueRepositoryIngestion(
     token,
     {
       method: "POST",
-      body: { repoName },
+      body: { repoName, ...(ref ? { ref } : {}) },
       signal,
     },
   );

@@ -18,8 +18,8 @@ def test_chunk_identity_is_unique_within_a_generation():
     )
 
     assert [column.name for column in constraint.columns] == [
-        "installation_id",
         "repo_name",
+        "ref",
         "generation",
         "file_path",
         "symbol_name",
@@ -34,6 +34,6 @@ def test_repo_index_state_has_one_pointer_per_repository():
     )
 
     assert [column.name for column in constraint.columns] == [
-        "installation_id",
         "repo_name",
+        "ref",
     ]

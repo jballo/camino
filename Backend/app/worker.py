@@ -377,13 +377,14 @@ async def _stamp_tour_freshness(
     *,
     repo_name: str,
     installation_id: int,
+    ref: str,
 ) -> None:
     """Attach a best-effort generation-time freshness disclosure."""
     try:
         state = session.exec(
             select(RepoIndexState).where(
-                RepoIndexState.installation_id == installation_id,
                 RepoIndexState.repo_name == repo_name,
+                RepoIndexState.ref == ref,
             )
         ).one_or_none()
     except exc.SQLAlchemyError:
@@ -409,6 +410,7 @@ async def _stamp_tour_freshness(
             repo_name,
             installation_id,
             indexed_sha,
+            ref,
         )
         cited_paths = {step.file_path.lstrip("./") for step in artifact.steps}
         changed_cited_files = sorted(
@@ -453,6 +455,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
         topic = job.topic
         repo_name = job.repo_name
         installation_id = job.installation_id
+        ref = job.ref
         attempts = job.attempts
 
         try:
@@ -494,6 +497,10 @@ async def run_job(job_id: int, worker_id: str) -> None:
         job_cancelled = False
         ingestion_completed = False
         try:
+            if ref is None:
+                raise PermanentRepositoryIngestionError(
+                    "Legacy job is missing its repository ref"
+                )
             if job_type == JobType.TOUR:
                 if topic is None:
                     raise TourGenerationError("Tour job is missing its topic")
@@ -501,7 +508,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     session,
                     topic=topic,
                     repo_name=repo_name,
-                    installation_id=installation_id,
+                    ref=ref,
                     cancel_event=lease_lost,
                 )
                 await _stamp_tour_freshness(
@@ -509,6 +516,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     artifact,
                     repo_name=repo_name,
                     installation_id=installation_id,
+                    ref=ref,
                 )
                 result = artifact.model_dump(mode="json")
             elif job_type == JobType.REPOSITORY_INGEST:
@@ -536,6 +544,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     session,
                     repo_name=repo_name,
                     installation_id=installation_id,
+                    ref=ref,
                     ensure_owned=ensure_ingestion_owned,
                     finalize_publication=finalize_ingestion_publication,
                 )

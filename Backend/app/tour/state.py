@@ -12,7 +12,7 @@ class TourState(TypedDict, total=False):
     """State for the Plan -> Retrieve -> Draft -> Review pipeline.
 
     ``total=False`` so the initial invocation only has to supply the inputs
-    (``topic``, ``repo_name``, ``installation_id``); each node fills in the keys
+    (``topic``, ``repo_name``, ``ref``); each node fills in the keys
     it produces. Later keys overwrite (no reducers needed for a linear graph
     with a single self-loop).
     """
@@ -20,7 +20,7 @@ class TourState(TypedDict, total=False):
     # inputs
     topic: str
     repo_name: str
-    installation_id: int
+    ref: str
 
     # produced by nodes
     title: str

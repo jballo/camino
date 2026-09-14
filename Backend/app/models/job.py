@@ -30,6 +30,7 @@ class Job(SQLModel, table=True):
     userId: str = Field(index=True)
     installation_id: int
     repo_name: str = Field(index=True)
+    ref: str | None = Field(default=None, index=True)
     job_type: str = Field(default=JobType.TOUR, index=True)
     dedupe_key: str | None = Field(default=None)
     topic: str | None = Field(default=None)

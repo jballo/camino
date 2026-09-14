@@ -97,10 +97,10 @@ def test_compare_to_head_returns_changed_files_and_head():
         ),
         patch(
             "app.services.staleness.requests.get",
-            side_effect=[_Response({"default_branch": "main"}), response],
+            return_value=response,
         ) as get,
     ):
-        comparison = compare_to_head("Org/Repo", 7, "indexed")
+        comparison = compare_to_head("Org/Repo", 7, "indexed", "main")
 
     assert comparison.measurable
     assert comparison.head_sha == "live-head"
@@ -109,7 +109,7 @@ def test_compare_to_head_returns_changed_files_and_head():
         ChangedFile("src/auth.py", "modified"),
         ChangedFile("src/new.py", "added"),
     )
-    assert get.call_args_list[1].args[0].endswith(
+    assert get.call_args.args[0].endswith(
         "/org/repo/compare/indexed...main"
     )
     assert response.closed
@@ -124,10 +124,10 @@ def test_compare_to_head_treats_404_as_unmeasurable():
         ),
         patch(
             "app.services.staleness.requests.get",
-            side_effect=[_Response({"default_branch": "main"}), response],
+            return_value=response,
         ),
     ):
-        comparison = compare_to_head("org/repo", 7, "gone")
+        comparison = compare_to_head("org/repo", 7, "gone", "main")
 
     assert not comparison.measurable
     assert comparison.changed_files == ()
@@ -162,20 +162,17 @@ def test_compare_to_head_treats_truncation_as_unmeasurable(payload):
         ),
         patch(
             "app.services.staleness.requests.get",
-            side_effect=[
-                _Response({"default_branch": "main"}),
-                _Response(payload),
-            ],
+            return_value=_Response(payload),
         ),
     ):
-        comparison = compare_to_head("org/repo", 7, "indexed")
+        comparison = compare_to_head("org/repo", 7, "indexed", "main")
 
     assert not comparison.measurable
 
 
 def test_compare_to_head_missing_sha_never_calls_github():
     with patch("app.services.staleness.requests.get") as get:
-        comparison = compare_to_head("org/repo", 7, None)
+        comparison = compare_to_head("org/repo", 7, None, "main")
 
     assert not comparison.measurable
     get.assert_not_called()

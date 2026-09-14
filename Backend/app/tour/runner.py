@@ -35,7 +35,7 @@ async def generate_tour(
     *,
     topic: str,
     repo_name: str,
-    installation_id: int,
+    ref: str,
     model: str | None = None,
     search_limit: int = DEFAULT_SEARCH_LIMIT,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
@@ -64,7 +64,7 @@ async def generate_tour(
             {
                 "topic": topic,
                 "repo_name": repo_name,
-                "installation_id": installation_id,
+                "ref": ref,
             }
         )
     )

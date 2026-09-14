@@ -12,23 +12,19 @@ def normalize_repository_name(repo_name: str) -> str:
 
 
 def tour_dedupe_key(
-    *, user_id: str, installation_id: int, repo_name: str, topic: str
+    *, user_id: str, repo_name: str, ref: str, topic: str
 ) -> str:
     normalized_repo_name = normalize_repository_name(repo_name)
     return (
-        f"{JobType.TOUR}:{user_id}:{installation_id}:"
-        f"{normalized_repo_name}:{topic}"
+        f"{JobType.TOUR}:{user_id}:{normalized_repo_name}:{ref}:{topic}"
     )
 
 
 def repository_ingest_dedupe_key(
-    *, installation_id: int, repo_name: str
+    *, repo_name: str, ref: str
 ) -> str:
     normalized_repo_name = normalize_repository_name(repo_name)
-    return (
-        f"{JobType.REPOSITORY_INGEST}:{installation_id}:"
-        f"{normalized_repo_name}"
-    )
+    return f"{JobType.REPOSITORY_INGEST}:{normalized_repo_name}:{ref}"
 
 
 def cancel_job(session: Session, job_id: int) -> bool:
@@ -66,6 +62,7 @@ def enqueue_job(
     user_id: str,
     installation_id: int,
     repo_name: str,
+    ref: str,
     job_type: str,
     dedupe_key: str,
     topic: str | None = None,
@@ -85,6 +82,7 @@ def enqueue_job(
         userId=user_id,
         installation_id=installation_id,
         repo_name=repo_name,
+        ref=ref,
         job_type=job_type,
         dedupe_key=dedupe_key,
         topic=topic,

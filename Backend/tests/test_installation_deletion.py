@@ -12,17 +12,17 @@ from app.services.installation_deletion import (
 INSTALLATION_ID = 101
 
 
-def test_deletes_connections_jobs_chunks_and_index_state():
+def test_deletes_connections_and_jobs_but_preserves_shared_index():
     session = MagicMock()
 
     delete_installation_local_data(session, INSTALLATION_ID)
 
     statements = [str(call.args[0]) for call in session.exec.call_args_list]
-    assert len(statements) == 4
+    assert len(statements) == 2
     assert any("DELETE FROM githubconnections" in s for s in statements)
     assert any("DELETE FROM jobs" in s for s in statements)
-    assert any("DELETE FROM code_chunks" in s for s in statements)
-    assert any("DELETE FROM repo_index_state" in s for s in statements)
+    assert not any("DELETE FROM code_chunks" in s for s in statements)
+    assert not any("DELETE FROM repo_index_state" in s for s in statements)
     session.commit.assert_called_once_with()
     session.rollback.assert_not_called()
 

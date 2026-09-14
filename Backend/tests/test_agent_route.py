@@ -11,6 +11,7 @@ from app.security import get_authenticated_user_id
 from app.agent.runner import AgentAnswer
 from app.services.embeddings import EmbeddingError
 from app.services.search import SearchResult
+from app.models.code import RepoIndexState
 
 
 def _noop_verify():
@@ -22,9 +23,14 @@ FAKE_INSTALLATION_ID = 12345
 
 def _fake_session():
     session = MagicMock()
-    gh_conn = MagicMock()
-    gh_conn.installationId = FAKE_INSTALLATION_ID
-    session.exec.return_value.one.return_value = gh_conn
+    session.exec.return_value.all.return_value = [
+        RepoIndexState(
+            repo_name="org/repo",
+            ref="main",
+            visibility="public",
+            active_generation="gen-1",
+        )
+    ]
     yield session
 
 
@@ -88,7 +94,7 @@ def test_ask_forwards_args_to_runner(mock_answer):
     _, kwargs = mock_answer.call_args
     assert kwargs["question"] == "How does login work?"
     assert kwargs["repo_name"] == "org/repo"
-    assert kwargs["installation_id"] == FAKE_INSTALLATION_ID
+    assert kwargs["ref"] == "main"
 
 
 @patch(
@@ -146,10 +152,10 @@ def test_ask_missing_repo_returns_422():
 
 # ── github connection lookup ────────────────────────────────────────
 
-def test_ask_no_github_connection_returns_404():
+def test_ask_without_an_index_returns_404():
     def _no_conn_session():
         session = MagicMock()
-        session.exec.return_value.one.side_effect = exc.NoResultFound()
+        session.exec.return_value.all.return_value = []
         yield session
 
     app.dependency_overrides[get_session] = _no_conn_session

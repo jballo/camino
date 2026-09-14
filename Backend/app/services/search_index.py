@@ -54,28 +54,28 @@ def populate_search_vector_sql(*, only_null: bool) -> str:
 
     ``only_null=True`` is for first-time ingest (don't clobber existing rows);
     ``only_null=False`` recomputes every row (used by the FTS rebuild path).
-    Bind params: ``repo_name``, ``installation_id``, and ``generation``.
+    Bind params: ``repo_name``, ``ref``, and ``generation``.
     """
     guard = "AND search_vector IS NULL" if only_null else ""
     return f"""
         UPDATE code_chunks
         SET search_vector = {SEARCH_VECTOR_EXPR}
         WHERE repo_name = :repo_name
-          AND installation_id = :installation_id
+          AND ref = :ref
           AND generation = :generation
           {guard}
     """
 
 
 def rebuild_search_vector(
-    session: Session, repo_name: str, installation_id: int
+    session: Session, repo_name: str, ref: str
 ) -> None:
     """Recompute ``search_vector`` for a repo's live generation."""
     repo_name = normalize_repository_name(repo_name)
     generation = session.exec(
         select(RepoIndexState.active_generation).where(
             RepoIndexState.repo_name == repo_name,
-            RepoIndexState.installation_id == installation_id,
+            RepoIndexState.ref == ref,
         )
     ).one_or_none()
     if generation is None:
@@ -84,7 +84,7 @@ def rebuild_search_vector(
     session.execute(
         text(populate_search_vector_sql(only_null=False)).bindparams(
             repo_name=repo_name,
-            installation_id=installation_id,
+            ref=ref,
             generation=generation,
         )
     )
