@@ -118,7 +118,7 @@ export default function BriefsPage() {
         <section className="flex flex-col gap-5 rounded-2xl border border-border p-6">
           <div className="flex flex-col gap-2">
             <div className="text-xs uppercase tracking-wide text-muted-foreground">
-              {preview.repoName} · issue #{preview.issueNumber} · {preview.state}
+              {preview.issueRepo} · issue #{preview.issueNumber} · {preview.state}
             </div>
             <h2 className="text-2xl font-semibold">{preview.title}</h2>
             <div className="flex flex-wrap gap-2">
@@ -198,7 +198,7 @@ export default function BriefsPage() {
               <span className="min-w-0">
                 <span className="block truncate font-medium">{brief.issueTitle}</span>
                 <span className="block truncate font-mono text-xs text-muted-foreground">
-                  {brief.repoName} · #{brief.issueNumber}
+                  {brief.issueRepo} · #{brief.issueNumber}
                 </span>
               </span>
               <span className="text-xs capitalize text-muted-foreground">{brief.status}</span>

@@ -4,6 +4,7 @@ export type BriefWarning = { kind: string; message: string; url: string | null }
 
 export type BriefPreview = {
   issueUrl: string;
+  issueRepo: string;
   repoName: string;
   issueNumber: number;
   title: string;
@@ -62,6 +63,7 @@ export type BriefResponse = {
   status: JourneyStatus;
   phase: "blocked_on_ingest" | "queued" | "generating" | JourneyStatus;
   repoName: string;
+  issueRepo: string;
   ref: string | null;
   issueNumber: number;
   issueTitle: string;
@@ -71,5 +73,5 @@ export type BriefResponse = {
 
 export type BriefSummary = Pick<
   BriefResponse,
-  "id" | "status" | "repoName" | "ref" | "issueNumber" | "issueTitle"
+  "id" | "status" | "repoName" | "issueRepo" | "ref" | "issueNumber" | "issueTitle"
 > & { createdAt: string };

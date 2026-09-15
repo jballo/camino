@@ -80,7 +80,7 @@ export default function BriefReader({ params }: { params: Promise<{ id: string }
           <p className="text-sm text-muted-foreground">
             {refreshing
               ? "The code this issue touches changed since indexing — refreshing first."
-              : `${brief.repoName} · issue #${brief.issueNumber}`}
+              : `${brief.issueRepo} · issue #${brief.issueNumber}`}
           </p>
           <Button
             onClick={stop}

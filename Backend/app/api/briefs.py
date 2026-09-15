@@ -62,6 +62,7 @@ class ForkStatusPreview(BaseModel):
 
 class BriefPreviewResponse(BaseModel):
     issueUrl: str
+    issueRepo: str
     repoName: str
     issueNumber: int
     title: str
@@ -83,6 +84,7 @@ class BriefResponse(BaseModel):
     status: str
     phase: str
     repoName: str
+    issueRepo: str
     ref: str | None
     issueNumber: int
     issueTitle: str
@@ -94,6 +96,7 @@ class BriefSummaryResponse(BaseModel):
     id: int
     status: str
     repoName: str
+    issueRepo: str
     ref: str | None
     issueNumber: int
     issueTitle: str
@@ -180,6 +183,7 @@ async def _preview(
 
     return BriefPreviewResponse(
         issueUrl=payload.issueUrl,
+        issueRepo=requested_repo,
         repoName=fork.upstream_repo,
         issueNumber=issue.number,
         title=issue.title,
@@ -256,9 +260,11 @@ async def create_brief(
                 user_id=auth_user_id,
                 repo_name=repo_name,
                 ref=ref,
+                issue_repo=preview.issueRepo,
                 issue_number=preview.issueNumber,
             ),
             topic=preview.title,
+            issue_repo=preview.issueRepo,
             issue_number=preview.issueNumber,
             blocked_by_job_id=dependency_id,
         )
@@ -303,6 +309,7 @@ def _response(session: Session, job: Job) -> BriefResponse:
         status=job.status,
         phase=_phase(session, job),
         repoName=job.repo_name,
+        issueRepo=job.issue_repo or job.repo_name,
         ref=job.ref,
         issueNumber=job.issue_number,
         issueTitle=job.topic or f"Issue #{job.issue_number}",
@@ -327,6 +334,7 @@ async def list_briefs(
             id=job.id,
             status=job.status,
             repoName=job.repo_name,
+            issueRepo=job.issue_repo or job.repo_name,
             ref=job.ref,
             issueNumber=job.issue_number,
             issueTitle=job.topic or f"Issue #{job.issue_number}",

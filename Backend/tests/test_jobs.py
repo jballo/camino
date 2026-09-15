@@ -14,16 +14,47 @@ from app.services.jobs import (
 
 def test_issue_brief_identity_is_per_user():
     first = issue_brief_dedupe_key(
-        user_id="user_1", repo_name="Org/Repo", ref="main", issue_number=44
+        user_id="user_1",
+        repo_name="Org/Repo",
+        ref="main",
+        issue_repo="Contributor/Repo",
+        issue_number=44,
     )
     same = issue_brief_dedupe_key(
-        user_id="user_1", repo_name="org/repo", ref="main", issue_number=44
+        user_id="user_1",
+        repo_name="org/repo",
+        ref="main",
+        issue_repo="contributor/repo",
+        issue_number=44,
     )
     other_user = issue_brief_dedupe_key(
-        user_id="user_2", repo_name="org/repo", ref="main", issue_number=44
+        user_id="user_2",
+        repo_name="org/repo",
+        ref="main",
+        issue_repo="contributor/repo",
+        issue_number=44,
     )
     assert first == same
     assert first != other_user
+
+
+def test_issue_brief_identity_includes_issue_repository():
+    fork_issue = issue_brief_dedupe_key(
+        user_id="user_1",
+        repo_name="org/repo",
+        ref="main",
+        issue_repo="contributor/repo",
+        issue_number=44,
+    )
+    upstream_issue = issue_brief_dedupe_key(
+        user_id="user_1",
+        repo_name="org/repo",
+        ref="main",
+        issue_repo="org/repo",
+        issue_number=44,
+    )
+
+    assert fork_issue != upstream_issue
 
 
 def _enqueue(session: MagicMock):

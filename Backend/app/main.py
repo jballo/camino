@@ -50,6 +50,9 @@ async def lifespan(app: FastAPI):
         # It also cannot add columns to tables created by older releases.
         conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS ref VARCHAR"))
         conn.execute(text(
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS issue_repo VARCHAR"
+        ))
+        conn.execute(text(
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS issue_number INTEGER"
         ))
         conn.execute(text(

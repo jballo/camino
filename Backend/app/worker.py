@@ -528,6 +528,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
         installation_id = job.installation_id
         ref = job.ref
         attempts = job.attempts
+        issue_repo = job.issue_repo or repo_name
         issue_number = job.issue_number
         refresh_cycles = job.refresh_cycles
 
@@ -600,7 +601,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     )
                 issue = await asyncio.to_thread(
                     fetch_issue_thread,
-                    repo_name,
+                    issue_repo,
                     issue_number,
                     installation_id,
                 )
@@ -634,7 +635,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     )
                 fork_status = await asyncio.to_thread(
                     resolve_fork_status,
-                    repo_name,
+                    issue_repo,
                     installation_id,
                     ref,
                 )

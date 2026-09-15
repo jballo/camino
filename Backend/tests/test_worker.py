@@ -50,6 +50,7 @@ def _job(**overrides) -> MagicMock:
     job.id = 1
     job.topic = "authentication flow"
     job.repo_name = "org/repo"
+    job.issue_repo = None
     job.ref = "main"
     job.installation_id = 12345
     job.job_type = JobType.TOUR
@@ -128,6 +129,43 @@ async def test_issue_brief_parks_behind_refresh_without_spending_retry():
         session, 1, WORKER_ID, blocked_by_job_id=17
     )
     persist.assert_not_called()
+
+
+async def test_issue_brief_fetches_issue_from_fork_and_indexes_upstream():
+    job = _job(
+        job_type=JobType.ISSUE_BRIEF,
+        issue_repo="contributor/repo",
+        issue_number=44,
+        refresh_cycles=0,
+        userId="user_1",
+        topic="Fork-only issue",
+    )
+    session = MagicMock()
+    session.get.return_value = job
+    issue = MagicMock(branch_instruction=None)
+    artifact = MagicMock()
+    artifact.model_dump.return_value = {"summary": "done"}
+    persist = MagicMock(return_value=True)
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker.fetch_issue_thread", return_value=issue) as fetch_issue,
+        patch(
+            "app.worker.resolve_target_branch",
+            return_value=MagicMock(branch="main", default_branch="main"),
+        ) as resolve_branch,
+        patch("app.worker.resolve_fork_status", return_value=MagicMock()) as resolve_fork,
+        patch(
+            "app.worker.generate_brief", new_callable=AsyncMock, return_value=artifact
+        ),
+        patch("app.worker._update_owned_job", persist),
+    ):
+        await run_job(1, WORKER_ID)
+
+    fetch_issue.assert_called_once_with("contributor/repo", 44, 12345)
+    resolve_branch.assert_called_once_with("org/repo", 12345)
+    resolve_fork.assert_called_once_with("contributor/repo", 12345, "main")
 
 
 async def test_run_job_stamps_tour_freshness():

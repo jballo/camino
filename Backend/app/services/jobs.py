@@ -28,12 +28,18 @@ def repository_ingest_dedupe_key(
 
 
 def issue_brief_dedupe_key(
-    *, user_id: str, repo_name: str, ref: str, issue_number: int
+    *,
+    user_id: str,
+    repo_name: str,
+    ref: str,
+    issue_repo: str,
+    issue_number: int,
 ) -> str:
     normalized_repo_name = normalize_repository_name(repo_name)
+    normalized_issue_repo = normalize_repository_name(issue_repo)
     return (
         f"{JobType.ISSUE_BRIEF}:{user_id}:{normalized_repo_name}:"
-        f"{ref}:{issue_number}"
+        f"{ref}:{normalized_issue_repo}:{issue_number}"
     )
 
 
@@ -76,6 +82,7 @@ def enqueue_job(
     job_type: str,
     dedupe_key: str,
     topic: str | None = None,
+    issue_repo: str | None = None,
     issue_number: int | None = None,
     blocked_by_job_id: int | None = None,
 ) -> tuple[Job, bool]:
@@ -98,6 +105,9 @@ def enqueue_job(
         job_type=job_type,
         dedupe_key=dedupe_key,
         topic=topic,
+        issue_repo=(
+            normalize_repository_name(issue_repo) if issue_repo is not None else None
+        ),
         issue_number=issue_number,
         blocked_by_job_id=blocked_by_job_id,
         status=JobStatus.PENDING,
