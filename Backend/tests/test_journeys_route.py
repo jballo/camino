@@ -9,6 +9,7 @@ from app.db import get_session
 from app.main import app
 from app.models.job import JobStatus, JobType
 from app.models.code import RepoIndexState
+from app.services.repo_access import RepoAccess
 from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
 from app.security import get_authenticated_user_id
 
@@ -50,6 +51,17 @@ def _override_deps():
     app.dependency_overrides[JOURNEY_CREATE_RATE_LIMIT] = lambda: None
     yield
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def _allow_repo_access():
+    with patch(
+        "app.services.repo_access.resolve_repo_access",
+        return_value=RepoAccess(
+            installation_id=FAKE_INSTALLATION_ID, visibility="public"
+        ),
+    ):
+        yield
 
 
 client = TestClient(app)

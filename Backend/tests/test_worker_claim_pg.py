@@ -35,6 +35,7 @@ from app.models.tour import TourArtifact, TourStep
 from app.models.job import Job, JobStatus, JobType
 from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
 from app.security import get_authenticated_user_id
+from app.services.repo_access import RepoAccess
 from app.services.repository_ingestion import IngestionCancelledError
 from app.worker import (
     _ensure_ingestion_owned,
@@ -605,6 +606,11 @@ async def test_post_then_worker_then_get_completes(pg_engine_clean):
     artifact = _artifact()
     client = TestClient(app)
 
+    access_probe = patch(
+        "app.services.repo_access.resolve_repo_access",
+        return_value=RepoAccess(installation_id=12345, visibility="public"),
+    )
+    access_probe.start()
     try:
         created = client.post(
             "/api/v1/journeys",
@@ -645,6 +651,7 @@ async def test_post_then_worker_then_get_completes(pg_engine_clean):
         assert body["artifact"] == artifact.model_dump()
         assert body["error"] is None
     finally:
+        access_probe.stop()
         app.dependency_overrides.clear()
 
 

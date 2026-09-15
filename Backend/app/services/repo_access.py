@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import logging
 
 import requests
 from sqlmodel import Session, select
@@ -10,6 +11,8 @@ from app.models.code import RepoIndexState
 from app.models.github_connection import GithubConnections
 from app.services.github_app import installation_access_token
 from app.services.jobs import normalize_repository_name
+
+logger = logging.getLogger(__name__)
 
 _GITHUB_API_VERSION = "2022-11-28"
 _REQUEST_TIMEOUT = (10, 30)
@@ -96,9 +99,22 @@ def authorize_index_read(
     user_id: str,
     index_state: RepoIndexState,
 ) -> None:
-    """Authorize a read of one shared index entry."""
-    if index_state.visibility == "public":
-        return
-    if index_state.visibility != "private":
+    """Authorize a read of one shared index entry against live GitHub state.
+
+    Stored visibility is write-time metadata: a repository indexed while
+    public may since have been made private, and nothing invalidates the
+    shared index when that happens. Every read therefore re-probes GitHub
+    with the reader's own installation token — success means GitHub still
+    shows this user the repository today, public or not.
+    """
+    if index_state.visibility not in ("public", "private"):
         raise RepoAccessDenied("Repository index has invalid visibility")
-    resolve_repo_access(session, user_id, index_state.repo_name)
+    access = resolve_repo_access(session, user_id, index_state.repo_name)
+    if access.visibility != index_state.visibility:
+        logger.warning(
+            "index visibility drift | repo=%r ref=%r indexed=%s live=%s",
+            index_state.repo_name,
+            index_state.ref,
+            index_state.visibility,
+            access.visibility,
+        )

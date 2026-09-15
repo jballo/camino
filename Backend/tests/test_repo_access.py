@@ -63,28 +63,54 @@ def test_resolve_repo_access_treats_404_as_denied():
         resolve_repo_access(_session(), "user_1", "org/private")
 
 
-def test_public_index_read_does_not_call_github():
+@pytest.mark.parametrize("visibility", ["public", "private"])
+def test_index_read_always_rechecks_access(visibility):
+    state = RepoIndexState(
+        repo_name="org/repo",
+        ref="main",
+        visibility=visibility,
+        active_generation="generation-1",
+    )
+    with patch("app.services.repo_access.resolve_repo_access") as probe:
+        authorize_index_read(MagicMock(), "user_1", state)
+    probe.assert_called_once_with(ANY, "user_1", "org/repo")
+
+
+def test_privatized_repo_denies_stale_public_index_read():
+    """A repo indexed while public but private today must deny the read."""
     state = RepoIndexState(
         repo_name="org/repo",
         ref="main",
         visibility="public",
         active_generation="generation-1",
     )
-    with patch("app.services.repo_access.resolve_repo_access") as probe:
-        authorize_index_read(MagicMock(), "user_1", state)
-    probe.assert_not_called()
+    with (
+        patch(
+            "app.services.repo_access.installation_access_token",
+            return_value="token",
+        ),
+        patch(
+            "app.services.repo_access.requests.get",
+            return_value=_response(404),
+        ),
+        pytest.raises(RepoAccessDenied),
+    ):
+        authorize_index_read(_session(), "user_1", state)
 
 
-def test_private_index_read_rechecks_access():
+def test_invalid_visibility_denies_without_probe():
     state = RepoIndexState(
         repo_name="org/repo",
         ref="main",
-        visibility="private",
+        visibility="internal",
         active_generation="generation-1",
     )
-    with patch("app.services.repo_access.resolve_repo_access") as probe:
+    with (
+        patch("app.services.repo_access.resolve_repo_access") as probe,
+        pytest.raises(RepoAccessDenied, match="invalid visibility"),
+    ):
         authorize_index_read(MagicMock(), "user_1", state)
-    probe.assert_called_once_with(ANY, "user_1", "org/repo")
+    probe.assert_not_called()
 
 
 def test_repository_ingestion_dedupe_is_global_and_ref_aware():

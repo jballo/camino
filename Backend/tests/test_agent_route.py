@@ -12,6 +12,7 @@ from app.agent.runner import AgentAnswer
 from app.services.embeddings import EmbeddingError
 from app.services.search import SearchResult
 from app.models.code import RepoIndexState
+from app.services.repo_access import RepoAccess
 
 
 def _noop_verify():
@@ -41,6 +42,17 @@ def _override_deps():
     app.dependency_overrides[AGENT_ASK_RATE_LIMIT] = lambda: None
     yield
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def _allow_repo_access():
+    with patch(
+        "app.services.repo_access.resolve_repo_access",
+        return_value=RepoAccess(
+            installation_id=FAKE_INSTALLATION_ID, visibility="public"
+        ),
+    ):
+        yield
 
 
 client = TestClient(app)
