@@ -43,6 +43,7 @@
   html { color-scheme: dark; }
   body { @apply bg-background text-foreground; background-image: radial-gradient(oklch(0.27 0.012 196 / .72) 1.2px, transparent 1.2px); background-size: 72px 72px; }
   button, a, [role="button"] { @apply cursor-pointer; }
+  button:disabled { @apply cursor-not-allowed; }
   button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, [role="button"]:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
   h1, h2 { text-wrap: balance; }
 }
