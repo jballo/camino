@@ -39,7 +39,8 @@ export default async function Page({
       <div className="grid w-full max-w-4xl items-center gap-12 lg:grid-cols-2">
         <div className="flex flex-col gap-8">
           <div className="flex flex-col gap-3">
-            <h1 className="text-3xl font-semibold">Welcome to Camino</h1>
+            <span className="eyebrow">Guided code intelligence</span>
+            <h1 className="display-title text-5xl font-black">Welcome to Camino<span className="text-brand-accent">.</span></h1>
             <p className="max-w-md text-sm text-muted-foreground">
               Guided tours of unfamiliar codebases. Sign in to connect a
               repository and start building code-grounded walkthroughs.

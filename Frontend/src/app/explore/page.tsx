@@ -321,11 +321,11 @@ export default function Explore() {
 
   return (
     <div className="flex flex-col w-full min-h-full">
-      <div className="flex flex-1 w-full flex-col lg:flex-row gap-6 px-8 py-12 max-w-[1400px] mx-auto">
+      <div className="mx-auto flex w-full max-w-[1400px] flex-1 flex-col gap-6 px-5 py-10 sm:px-8 lg:flex-row">
         {/* Repositories panel */}
-        <aside className="w-full lg:w-80 shrink-0 flex flex-col gap-4">
+        <aside className="console flex w-full shrink-0 flex-col gap-4 p-5 lg:w-80">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Repositories</h2>
+            <h2 className="font-display text-xl font-black uppercase">Repositories</h2>
             <Button
               onClick={() => {
                 loadRepos();
@@ -368,7 +368,7 @@ export default function Explore() {
               return (
                 <div
                   key={repo}
-                  className={`group flex flex-col gap-2 rounded-lg border p-3 transition cursor-pointer ${
+                  className={`group flex cursor-pointer flex-col gap-2 rounded-[10px] border p-3 transition ${
                     isSelected
                       ? "border-primary bg-accent"
                       : "border-border hover:bg-accent/50"
@@ -459,7 +459,7 @@ export default function Explore() {
         {/* Search panel */}
         <main className="flex-1 flex flex-col gap-4 min-w-0">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold">Ask the codebase</h2>
+            <div><span className="eyebrow">Grounded code search</span><h1 className="display-title mt-2 text-4xl font-black">Ask the codebase<span className="text-brand-accent">.</span></h1></div>
             {selectedRepo && selectedRepoRefs.length > 0 && (
               <label className="flex items-center gap-2 text-sm text-muted-foreground">
                 Indexed ref
@@ -483,7 +483,7 @@ export default function Explore() {
             )}
           </div>
 
-          <div className="flex flex-col gap-3 rounded-2xl outline-1 outline-accent p-4">
+          <div className="console flex flex-col gap-3 p-5">
             <Textarea
               placeholder={
                 selectedRepo
@@ -511,7 +511,7 @@ export default function Explore() {
                 disabled={
                   asking || !selectedRepo || query.trim().length === 0
                 }
-                className="flex items-center justify-center gap-2 h-9 px-4 rounded-md bg-primary text-primary-foreground disabled:opacity-50"
+                className="button-primary min-h-10 px-5 disabled:opacity-50"
                 aria-label="Ask"
               >
                 {asking ? (

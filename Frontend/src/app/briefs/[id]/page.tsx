@@ -120,15 +120,15 @@ function ArtifactReader({ artifact }: { artifact: BriefArtifact }) {
     question: `Follow-up about issue #${artifact.issue_number}: ${artifact.issue_title}`,
   });
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-10 px-8 py-12">
-      <header className="flex flex-col gap-3 border-b border-border pb-7">
+    <div className="page-shell">
+      <header className="console flex flex-col gap-3 p-6 sm:p-8">
         <Link href="/briefs" className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
           <ArrowLeft className="size-4" /> All issue briefs
         </Link>
         <div className="font-mono text-xs text-muted-foreground">
           {artifact.repo_name} · issue #{artifact.issue_number}
         </div>
-        <h1 className="text-3xl font-semibold">{artifact.issue_title}</h1>
+        <h1 className="display-title text-4xl font-black">{artifact.issue_title}</h1>
         <span className="w-fit rounded-full bg-accent px-2.5 py-1 text-xs capitalize text-muted-foreground">
           {artifact.confidence.level} confidence
         </span>
@@ -206,7 +206,7 @@ function ArtifactReader({ artifact }: { artifact: BriefArtifact }) {
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return <section className="flex flex-col gap-4"><h2 className="text-xl font-semibold">{title}</h2>{children}</section>;
+  return <section className="console flex flex-col gap-4 p-5 sm:p-6"><h2 className="font-mono text-sm uppercase tracking-[.14em]">{title}</h2>{children}</section>;
 }
 
 function Markdown({ value }: { value: string }) {

@@ -102,12 +102,12 @@ export default function ToursList() {
 
   return (
     <div className="flex flex-col w-full min-h-full">
-      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 px-8 py-12">
+      <div className="page-shell max-w-4xl">
         <div className="flex items-center justify-between">
-          <h1 className="text-2xl font-semibold">Your tours</h1>
+          <div><span className="eyebrow">Walkthrough archive</span><h1 className="display-title mt-2 text-5xl font-black sm:text-6xl">Your tours<span className="text-brand-accent">.</span></h1></div>
           <Button
             onClick={loadTours}
-            className="flex size-8 items-center justify-center rounded-md hover:bg-accent"
+            className="flex size-11 items-center justify-center rounded-full border border-border hover:bg-accent"
             aria-label="Refresh tours"
           >
             <RefreshCw className={`size-4 ${loading ? "animate-spin" : ""}`} />
@@ -122,15 +122,15 @@ export default function ToursList() {
             <p className="text-sm">No tours yet.</p>
             <Link
               href="/"
-              className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground"
+              className="button-primary"
             >
               Generate a tour
             </Link>
           </div>
         )}
 
-        <div className="flex flex-col gap-3">
-          {tours.map((tour) => {
+        <div className="border-y border-border">
+          {tours.map((tour, index) => {
             const href =
               tour.status === "complete"
                 ? `/tours/${tour.id}`
@@ -139,8 +139,9 @@ export default function ToursList() {
               <Link
                 key={tour.id}
                 href={href}
-                className="flex items-center justify-between gap-4 rounded-xl border border-border p-4 transition hover:bg-accent/50"
+                className="ledger-row"
               >
+                <span className="font-display text-2xl text-muted-foreground">{String(index + 1).padStart(2, "0")}</span>
                 <div className="flex min-w-0 flex-col gap-1">
                   <span className="truncate font-medium">{tour.topic}</span>
                   <span className="truncate font-mono text-xs text-muted-foreground">

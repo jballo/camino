@@ -140,7 +140,7 @@ export default function TourReader({
     <div className="flex flex-col w-full min-h-full">
       <div className="mx-auto flex w-full max-w-[1400px] flex-1 flex-col gap-6 px-8 py-12 lg:flex-row">
         {/* Table of contents */}
-        <aside className="w-full shrink-0 lg:sticky lg:top-8 lg:h-fit lg:w-64">
+        <aside className="console w-full shrink-0 p-5 lg:sticky lg:top-8 lg:h-fit lg:w-64">
           <Link
             href="/tours"
             className="mb-4 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
@@ -168,7 +168,7 @@ export default function TourReader({
         {/* Tour body */}
         <main className="flex min-w-0 flex-1 flex-col gap-10">
           <header className="flex flex-col gap-2 border-b border-border pb-6">
-            <h1 className="text-3xl font-semibold">{artifact.title}</h1>
+            <h1 className="display-title text-4xl font-black">{artifact.title}</h1>
             <p className="text-sm text-muted-foreground">
               {artifact.topic} ·{" "}
               <span className="font-mono">{artifact.repo_name}</span> ·{" "}
@@ -250,10 +250,10 @@ function StepBlock({ step, index }: { step: TourStep; index: number }) {
   return (
     <section
       id={stepAnchor(index)}
-      className="flex scroll-mt-8 flex-col gap-4"
+      className="console flex scroll-mt-8 flex-col gap-4 p-5 sm:p-6"
     >
       <div className="flex items-start gap-3">
-        <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-primary text-sm font-medium text-primary-foreground">
+        <span className="font-display flex size-9 shrink-0 items-center justify-center text-2xl text-brand-accent">
           {index + 1}
         </span>
         <h2 className="text-xl font-semibold leading-7">{step.title}</h2>
