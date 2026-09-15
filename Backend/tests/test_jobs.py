@@ -6,9 +6,24 @@ from app.models.job import JobStatus, JobType
 from app.services.jobs import (
     cancel_job,
     enqueue_job,
+    issue_brief_dedupe_key,
     normalize_repository_name,
     repository_ingest_dedupe_key,
 )
+
+
+def test_issue_brief_identity_is_per_user():
+    first = issue_brief_dedupe_key(
+        user_id="user_1", repo_name="Org/Repo", ref="main", issue_number=44
+    )
+    same = issue_brief_dedupe_key(
+        user_id="user_1", repo_name="org/repo", ref="main", issue_number=44
+    )
+    other_user = issue_brief_dedupe_key(
+        user_id="user_2", repo_name="org/repo", ref="main", issue_number=44
+    )
+    assert first == same
+    assert first != other_user
 
 
 def _enqueue(session: MagicMock):

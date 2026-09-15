@@ -27,6 +27,16 @@ def repository_ingest_dedupe_key(
     return f"{JobType.REPOSITORY_INGEST}:{normalized_repo_name}:{ref}"
 
 
+def issue_brief_dedupe_key(
+    *, user_id: str, repo_name: str, ref: str, issue_number: int
+) -> str:
+    normalized_repo_name = normalize_repository_name(repo_name)
+    return (
+        f"{JobType.ISSUE_BRIEF}:{user_id}:{normalized_repo_name}:"
+        f"{ref}:{issue_number}"
+    )
+
+
 def cancel_job(session: Session, job_id: int) -> bool:
     """Atomically cancel a pending or running job. Returns True if it transitioned."""
     result = session.exec(
@@ -66,6 +76,8 @@ def enqueue_job(
     job_type: str,
     dedupe_key: str,
     topic: str | None = None,
+    issue_number: int | None = None,
+    blocked_by_job_id: int | None = None,
 ) -> tuple[Job, bool]:
     """Return the active equivalent job, or atomically enqueue a new one.
 
@@ -86,6 +98,8 @@ def enqueue_job(
         job_type=job_type,
         dedupe_key=dedupe_key,
         topic=topic,
+        issue_number=issue_number,
+        blocked_by_job_id=blocked_by_job_id,
         status=JobStatus.PENDING,
     )
     try:

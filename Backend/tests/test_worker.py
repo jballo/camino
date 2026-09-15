@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import exc
 
 from app.models.job import JobStatus, JobType
+from app.brief import BriefNeedsRefreshError
 from app.models.tour import TourArtifact, TourStep
 from app.services.staleness import ChangedFile, HeadComparison
 from app.services.repository_ingestion import (
@@ -94,6 +95,39 @@ async def test_run_job_success_persists_artifact():
         claimed_at=None,
         claimed_by=None,
     )
+
+
+async def test_issue_brief_parks_behind_refresh_without_spending_retry():
+    job = _job(
+        job_type=JobType.ISSUE_BRIEF,
+        issue_number=44,
+        refresh_cycles=0,
+        userId="user_1",
+        topic="Fix refresh races",
+    )
+    session = MagicMock()
+    session.get.return_value = job
+    dependency = MagicMock(id=17)
+    park = MagicMock(return_value=True)
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker.fetch_issue_thread", return_value=MagicMock(branch_instruction=None)),
+        patch("app.worker.resolve_target_branch", return_value=MagicMock(branch="main", default_branch="main")),
+        patch("app.worker.resolve_fork_status", return_value=MagicMock()),
+        patch("app.worker.generate_brief", new_callable=AsyncMock, side_effect=BriefNeedsRefreshError("stale")),
+        patch("app.worker.enqueue_job", return_value=(dependency, True)) as enqueue,
+        patch("app.worker.park_job", park),
+        patch("app.worker._update_owned_job") as persist,
+    ):
+        await run_job(1, WORKER_ID)
+
+    assert enqueue.call_args.kwargs["job_type"] == JobType.REPOSITORY_INGEST
+    park.assert_called_once_with(
+        session, 1, WORKER_ID, blocked_by_job_id=17
+    )
+    persist.assert_not_called()
 
 
 async def test_run_job_stamps_tour_freshness():

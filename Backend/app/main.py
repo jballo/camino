@@ -10,7 +10,7 @@ from sqlalchemy import text
 from app.config import settings
 from app.db import engine
 
-from app.api import agent, github, journeys, repositories
+from app.api import agent, briefs, github, journeys, repositories
 from app.webhooks import clerk, github as github_webhook
 from app.models.code import CodeChunkEmbedding, CodeChunkModel, RepoIndexState
 from app.models.job import Job
@@ -49,6 +49,23 @@ async def lifespan(app: FastAPI):
         # GIN indexes, and the view that exposes only live index generations.
         # It also cannot add columns to tables created by older releases.
         conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS ref VARCHAR"))
+        conn.execute(text(
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS issue_number INTEGER"
+        ))
+        conn.execute(text(
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS blocked_by_job_id INTEGER"
+        ))
+        conn.execute(text(
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS refresh_cycles INTEGER "
+            "NOT NULL DEFAULT 0"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_jobs_issue_number ON jobs (issue_number)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_jobs_blocked_by_job_id "
+            "ON jobs (blocked_by_job_id)"
+        ))
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS ix_chunks_repo_generation
             ON code_chunks (repo_name, ref, generation)
@@ -121,5 +138,6 @@ app.include_router(github.router, prefix="/api/v1/github", tags=["github"])
 app.include_router(repositories.router, prefix="/api/v1/repositories", tags=["repositories"])
 app.include_router(agent.router, prefix="/api/v1/agent", tags=["agent"])
 app.include_router(journeys.router, prefix="/api/v1/journeys", tags=["journeys"])
+app.include_router(briefs.router, prefix="/api/v1/briefs", tags=["briefs"])
 app.include_router(clerk.router, prefix="/webhooks/clerk", tags=["webhooks"])
 app.include_router(github_webhook.router, prefix="/webhooks/github", tags=["webhooks"])

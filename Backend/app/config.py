@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     rate_limit_contribution_target_window_seconds: int = 60
     rate_limit_journey_create_requests: int = 5
     rate_limit_journey_create_window_seconds: int = 3600
+    rate_limit_issue_brief_create_requests: int = 5
+    rate_limit_issue_brief_create_window_seconds: int = 3600
     cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
     run_worker: bool = False
     worker_poll_interval: float = Field(default=1.5, gt=0)

@@ -8,6 +8,7 @@ from sqlmodel import Field, SQLModel
 class JobType:
     TOUR = "tour"
     REPOSITORY_INGEST = "repository_ingest"
+    ISSUE_BRIEF = "issue_brief"
 
 
 class JobStatus:
@@ -31,6 +32,7 @@ class Job(SQLModel, table=True):
     installation_id: int
     repo_name: str = Field(index=True)
     ref: str | None = Field(default=None, index=True)
+    issue_number: int | None = Field(default=None, index=True)
     job_type: str = Field(default=JobType.TOUR, index=True)
     dedupe_key: str | None = Field(default=None)
     topic: str | None = Field(default=None)
@@ -43,6 +45,8 @@ class Job(SQLModel, table=True):
     )
     claimed_by: str | None = Field(default=None)
     attempts: int = Field(default=0)
+    blocked_by_job_id: int | None = Field(default=None, index=True)
+    refresh_cycles: int = Field(default=0)
     createdAt: dt.datetime = Field(
         sa_column=Column[dt.datetime](
             DateTime(timezone=True),

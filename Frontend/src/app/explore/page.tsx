@@ -130,6 +130,11 @@ export default function Explore() {
   useEffect(() => {
     loadRepos();
     loadProcessed();
+    const params = new URLSearchParams(window.location.search);
+    const initialRepo = params.get("repo");
+    const initialQuestion = params.get("question");
+    if (initialRepo) setSelectedRepo(initialRepo);
+    if (initialQuestion) setQuery(initialQuestion);
   }, [loadRepos, loadProcessed]);
 
   useEffect(
