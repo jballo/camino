@@ -52,6 +52,19 @@ async def lifespan(app: FastAPI):
         conn.execute(text(
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS issue_repo VARCHAR"
         ))
+        # The repository that owns an issue was not stored before issue_repo was
+        # introduced.  repo_name identifies the code repository and may be the
+        # issue's upstream, so active legacy briefs cannot be resumed safely.
+        conn.execute(text("""
+            UPDATE jobs
+            SET status = 'failed',
+                error = 'Legacy issue brief is missing its issue repository; recreate it',
+                claimed_at = NULL,
+                claimed_by = NULL
+            WHERE job_type = 'issue_brief'
+              AND issue_repo IS NULL
+              AND status IN ('pending', 'running')
+        """))
         conn.execute(text(
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS issue_number INTEGER"
         ))

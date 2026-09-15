@@ -528,7 +528,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
         installation_id = job.installation_id
         ref = job.ref
         attempts = job.attempts
-        issue_repo = job.issue_repo or repo_name
+        issue_repo = job.issue_repo
         issue_number = job.issue_number
         refresh_cycles = job.refresh_cycles
 
@@ -595,6 +595,10 @@ async def run_job(job_id: int, worker_id: str) -> None:
                 )
                 result = artifact.model_dump(mode="json")
             elif job_type == JobType.ISSUE_BRIEF:
+                if issue_repo is None:
+                    raise BriefGenerationError(
+                        "Issue brief job is missing its issue repository"
+                    )
                 if topic is None or issue_number is None:
                     raise BriefGenerationError(
                         "Issue brief job is missing its issue metadata"

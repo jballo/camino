@@ -32,6 +32,14 @@ async def test_lifespan_provisions_schema_extras():
     assert "CREATE EXTENSION IF NOT EXISTS vector" in statements
     assert "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS ref VARCHAR" in statements
     assert (
+        "UPDATE jobs SET status = 'failed', "
+        "error = 'Legacy issue brief is missing its issue repository; recreate it', "
+        "claimed_at = NULL, claimed_by = NULL "
+        "WHERE job_type = 'issue_brief' AND issue_repo IS NULL "
+        "AND status IN ('pending', 'running')"
+        in statements
+    )
+    assert (
         "CREATE INDEX IF NOT EXISTS ix_chunks_repo_generation "
         "ON code_chunks (repo_name, ref, generation)"
         in statements

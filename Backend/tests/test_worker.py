@@ -101,6 +101,7 @@ async def test_run_job_success_persists_artifact():
 async def test_issue_brief_parks_behind_refresh_without_spending_retry():
     job = _job(
         job_type=JobType.ISSUE_BRIEF,
+        issue_repo="org/repo",
         issue_number=44,
         refresh_cycles=0,
         userId="user_1",
@@ -129,6 +130,34 @@ async def test_issue_brief_parks_behind_refresh_without_spending_retry():
         session, 1, WORKER_ID, blocked_by_job_id=17
     )
     persist.assert_not_called()
+
+
+async def test_legacy_issue_brief_without_issue_repo_fails_without_fetching():
+    job = _job(
+        job_type=JobType.ISSUE_BRIEF,
+        issue_repo=None,
+        issue_number=44,
+        userId="user_1",
+        topic="Legacy issue",
+    )
+    session = MagicMock()
+    session.get.return_value = job
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker.fetch_issue_thread") as fetch_issue,
+        patch("app.worker._mark_failed") as mark_failed,
+    ):
+        await run_job(1, WORKER_ID)
+
+    fetch_issue.assert_not_called()
+    mark_failed.assert_called_once_with(
+        session,
+        1,
+        WORKER_ID,
+        "Issue brief job is missing its issue repository",
+    )
 
 
 async def test_issue_brief_fetches_issue_from_fork_and_indexes_upstream():
