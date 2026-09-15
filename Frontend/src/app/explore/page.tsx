@@ -49,6 +49,11 @@ type IngestResult = RepositoryIngestionResult & {
   repoName: string;
 };
 
+type ProcessedRef = {
+  chunkCount: number;
+  ref: string;
+};
+
 export default function Explore() {
   const { getToken } = useAuth();
   const [repos, setRepos] = useState<string[]>([]);
@@ -72,8 +77,9 @@ export default function Explore() {
   >(undefined);
   const ingestionAbortRef = useRef<AbortController | null>(null);
   const [processedMap, setProcessedMap] = useState<
-    Record<string, { chunkCount: number; ref: string }>
+    Record<string, ProcessedRef[]>
   >({});
+  const [selectedRefs, setSelectedRefs] = useState<Record<string, string>>({});
   const [processedLoading, setProcessedLoading] = useState(false);
 
   const [query, setQuery] = useState("");
@@ -110,13 +116,16 @@ export default function Explore() {
       const result = await backendFetch<
         { repo_name: string; ref: string; chunk_count: number }[]
       >("/api/v1/repositories/processed", token);
-      const map: Record<string, { chunkCount: number; ref: string }> = {};
+      const map: Record<string, ProcessedRef[]> = {};
       if (Array.isArray(result)) {
         for (const row of result) {
-          map[row.repo_name] = {
+          (map[row.repo_name] ??= []).push({
             chunkCount: row.chunk_count,
             ref: row.ref,
-          };
+          });
+        }
+        for (const refs of Object.values(map)) {
+          refs.sort((a, b) => a.ref.localeCompare(b.ref));
         }
       }
       setProcessedMap(map);
@@ -186,13 +195,22 @@ export default function Explore() {
         }
 
         setIngestResult({ repoName, ...job.result });
-        setProcessedMap((prev) => ({
-          ...prev,
-          [repoName]: {
-            chunkCount: job.result?.chunks_inserted ?? 0,
-            ref: job.ref ?? "",
-          },
-        }));
+        if (job.ref) {
+          setProcessedMap((prev) => {
+            const refs = prev[repoName] ?? [];
+            const nextRef = {
+              chunkCount: job.result?.chunks_inserted ?? 0,
+              ref: job.ref ?? "",
+            };
+            return {
+              ...prev,
+              [repoName]: [
+                ...refs.filter((item) => item.ref !== job.ref),
+                nextRef,
+              ].sort((a, b) => a.ref.localeCompare(b.ref)),
+            };
+          });
+        }
         void loadProcessed();
       } catch (error) {
         if (isAbortError(error)) return;
@@ -258,6 +276,12 @@ export default function Explore() {
 
   const askAgent = useCallback(async () => {
     if (!selectedRepo || query.trim().length === 0) return;
+    const processedRefs = processedMap[selectedRepo] ?? [];
+    const selectedRef = processedRefs.some(
+      (item) => item.ref === selectedRefs[selectedRepo],
+    )
+      ? selectedRefs[selectedRepo]
+      : processedRefs[0]?.ref;
     setAsking(true);
     setAskError(undefined);
     setAnswer(undefined);
@@ -273,9 +297,7 @@ export default function Explore() {
           body: {
             question: query,
             repoName: selectedRepo,
-            ...(processedMap[selectedRepo]?.ref
-              ? { ref: processedMap[selectedRepo].ref }
-              : {}),
+            ...(selectedRef ? { ref: selectedRef } : {}),
           },
         },
       );
@@ -286,7 +308,16 @@ export default function Explore() {
     } finally {
       setAsking(false);
     }
-  }, [getToken, processedMap, selectedRepo, query]);
+  }, [getToken, processedMap, query, selectedRefs, selectedRepo]);
+
+  const selectedRepoRefs = selectedRepo
+    ? (processedMap[selectedRepo] ?? [])
+    : [];
+  const selectedRef = selectedRepoRefs.some(
+    (item) => item.ref === selectedRefs[selectedRepo ?? ""],
+  )
+    ? selectedRefs[selectedRepo ?? ""]
+    : selectedRepoRefs[0]?.ref;
 
   return (
     <div className="flex flex-col w-full min-h-full">
@@ -327,9 +358,12 @@ export default function Explore() {
             {repos.map((repo) => {
               const isSelected = repo === selectedRepo;
               const isProcessing = repo === processingRepo;
-              const isProcessed = repo in processedMap;
-              const processed = processedMap[repo];
-              const chunkCount = processed?.chunkCount;
+              const processedRefs = processedMap[repo] ?? [];
+              const isProcessed = processedRefs.length > 0;
+              const chunkCount = processedRefs.reduce(
+                (total, item) => total + item.chunkCount,
+                0,
+              );
               const jobStatus = isProcessing ? ingestionJob?.status : undefined;
               return (
                 <div
@@ -368,10 +402,10 @@ export default function Explore() {
                       <span className="inline-flex items-center gap-1 rounded-full bg-primary/15 px-2 py-0.5 text-xs text-primary">
                         <CheckCircle2 className="size-3" />
                         Processed
-                        {typeof chunkCount === "number"
-                          ? ` · ${chunkCount} chunks`
-                          : ""}
-                        {processed?.ref ? ` · ${processed.ref}` : ""}
+                        {` · ${chunkCount} chunks`}
+                        {` · ${processedRefs.length} ${
+                          processedRefs.length === 1 ? "ref" : "refs"
+                        }`}
                       </span>
                     ) : (
                       <span className="inline-flex items-center gap-1 rounded-full bg-accent px-2 py-0.5 text-xs text-muted-foreground">
@@ -424,7 +458,30 @@ export default function Explore() {
 
         {/* Search panel */}
         <main className="flex-1 flex flex-col gap-4 min-w-0">
-          <h2 className="text-lg font-semibold">Ask the codebase</h2>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold">Ask the codebase</h2>
+            {selectedRepo && selectedRepoRefs.length > 0 && (
+              <label className="flex items-center gap-2 text-sm text-muted-foreground">
+                Indexed ref
+                <select
+                  value={selectedRef}
+                  onChange={(event) =>
+                    setSelectedRefs((previous) => ({
+                      ...previous,
+                      [selectedRepo]: event.target.value,
+                    }))
+                  }
+                  className="h-9 max-w-64 rounded-md border border-border bg-background px-3 text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                >
+                  {selectedRepoRefs.map((item) => (
+                    <option key={item.ref} value={item.ref}>
+                      {item.ref} ({item.chunkCount} chunks)
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
 
           <div className="flex flex-col gap-3 rounded-2xl outline-1 outline-accent p-4">
             <Textarea
