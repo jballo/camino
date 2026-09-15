@@ -74,19 +74,20 @@ export default function BriefsPage() {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-4xl flex-col gap-10 px-8 py-12">
-      <header className="flex flex-col gap-3">
+    <div className="page-shell">
+      <header className="flex flex-col items-center gap-3 text-center">
         <div className="flex items-center gap-3">
-          <BookOpen className="size-7 text-primary" />
-          <h1 className="text-3xl font-semibold">Issue briefs</h1>
+          <BookOpen className="size-5 text-brand-accent" />
+          <span className="eyebrow">Contribution intelligence</span>
         </div>
-        <p className="max-w-2xl text-sm text-muted-foreground">
+        <h1 className="display-title text-5xl font-black sm:text-7xl">Issue briefs<span className="text-brand-accent">.</span></h1>
+        <p className="max-w-2xl text-base text-muted-foreground">
           Paste a GitHub issue to check contribution signals, choose the right
           base branch, and build a grounded implementation guide.
         </p>
       </header>
 
-      <section className="flex flex-col gap-3 rounded-2xl border border-border bg-card p-5">
+      <section className="console flex flex-col gap-3 p-5 sm:p-6">
         <label htmlFor="issue-url" className="text-sm font-medium">
           GitHub issue URL
         </label>
@@ -100,12 +101,12 @@ export default function BriefsPage() {
               if (event.key === "Enter") void inspectIssue();
             }}
             placeholder="https://github.com/owner/repo/issues/123"
-            className="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:border-primary"
+            className="field-control min-w-0 flex-1 text-sm"
           />
           <Button
             onClick={inspectIssue}
             disabled={loading || !issueUrl.trim()}
-            className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground disabled:opacity-50"
+            className="button-primary"
           >
             {loading && <Loader2 className="size-4 animate-spin" />}
             Preview
@@ -115,7 +116,7 @@ export default function BriefsPage() {
       </section>
 
       {preview && (
-        <section className="flex flex-col gap-5 rounded-2xl border border-border p-6">
+        <section className="console flex flex-col gap-5 p-6">
           <div className="flex flex-col gap-2">
             <div className="text-xs uppercase tracking-wide text-muted-foreground">
               {preview.issueRepo} · issue #{preview.issueNumber} · {preview.state}
@@ -160,7 +161,7 @@ export default function BriefsPage() {
                 id="target-branch"
                 value={branch}
                 onChange={(event) => setBranch(event.target.value)}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm sm:w-64"
+                className="field-control w-full font-mono text-sm sm:w-64"
               />
               <span className="text-xs text-muted-foreground">
                 {branch === preview.targetBranch.branch
@@ -178,7 +179,7 @@ export default function BriefsPage() {
           <Button
             onClick={generate}
             disabled={creating || !branch.trim()}
-            className="inline-flex w-fit items-center gap-2 rounded-md bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
+            className="button-primary w-fit"
           >
             {creating && <Loader2 className="size-4 animate-spin" />}
             Generate brief
@@ -188,22 +189,23 @@ export default function BriefsPage() {
 
       {briefs.length > 0 && (
         <section className="flex flex-col gap-3">
-          <h2 className="text-lg font-semibold">Recent briefs</h2>
-          {briefs.map((brief) => (
+          <h2 className="font-display text-2xl font-black uppercase">Recent briefs</h2>
+          <div className="border-y border-border">{briefs.map((brief, index) => (
             <Link
               key={brief.id}
               href={`/briefs/${brief.id}`}
-              className="flex items-center justify-between gap-4 rounded-xl border border-border p-4 hover:bg-accent/50"
+              className="ledger-row"
             >
+              <span className="font-display text-2xl text-muted-foreground">{String(index + 1).padStart(2, "0")}</span>
               <span className="min-w-0">
                 <span className="block truncate font-medium">{brief.issueTitle}</span>
                 <span className="block truncate font-mono text-xs text-muted-foreground">
                   {brief.issueRepo} · #{brief.issueNumber}
                 </span>
               </span>
-              <span className="text-xs capitalize text-muted-foreground">{brief.status}</span>
+              <span className="state-pill capitalize">{brief.status}</span>
             </Link>
-          ))}
+          ))}</div>
         </section>
       )}
     </div>

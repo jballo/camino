@@ -183,7 +183,7 @@ function GenerateInner() {
   return (
     <div className="flex flex-col w-full min-h-full">
       <div className="flex flex-1 flex-col items-center justify-center px-8 py-12">
-        <div className="flex w-full max-w-md flex-col gap-8">
+        <div className="console flex w-full max-w-xl flex-col gap-8 p-6 sm:p-8">
           {journey?.status === "cancelled" ? (
             <div className="flex flex-col items-center gap-4 text-center">
               <AlertTriangle className="size-10 text-muted-foreground" />
@@ -193,7 +193,7 @@ function GenerateInner() {
               </p>
               <Link
                 href="/"
-                className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground"
+                className="button-primary"
               >
                 Start over
               </Link>
@@ -205,7 +205,7 @@ function GenerateInner() {
               <p className="text-sm text-muted-foreground">{error}</p>
               <Link
                 href="/"
-                className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground"
+                className="button-primary"
               >
                 Start over
               </Link>
@@ -222,13 +222,13 @@ function GenerateInner() {
               <div className="flex items-center gap-3">
                 <Button
                   onClick={keepWaiting}
-                  className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground"
+                  className="button-primary"
                 >
                   Keep waiting
                 </Button>
                 <Link
                   href="/"
-                  className="rounded-md border border-border px-4 py-2 text-sm"
+                  className="button-ghost"
                 >
                   Start over
                 </Link>
@@ -237,7 +237,8 @@ function GenerateInner() {
           ) : (
             <>
               <div className="flex flex-col items-center gap-2 text-center">
-                <h2 className="text-2xl font-semibold">Building your tour</h2>
+                <span className="eyebrow flex items-center gap-2"><span className="status-dot" /> Live process</span>
+                <h1 className="display-title mt-2 text-4xl font-black">Building your tour</h1>
                 {journey && (
                   <p className="text-sm text-muted-foreground">
                     <span className="text-foreground">{journey.topic}</span> ·{" "}
@@ -254,7 +255,7 @@ function GenerateInner() {
                   return (
                     <div
                       key={step.status}
-                      className="flex items-center gap-3 rounded-lg border border-border p-3"
+                      className="flex items-center gap-3 border-b border-border p-4 last:border-0"
                     >
                       {done ? (
                         <CheckCircle2 className="size-5 text-primary" />
@@ -289,7 +290,7 @@ function GenerateInner() {
                 <Button
                   onClick={stopGenerating}
                   disabled={stopping}
-                  className="self-center rounded-md border border-border px-4 py-2 text-sm disabled:opacity-60"
+                  className="button-ghost self-center disabled:opacity-60"
                 >
                   {stopping ? "Stopping…" : "Stop generating"}
                 </Button>

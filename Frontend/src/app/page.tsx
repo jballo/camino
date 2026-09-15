@@ -292,16 +292,17 @@ export default function Home() {
   })();
 
   return (
-    <div className="flex flex-col justify-center items-center w-full min-h-full">
-      <div className="flex flex-col justify-center items-center w-full max-w-[760px] px-8 py-12 gap-3">
+    <div className="flex min-h-full w-full flex-col items-center">
+      <div className="page-shell max-w-[900px] items-center">
           <div className="flex flex-col items-center gap-2 text-center">
-            <h2 className="text-4xl">Generate a guided tour</h2>
-            <p className="text-sm text-muted-foreground max-w-md">
+            <span className="eyebrow">Generate a walkthrough</span>
+            <h1 className="display-title mt-3 text-5xl font-black sm:text-7xl">Guided tours<span className="text-brand-accent">.</span></h1>
+            <p className="mt-4 max-w-xl text-base leading-relaxed text-muted-foreground">
               Pick a repository, describe a topic, and Camino builds an ordered,
               code-grounded walkthrough of how it works.
             </p>
           </div>
-          <div className="flex flex-col outline-1 outline-accent rounded-2xl p-5 gap-4 w-full">
+          <div className="console mt-6 flex w-full flex-col gap-4 p-5 sm:p-6">
             {/* Step 1: repository */}
             <div className="flex flex-col gap-2">
               <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -309,7 +310,7 @@ export default function Home() {
               </label>
               <Button
                 onClick={openDialog}
-                className="flex items-center gap-2 self-start rounded-md border border-border px-3 py-2 text-sm hover:bg-accent"
+                className="field-control flex w-full items-center gap-2 text-sm hover:border-foreground"
               >
                 <FileCode className="size-4 text-muted-foreground" />
                 {repoSelected ? (
@@ -345,7 +346,7 @@ export default function Home() {
               </label>
               <Textarea
                 placeholder="What should the tour cover? e.g. “How authentication works”"
-                className="w-full rounded-md border border-border p-3 text-start focus:outline-none focus:ring-1 focus:ring-ring field-sizing-content min-h-16 max-h-40 resize-none"
+                className="field-control field-sizing-content min-h-24 max-h-40 w-full resize-none p-4 text-start"
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
               />
@@ -374,7 +375,7 @@ export default function Home() {
                     : "Ready to generate"}
               </span>
               <Button
-                className="flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground disabled:opacity-50"
+                className="button-primary"
                 aria-label="Generate tour"
                 onClick={onSubmitPrompt}
                 disabled={!canSubmit}
@@ -399,8 +400,8 @@ export default function Home() {
                 className="relative z-50"
               >
                 <div className="fixed inset-0 flex w-screen items-center justify-center p-4">
-                  <DialogPanel className="max-w-lg space-y-4 border bg-primary-foreground p-12 rounded-md">
-                    <DialogTitle className="font-bold">
+                  <DialogPanel className="w-full max-w-lg space-y-5 rounded-[14px] border border-border bg-card p-6 shadow-2xl sm:p-8">
+                    <DialogTitle className="font-display text-2xl font-black uppercase">
                       Select repository
                     </DialogTitle>
                     <Description className="text-sm text-muted-foreground">

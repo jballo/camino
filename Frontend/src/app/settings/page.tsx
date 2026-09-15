@@ -64,9 +64,10 @@ export default function Settings() {
 
   return (
     <div className="flex w-full flex-col min-h-full">
-      <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 px-8 py-12">
+      <div className="page-shell max-w-3xl">
         <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-semibold">Settings</h1>
+          <span className="eyebrow">Account & connections</span>
+          <h1 className="display-title mt-2 text-5xl font-black sm:text-6xl">Settings<span className="text-brand-accent">.</span></h1>
           <p className="text-sm text-muted-foreground">
             Manage the connections Camino uses to read your code.
           </p>
@@ -99,7 +100,7 @@ export default function Settings() {
               again.
             </div>
           )}
-          <div className="flex flex-col gap-4 rounded-xl border border-border p-6">
+          <div className="console flex flex-col gap-4 p-6">
             <div className="flex items-start justify-between gap-4">
               <div className="flex items-center gap-3">
                 <span className="flex size-10 items-center justify-center rounded-lg bg-accent">
