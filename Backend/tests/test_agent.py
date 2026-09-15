@@ -110,7 +110,7 @@ async def test_hybrid_search_tool_appends_to_sink(mock_search):
     assert [s.chunk_id for s in sink] == [10, 20]
     assert "[1] src/auth.py" in out
     _, kwargs = mock_search.call_args
-    assert kwargs["installation_id"] == 99
+    assert kwargs["ref"] == 99
     assert kwargs["limit"] == 5
 
 
@@ -160,7 +160,7 @@ async def test_answer_question_returns_final_message(
         MagicMock(),
         question="How does login work?",
         repo_name="org/repo",
-        installation_id=1,
+        ref="main",
     )
 
     assert isinstance(result, AgentAnswer)
@@ -191,7 +191,7 @@ async def test_answer_question_dedupes_sink_sources(
         MagicMock(),
         question="q",
         repo_name="org/repo",
-        installation_id=1,
+        ref="main",
     )
 
     assert [s.chunk_id for s in result.sources] == [10, 20]
@@ -214,7 +214,7 @@ async def test_answer_question_stringifies_non_string_content(
         MagicMock(),
         question="q",
         repo_name="org/repo",
-        installation_id=1,
+        ref="main",
     )
 
     assert isinstance(result.answer, str)
@@ -237,7 +237,7 @@ async def test_answer_question_uses_custom_model(
         MagicMock(),
         question="q",
         repo_name="org/repo",
-        installation_id=1,
+        ref="main",
         model="gpt-custom",
     )
 

@@ -17,12 +17,12 @@ def test_rebuild_search_vector_targets_active_generation():
     session = MagicMock()
     session.exec.return_value.one_or_none.return_value = "active-gen"
 
-    rebuild_search_vector(session, "org/repo", 123)
+    rebuild_search_vector(session, "org/repo", "main")
 
     statement = session.execute.call_args.args[0]
     assert statement.compile().params == {
         "repo_name": "org/repo",
-        "installation_id": 123,
+        "ref": "main",
         "generation": "active-gen",
     }
     session.commit.assert_called_once_with()
@@ -32,7 +32,7 @@ def test_rebuild_search_vector_is_noop_without_active_generation():
     session = MagicMock()
     session.exec.return_value.one_or_none.return_value = None
 
-    rebuild_search_vector(session, "org/repo", 123)
+    rebuild_search_vector(session, "org/repo", "main")
 
     session.execute.assert_not_called()
     session.commit.assert_not_called()

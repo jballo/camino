@@ -8,6 +8,7 @@ from sqlmodel import select
 
 from app.db import SessionDep
 from app.models.github_connection import GithubConnections
+from app.models.code import RepoIndexState
 from app.models.job import Job, JobStatus, JobType
 from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
 from app.security import get_authenticated_user_id
@@ -16,6 +17,11 @@ from app.services.jobs import (
     enqueue_job,
     normalize_repository_name,
     tour_dedupe_key,
+)
+from app.services.repo_access import (
+    RepoAccessDenied,
+    RepoAccessUnavailable,
+    authorize_index_read,
 )
 
 logger = logging.getLogger(__name__)
@@ -27,6 +33,7 @@ class CreateJourneyBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     repoName: str
+    ref: str | None = None
     topic: str = Field(min_length=1, max_length=500)
 
 
@@ -39,6 +46,7 @@ class JourneyResponse(BaseModel):
     id: int
     status: str
     repoName: str
+    ref: str | None
     topic: str
     artifact: dict | None = None
     error: str | None = None
@@ -48,6 +56,7 @@ class JourneySummaryResponse(BaseModel):
     id: int
     status: str
     repoName: str
+    ref: str | None
     topic: str
     createdAt: dt.datetime
 
@@ -77,6 +86,7 @@ def _journey_response(job: Job) -> JourneyResponse:
         id=job.id,
         status=job.status,
         repoName=job.repo_name,
+        ref=job.ref,
         topic=job.topic,
         artifact=job.artifact,
         error=job.error,
@@ -101,17 +111,43 @@ async def create_journey(
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
 
+    statement = select(RepoIndexState).where(
+        RepoIndexState.repo_name == normalize_repository_name(payload.repoName)
+    )
+    if payload.ref is not None:
+        statement = statement.where(RepoIndexState.ref == payload.ref)
+    try:
+        states = session.exec(statement).all()
+    except exc.SQLAlchemyError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+    if not states:
+        raise HTTPException(status_code=404, detail="Repository index not found")
+    if payload.ref is None and len(states) != 1:
+        raise HTTPException(
+            status_code=409,
+            detail="Repository has multiple indexed refs; specify ref",
+        )
+    index_state = states[0]
+    try:
+        authorize_index_read(session, auth_user_id, index_state)
+    except RepoAccessDenied:
+        raise HTTPException(status_code=404, detail="Repository index not found")
+    except RepoAccessUnavailable:
+        raise HTTPException(status_code=502, detail="Github access check failed")
+
     try:
         job, created = enqueue_job(
             session,
             user_id=auth_user_id,
             installation_id=gh_connection.installationId,
             repo_name=payload.repoName,
+            ref=index_state.ref,
             job_type=JobType.TOUR,
             dedupe_key=tour_dedupe_key(
                 user_id=auth_user_id,
-                installation_id=gh_connection.installationId,
                 repo_name=payload.repoName,
+                ref=index_state.ref,
                 topic=payload.topic,
             ),
             topic=payload.topic,
@@ -198,6 +234,7 @@ async def list_journeys(
             id=job.id,
             status=job.status,
             repoName=job.repo_name,
+            ref=job.ref,
             topic=job.topic,
             createdAt=job.createdAt,
         )

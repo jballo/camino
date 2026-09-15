@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -8,6 +9,7 @@ from app.main import app
 from app.models.job import JobStatus, JobType
 from app.rate_limit import REPOSITORY_INGEST_RATE_LIMIT
 from app.security import get_authenticated_user_id
+from app.services.repo_access import RepoAccess, RepoAccessDenied
 
 USER_ID = "user_123"
 INSTALLATION_ID = 456
@@ -39,6 +41,7 @@ def _job(**overrides):
     job.userId = overrides.get("userId", USER_ID)
     job.installation_id = overrides.get("installation_id", INSTALLATION_ID)
     job.repo_name = overrides.get("repo_name", "org/repo")
+    job.ref = overrides.get("ref", "main")
     job.job_type = overrides.get("job_type", JobType.REPOSITORY_INGEST)
     job.status = overrides.get("status", JobStatus.PENDING)
     job.attempts = overrides.get("attempts", 0)
@@ -49,11 +52,19 @@ def _job(**overrides):
 
 def test_post_enqueues_repository_ingestion_job():
     job = _job()
-    with patch(
-        "app.api.repositories.enqueue_job",
-        return_value=(job, True),
-    ) as enqueue:
-        response = client.post(URL, json={"repoName": "org/repo"})
+    with (
+        patch(
+            "app.api.repositories.resolve_repo_access",
+            return_value=RepoAccess(INSTALLATION_ID, "public"),
+        ),
+        patch(
+            "app.api.repositories.enqueue_job",
+            return_value=(job, True),
+        ) as enqueue,
+    ):
+        response = client.post(
+            URL, json={"repoName": "org/repo", "ref": "main"}
+        )
 
     assert response.status_code == 200
     assert response.json() == {"id": 12, "status": JobStatus.PENDING}
@@ -61,21 +72,72 @@ def test_post_enqueues_repository_ingestion_job():
         "user_id": USER_ID,
         "installation_id": INSTALLATION_ID,
         "repo_name": "org/repo",
+        "ref": "main",
         "job_type": JobType.REPOSITORY_INGEST,
-        "dedupe_key": "repository_ingest:456:org/repo",
+        "dedupe_key": "repository_ingest:org/repo:main",
     }
 
 
 def test_post_returns_existing_active_job_for_duplicate_enqueue():
     job = _job(id=15, status=JobStatus.RUNNING)
-    with patch(
-        "app.api.repositories.enqueue_job",
-        return_value=(job, False),
+    with (
+        patch(
+            "app.api.repositories.resolve_repo_access",
+            return_value=RepoAccess(INSTALLATION_ID, "public"),
+        ),
+        patch(
+            "app.api.repositories.enqueue_job",
+            return_value=(job, False),
+        ),
+    ):
+        response = client.post(
+            URL, json={"repoName": "org/repo", "ref": "main"}
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"id": 15, "status": JobStatus.RUNNING}
+
+
+def test_post_resolves_target_branch_when_ref_is_omitted():
+    job = _job(ref="develop")
+    with (
+        patch(
+            "app.api.repositories.resolve_repo_access",
+            return_value=RepoAccess(INSTALLATION_ID, "public"),
+        ),
+        patch(
+            "app.api.repositories.resolve_target_branch",
+            return_value=SimpleNamespace(branch="develop"),
+        ) as resolve,
+        patch(
+            "app.api.repositories.enqueue_job",
+            return_value=(job, True),
+        ) as enqueue,
     ):
         response = client.post(URL, json={"repoName": "org/repo"})
 
     assert response.status_code == 200
-    assert response.json() == {"id": 15, "status": JobStatus.RUNNING}
+    resolve.assert_called_once_with("org/repo", INSTALLATION_ID)
+    assert enqueue.call_args.kwargs["ref"] == "develop"
+    assert enqueue.call_args.kwargs["dedupe_key"] == (
+        "repository_ingest:org/repo:develop"
+    )
+
+
+def test_post_denies_inaccessible_repository_before_enqueue():
+    with (
+        patch(
+            "app.api.repositories.resolve_repo_access",
+            side_effect=RepoAccessDenied("Repository not found"),
+        ),
+        patch("app.api.repositories.enqueue_job") as enqueue,
+    ):
+        response = client.post(
+            URL, json={"repoName": "org/private", "ref": "main"}
+        )
+
+    assert response.status_code == 404
+    enqueue.assert_not_called()
 
 
 def test_get_returns_ingestion_status_and_result():
@@ -98,6 +160,7 @@ def test_get_returns_ingestion_status_and_result():
         "id": 12,
         "status": JobStatus.COMPLETE,
         "repoName": "org/repo",
+        "ref": "main",
         "attempts": 2,
         "result": {"chunks_inserted": 10, "embeddings_created": 10},
         "error": None,
@@ -120,57 +183,38 @@ def test_get_rejects_a_different_job_type():
 
 def test_get_allows_non_owner_with_access_to_repository():
     job = _job(userId="other_user")
-    connection = MagicMock(installationId=INSTALLATION_ID)
-    installation = MagicMock()
-    installation.get_repos.return_value = [
-        MagicMock(full_name="ORG/REPO"),
-    ]
-    integration = MagicMock()
-    integration.get_app_installation.return_value = installation
-
     def session_with_job():
         session = MagicMock()
         session.get.return_value = job
-        session.exec.return_value.first.return_value = connection
+        session.exec.return_value.one_or_none.return_value = None
         yield session
 
     app.dependency_overrides[get_session] = session_with_job
     with (
-        patch("app.api.repositories.Auth.AppAuth", return_value=MagicMock()),
         patch(
-            "app.api.repositories.GithubIntegration",
-            return_value=integration,
+            "app.api.repositories.resolve_repo_access",
+            return_value=RepoAccess(INSTALLATION_ID, "public"),
         ),
     ):
         response = client.get(f"{URL}/12")
 
     assert response.status_code == 200
     assert response.json()["repoName"] == "org/repo"
-    integration.get_app_installation.assert_called_once_with(INSTALLATION_ID)
 
 
 def test_get_hides_non_owner_job_without_repository_access():
     job = _job(userId="other_user")
-    connection = MagicMock(installationId=INSTALLATION_ID)
-    installation = MagicMock()
-    installation.get_repos.return_value = [
-        MagicMock(full_name="org/different-repo"),
-    ]
-    integration = MagicMock()
-    integration.get_app_installation.return_value = installation
-
     def session_with_job():
         session = MagicMock()
         session.get.return_value = job
-        session.exec.return_value.first.return_value = connection
+        session.exec.return_value.one_or_none.return_value = None
         yield session
 
     app.dependency_overrides[get_session] = session_with_job
     with (
-        patch("app.api.repositories.Auth.AppAuth", return_value=MagicMock()),
         patch(
-            "app.api.repositories.GithubIntegration",
-            return_value=integration,
+            "app.api.repositories.resolve_repo_access",
+            side_effect=RepoAccessDenied("Repository not found"),
         ),
     ):
         response = client.get(f"{URL}/12")
@@ -185,40 +229,34 @@ def test_get_hides_non_owner_job_without_matching_installation():
     def session_with_job():
         session = MagicMock()
         session.get.return_value = job
-        session.exec.return_value.first.return_value = None
+        session.exec.return_value.one_or_none.return_value = None
         yield session
 
     app.dependency_overrides[get_session] = session_with_job
-    with patch("app.api.repositories.GithubIntegration") as integration:
+    with patch(
+        "app.api.repositories.resolve_repo_access",
+        side_effect=RepoAccessDenied("Repository not found"),
+    ) as access:
         response = client.get(f"{URL}/12")
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Ingestion job not found"}
-    integration.assert_not_called()
+    access.assert_called_once()
 
 
 def test_cancel_rejects_non_owner_with_repository_access():
     job = _job(userId="other_user")
-    connection = MagicMock(installationId=INSTALLATION_ID)
-    installation = MagicMock()
-    installation.get_repos.return_value = [
-        MagicMock(full_name="ORG/REPO"),
-    ]
-    integration = MagicMock()
-    integration.get_app_installation.return_value = installation
-
     def session_with_job():
         session = MagicMock()
         session.get.return_value = job
-        session.exec.return_value.first.return_value = connection
+        session.exec.return_value.one_or_none.return_value = None
         yield session
 
     app.dependency_overrides[get_session] = session_with_job
     with (
-        patch("app.api.repositories.Auth.AppAuth", return_value=MagicMock()),
         patch(
-            "app.api.repositories.GithubIntegration",
-            return_value=integration,
+            "app.api.repositories.resolve_repo_access",
+            return_value=RepoAccess(INSTALLATION_ID, "public"),
         ),
         patch("app.api.repositories.cancel_job") as cancel,
     ):
@@ -313,11 +351,15 @@ def test_cancel_hides_unauthorized_ingestion_job():
     def session_with_job():
         session = MagicMock()
         session.get.return_value = job
-        session.exec.return_value.first.return_value = None
+        session.exec.return_value.one_or_none.return_value = None
         yield session
 
     app.dependency_overrides[get_session] = session_with_job
-    response = client.post(f"{URL}/12/cancel")
+    with patch(
+        "app.api.repositories.resolve_repo_access",
+        side_effect=RepoAccessDenied("Repository not found"),
+    ):
+        response = client.post(f"{URL}/12/cancel")
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Ingestion job not found"}

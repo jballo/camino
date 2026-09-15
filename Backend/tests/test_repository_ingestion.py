@@ -30,6 +30,9 @@ class _StreamingResponse:
         for offset in range(0, len(self.body), chunk_size):
             yield self.body[offset : offset + chunk_size]
 
+    def json(self):
+        return {"full_name": "org/repo", "private": False}
+
     def close(self):
         self.closed = True
 
@@ -57,7 +60,7 @@ def _github(installation):
     integration.get_access_token.return_value.token = "installation-token"
     return (
         patch(
-            "app.services.repository_ingestion.GithubIntegration",
+            "app.services.repository_ingestion.github_integration",
             return_value=integration,
         ),
         integration,
@@ -108,6 +111,7 @@ async def test_ingestion_stages_publishes_and_returns_counts():
             session,
             repo_name="Org/Repo",
             installation_id=123,
+            ref="feature/CaseSensitive",
             ensure_owned=ensure_owned,
             finalize_publication=finalize_publication,
         )
@@ -117,7 +121,10 @@ async def test_ingestion_stages_publishes_and_returns_counts():
     assert [chunk.file_path for chunk in chunk_models] == ["src/example.py"]
     assert [chunk.repo_name for chunk in chunk_models] == ["org/repo"]
     integration.get_access_token.assert_called_once_with(123)
-    assert get.call_args.args[0] == "https://api.github.com/repos/org/repo/tarball"
+    assert get.call_args.args[0] == (
+        "https://api.github.com/repos/org/repo/tarball/feature%2FCaseSensitive"
+    )
+    assert get.call_count == 2
     request_kwargs = get.call_args.kwargs
     assert request_kwargs["stream"] is True
     assert request_kwargs["allow_redirects"] is True
@@ -131,6 +138,10 @@ async def test_ingestion_stages_publishes_and_returns_counts():
     executed_sql = [" ".join(str(call.args[0]).split()) for call in session.execute.call_args_list]
     assert executed_sql[0].startswith("DELETE FROM code_chunks AS c")
     assert "INSERT INTO repo_index_state" in executed_sql[-2]
+    publish_params = session.execute.call_args_list[-2].args[1]
+    assert publish_params["commit_sha"] == "deadbeef"
+    assert publish_params["ref"] == "feature/CaseSensitive"
+    assert publish_params["visibility"] == "public"
     assert executed_sql[-1].startswith("DELETE FROM code_chunks")
     finalize_publication.assert_called_once_with(session, result)
     session.rollback.assert_not_called()
@@ -155,6 +166,7 @@ async def test_failed_job_finalization_rolls_back_publication():
             session,
             repo_name="org/repo",
             installation_id=123,
+            ref="main",
             finalize_publication=finalize_publication,
         )
 
@@ -169,26 +181,26 @@ async def test_failed_job_finalization_rolls_back_publication():
 
 async def test_download_extract_and_parse_run_outside_the_event_loop_thread():
     session = MagicMock()
-    installation = _repository_installation()
     integration = MagicMock()
     integration.get_access_token.return_value.token = "installation-token"
     walk_threads: list[int] = []
 
-    def get_installation(_installation_id: int):
-        walk_threads.append(threading.get_ident())
-        return installation
+    response = _StreamingResponse(_tarball({}))
 
-    integration.get_app_installation.side_effect = get_installation
+    def get_repository(*_args, **_kwargs):
+        walk_threads.append(threading.get_ident())
+        return response
+
     event_loop_thread = threading.get_ident()
 
     with (
         patch(
-            "app.services.repository_ingestion.GithubIntegration",
+            "app.services.repository_ingestion.github_integration",
             return_value=integration,
         ),
         patch(
             "app.services.repository_ingestion.requests.get",
-            return_value=_StreamingResponse(_tarball({})),
+            side_effect=get_repository,
         ),
         patch(
             "app.services.repository_ingestion.embed_all",
@@ -200,6 +212,7 @@ async def test_download_extract_and_parse_run_outside_the_event_loop_thread():
             session,
             repo_name="org/repo",
             installation_id=123,
+            ref="main",
         )
 
     assert walk_threads
@@ -236,6 +249,7 @@ async def test_walk_filters_skipped_unsupported_and_oversized_files():
             session,
             repo_name="org/repo",
             installation_id=123,
+            ref="main",
         )
 
     assert result == {"chunks_inserted": 1, "embeddings_created": 1}
@@ -262,19 +276,22 @@ async def test_download_failure_is_transient():
                 session,
                 repo_name="org/repo",
                 installation_id=123,
+                ref="main",
             )
 
     session.rollback.assert_called_once_with()
 
 
 @pytest.mark.parametrize(
-    ("status_code", "expected_error"),
+    ("status_code", "expected_error", "message"),
     [
-        (503, TransientRepositoryIngestionError),
-        (404, PermanentRepositoryIngestionError),
+        (503, TransientRepositoryIngestionError, "status 503"),
+        (404, PermanentRepositoryIngestionError, "Repository not found"),
     ],
 )
-async def test_download_http_status_is_classified(status_code, expected_error):
+async def test_download_http_status_is_classified(
+    status_code, expected_error, message
+):
     session = MagicMock()
     github_patch, _ = _github(_repository_installation())
 
@@ -284,12 +301,13 @@ async def test_download_http_status_is_classified(status_code, expected_error):
             "app.services.repository_ingestion.requests.get",
             return_value=_StreamingResponse(b"", status_code=status_code),
         ),
-        pytest.raises(expected_error, match=f"status {status_code}"),
+        pytest.raises(expected_error, match=message),
     ):
         await ingest_repository(
             session,
             repo_name="org/repo",
             installation_id=123,
+            ref="main",
         )
 
     session.rollback.assert_called_once_with()
@@ -297,11 +315,15 @@ async def test_download_http_status_is_classified(status_code, expected_error):
 
 async def test_missing_repository_is_permanent():
     session = MagicMock()
-    installation = MagicMock()
-    installation.get_repos.return_value = []
-    github_patch, integration = _github(installation)
+    github_patch, integration = _github(MagicMock())
 
-    with github_patch:
+    with (
+        github_patch,
+        patch(
+            "app.services.repository_ingestion.requests.get",
+            return_value=_StreamingResponse(b"", status_code=404),
+        ),
+    ):
         with pytest.raises(
             PermanentRepositoryIngestionError,
             match="Repository not found",
@@ -310,9 +332,10 @@ async def test_missing_repository_is_permanent():
                 session,
                 repo_name="org/missing",
                 installation_id=123,
+                ref="main",
             )
 
-    integration.get_access_token.assert_not_called()
+    integration.get_access_token.assert_called_once_with(123)
     session.rollback.assert_called_once_with()
 
 
@@ -354,6 +377,7 @@ async def test_tarball_over_cap_is_permanent_and_cleans_up_temp_directory():
             session,
             repo_name="org/repo",
             installation_id=123,
+            ref="main",
         )
 
     assert len(created_directories) == 1
@@ -427,6 +451,7 @@ async def test_corrupt_archive_is_transient():
             session,
             repo_name="org/repo",
             installation_id=123,
+            ref="main",
         )
 
     session.rollback.assert_called_once_with()
@@ -455,6 +480,7 @@ async def test_embedding_failure_is_transient():
                 session,
                 repo_name="org/repo",
                 installation_id=123,
+                ref="main",
             )
 
     session.rollback.assert_called_once_with()
@@ -490,6 +516,7 @@ async def test_ingestion_commits_multiple_bounded_waves():
             session,
             repo_name="org/repo",
             installation_id=123,
+            ref="main",
         )
 
     assert result == {"chunks_inserted": 3, "embeddings_created": 3}
@@ -527,6 +554,7 @@ async def test_single_file_chunks_are_split_into_bounded_waves():
             session,
             repo_name="org/repo",
             installation_id=123,
+            ref="main",
         )
 
     assert result == {"chunks_inserted": 5, "embeddings_created": 5}
@@ -567,6 +595,7 @@ async def test_chunk_cap_fails_permanently_without_publishing():
             session,
             repo_name="org/repo",
             installation_id=123,
+            ref="main",
         )
 
     embed.assert_awaited_once()
@@ -607,6 +636,7 @@ async def test_second_wave_failure_leaves_generation_unpublished():
             session,
             repo_name="org/repo",
             installation_id=123,
+            ref="main",
         )
 
     assert embed.await_count == 2
@@ -642,6 +672,7 @@ async def test_ownership_loss_before_wave_commit_prevents_publication():
             session,
             repo_name="org/repo",
             installation_id=123,
+            ref="main",
             ensure_owned=ensure_owned,
         )
 

@@ -1,12 +1,15 @@
 import asyncio
 import threading
+from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import exc
 
 from app.models.job import JobStatus, JobType
+from app.brief import BriefNeedsRefreshError
 from app.models.tour import TourArtifact, TourStep
+from app.services.staleness import ChangedFile, HeadComparison
 from app.services.repository_ingestion import (
     IngestionCancelledError,
     PermanentRepositoryIngestionError,
@@ -47,6 +50,8 @@ def _job(**overrides) -> MagicMock:
     job.id = 1
     job.topic = "authentication flow"
     job.repo_name = "org/repo"
+    job.issue_repo = None
+    job.ref = "main"
     job.installation_id = 12345
     job.job_type = JobType.TOUR
     job.status = JobStatus.RUNNING
@@ -93,6 +98,164 @@ async def test_run_job_success_persists_artifact():
     )
 
 
+async def test_issue_brief_parks_behind_refresh_without_spending_retry():
+    job = _job(
+        job_type=JobType.ISSUE_BRIEF,
+        issue_repo="org/repo",
+        issue_number=44,
+        refresh_cycles=0,
+        userId="user_1",
+        topic="Fix refresh races",
+    )
+    session = MagicMock()
+    session.get.return_value = job
+    dependency = MagicMock(id=17)
+    park = MagicMock(return_value=True)
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker.fetch_issue_thread", return_value=MagicMock(branch_instruction=None)),
+        patch("app.worker.resolve_target_branch", return_value=MagicMock(branch="main", default_branch="main")),
+        patch("app.worker.resolve_fork_status", return_value=MagicMock()),
+        patch("app.worker.generate_brief", new_callable=AsyncMock, side_effect=BriefNeedsRefreshError("stale")),
+        patch("app.worker.enqueue_job", return_value=(dependency, True)) as enqueue,
+        patch("app.worker.park_job", park),
+        patch("app.worker._update_owned_job") as persist,
+    ):
+        await run_job(1, WORKER_ID)
+
+    assert enqueue.call_args.kwargs["job_type"] == JobType.REPOSITORY_INGEST
+    park.assert_called_once_with(
+        session, 1, WORKER_ID, blocked_by_job_id=17
+    )
+    persist.assert_not_called()
+
+
+async def test_legacy_issue_brief_without_issue_repo_fails_without_fetching():
+    job = _job(
+        job_type=JobType.ISSUE_BRIEF,
+        issue_repo=None,
+        issue_number=44,
+        userId="user_1",
+        topic="Legacy issue",
+    )
+    session = MagicMock()
+    session.get.return_value = job
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker.fetch_issue_thread") as fetch_issue,
+        patch("app.worker._mark_failed") as mark_failed,
+    ):
+        await run_job(1, WORKER_ID)
+
+    fetch_issue.assert_not_called()
+    mark_failed.assert_called_once_with(
+        session,
+        1,
+        WORKER_ID,
+        "Issue brief job is missing its issue repository",
+    )
+
+
+async def test_issue_brief_fetches_issue_from_fork_and_indexes_upstream():
+    job = _job(
+        job_type=JobType.ISSUE_BRIEF,
+        issue_repo="contributor/repo",
+        issue_number=44,
+        refresh_cycles=0,
+        userId="user_1",
+        topic="Fork-only issue",
+    )
+    session = MagicMock()
+    session.get.return_value = job
+    issue = MagicMock(branch_instruction=None)
+    artifact = MagicMock()
+    artifact.model_dump.return_value = {"summary": "done"}
+    persist = MagicMock(return_value=True)
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker.fetch_issue_thread", return_value=issue) as fetch_issue,
+        patch(
+            "app.worker.resolve_target_branch",
+            return_value=MagicMock(branch="main", default_branch="main"),
+        ) as resolve_branch,
+        patch("app.worker.resolve_fork_status", return_value=MagicMock()) as resolve_fork,
+        patch(
+            "app.worker.generate_brief", new_callable=AsyncMock, return_value=artifact
+        ),
+        patch("app.worker._update_owned_job", persist),
+    ):
+        await run_job(1, WORKER_ID)
+
+    fetch_issue.assert_called_once_with("contributor/repo", 44, 12345)
+    resolve_branch.assert_called_once_with("org/repo", 12345)
+    resolve_fork.assert_called_once_with("contributor/repo", 12345, "main")
+
+
+async def test_run_job_stamps_tour_freshness():
+    job = _job()
+    session = MagicMock()
+    session.get.return_value = job
+    session.exec.return_value.one_or_none.return_value = SimpleNamespace(
+        indexed_sha="abc123456789"
+    )
+    artifact = _artifact()
+    persist = MagicMock(return_value=True)
+    comparison = HeadComparison(
+        head_sha="def987654321",
+        commits_behind=3,
+        changed_files=(
+            ChangedFile("auth.py", "modified"),
+            ChangedFile("unrelated.py", "added"),
+        ),
+        measurable=True,
+    )
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._update_owned_job", persist),
+        patch("app.worker.compare_to_head", return_value=comparison) as compare,
+        patch("app.worker.generate_tour", new_callable=AsyncMock, return_value=artifact),
+    ):
+        await run_job(1, WORKER_ID)
+
+    compare.assert_called_once_with("org/repo", 12345, "abc123456789", "main")
+    persisted = persist.call_args.kwargs["artifact"]
+    assert persisted["freshness"]["indexed_sha"] == "abc123456789"
+    assert persisted["freshness"]["head_sha"] == "def987654321"
+    assert persisted["freshness"]["commits_behind"] == 3
+    assert persisted["freshness"]["changed_cited_files"] == ["auth.py"]
+    assert isinstance(persisted["freshness"]["checked_at"], str)
+
+
+async def test_run_job_tolerates_freshness_compare_failure():
+    job = _job()
+    session = MagicMock()
+    session.get.return_value = job
+    session.exec.return_value.one_or_none.return_value = SimpleNamespace(
+        indexed_sha="abc123"
+    )
+    persist = MagicMock(return_value=True)
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._update_owned_job", persist),
+        patch("app.worker.compare_to_head", side_effect=RuntimeError("GitHub down")),
+        patch("app.worker.generate_tour", new_callable=AsyncMock, return_value=_artifact()),
+    ):
+        await run_job(1, WORKER_ID)
+
+    assert persist.call_args.kwargs["status"] == JobStatus.COMPLETE
+    assert persist.call_args.kwargs["artifact"]["freshness"] is None
+
+
 async def test_run_job_tour_generation_error_marks_failed():
     job = _job()
     session = MagicMock()
@@ -113,6 +276,26 @@ async def test_run_job_tour_generation_error_marks_failed():
 
     mark_failed.assert_called_once_with(
         session, 1, WORKER_ID, "no grounded steps"
+    )
+
+
+async def test_run_job_fails_legacy_row_without_ref_permanently():
+    job = _job(ref=None)
+    session = MagicMock()
+    session.get.return_value = job
+    mark_failed = MagicMock(return_value=True)
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._mark_failed", mark_failed),
+        patch("app.worker.generate_tour", new_callable=AsyncMock) as generate,
+    ):
+        await run_job(1, WORKER_ID)
+
+    generate.assert_not_awaited()
+    mark_failed.assert_called_once_with(
+        session, 1, WORKER_ID, "Legacy job is missing its repository ref"
     )
 
 
@@ -313,6 +496,7 @@ async def test_run_job_dispatches_repository_ingestion():
         session,
         repo_name="org/repo",
         installation_id=12345,
+        ref="main",
         ensure_owned=ANY,
         finalize_publication=ANY,
     )

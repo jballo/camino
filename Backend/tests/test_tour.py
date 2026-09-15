@@ -37,6 +37,28 @@ def _result(chunk_id: int, **overrides) -> SearchResult:
     return SearchResult(**base)
 
 
+def test_artifact_schema_accepts_missing_freshness():
+    artifact = TourArtifact.model_validate(
+        {
+            "title": "Legacy tour",
+            "topic": "authentication",
+            "repo_name": "org/repo",
+            "steps": [
+                {
+                    "title": "Login",
+                    "explanation": "Entry point.",
+                    "file_path": "auth.py",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "snippet": "def login(): ...",
+                }
+            ],
+        }
+    )
+
+    assert artifact.freshness is None
+
+
 # ── _clamp_span (pure logic) ────────────────────────────────────────
 
 def test_clamp_span_maps_absolute_to_relative():
@@ -200,7 +222,7 @@ async def test_generate_tour_builds_grounded_artifact(mock_chat, mock_search):
         MagicMock(),
         topic="authentication",
         repo_name="org/repo",
-        installation_id=1,
+        ref="main",
     )
 
     assert isinstance(artifact, TourArtifact)
@@ -229,7 +251,7 @@ async def test_generate_tour_raises_when_no_candidates(mock_chat, mock_search):
             MagicMock(),
             topic="topic",
             repo_name="org/repo",
-            installation_id=1,
+            ref="main",
         )
 
 
@@ -259,7 +281,7 @@ async def test_generate_tour_cancels_in_flight_graph(mock_chat):
             MagicMock(),
             topic="topic",
             repo_name="org/repo",
-            installation_id=1,
+            ref="main",
             cancel_event=cancel_event,
         )
     )
@@ -385,7 +407,7 @@ async def test_repair_loop_fixes_duplicate_citation(mock_chat, mock_search):
     mock_chat.return_value = llm
 
     artifact = await generate_tour(
-        MagicMock(), topic="topic", repo_name="org/repo", installation_id=1
+        MagicMock(), topic="topic", repo_name="org/repo", ref="main"
     )
 
     assert llm.draft_calls == 3  # 2 (first pass) + 1 (repair of step 2)
@@ -409,7 +431,7 @@ async def test_repair_loop_stops_when_issue_is_unrepairable(mock_chat, mock_sear
     mock_chat.return_value = llm
 
     artifact = await generate_tour(
-        MagicMock(), topic="topic", repo_name="org/repo", installation_id=1
+        MagicMock(), topic="topic", repo_name="org/repo", ref="main"
     )
 
     assert llm.draft_calls == 2  # only the first pass; no unproductive repair

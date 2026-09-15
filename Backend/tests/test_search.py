@@ -167,7 +167,7 @@ def test_load_chunks_returns_search_results():
         fused,
         limit=10,
         repo_name="org/repo",
-        installation_id=1,
+        ref="main",
         generation="generation-1",
     )
     assert len(results) == 1
@@ -192,7 +192,7 @@ def test_load_chunks_preserves_fused_order():
         fused,
         limit=10,
         repo_name="org/repo",
-        installation_id=1,
+        ref="main",
         generation="generation-1",
     )
     assert [r.chunk_id for r in results] == [10, 20]
@@ -209,7 +209,7 @@ def test_load_chunks_respects_limit():
         fused,
         limit=2,
         repo_name="org/repo",
-        installation_id=1,
+        ref="main",
         generation="generation-1",
     )
     assert len(results) == 2
@@ -222,7 +222,7 @@ def test_load_chunks_empty_fused():
         [],
         limit=10,
         repo_name="org/repo",
-        installation_id=1,
+        ref="main",
         generation="generation-1",
     )
     assert results == []
@@ -239,7 +239,7 @@ def test_load_chunks_skips_missing_ids():
         fused,
         limit=10,
         repo_name="org/repo",
-        installation_id=1,
+        ref="main",
         generation="generation-1",
     )
     assert len(results) == 1
@@ -255,7 +255,7 @@ def test_demote_paths_is_generation_scoped():
         [(10, 0.05)],
         0.3,
         repo_name="org/repo",
-        installation_id=1,
+        ref="main",
         generation="generation-1",
     )
 
@@ -281,7 +281,7 @@ async def test_hybrid_search_calls_both_retrievers(
     mock_session = MagicMock()
     mock_session.execute.return_value.mappings.return_value.all.return_value = [FAKE_ROW]
 
-    results = await hybrid_search(mock_session, "login", "org/repo", installation_id=1)
+    results = await hybrid_search(mock_session, "login", "org/repo", ref="main")
 
     mock_embed.assert_called_once_with(["login"])
     mock_vector.assert_called_once()
@@ -299,7 +299,7 @@ async def test_hybrid_search_empty_results(mock_embed, mock_vector, mock_fts):
     mock_fts.return_value = []
 
     mock_session = MagicMock()
-    results = await hybrid_search(mock_session, "nothing", "org/repo", installation_id=1)
+    results = await hybrid_search(mock_session, "nothing", "org/repo", ref="main")
     assert results == []
 
 
@@ -316,7 +316,7 @@ async def test_hybrid_search_respects_limit(mock_embed, mock_vector, mock_fts):
     mock_session = MagicMock()
     mock_session.execute.return_value.mappings.return_value.all.return_value = rows
 
-    results = await hybrid_search(mock_session, "query", "org/repo", installation_id=1, limit=3)
+    results = await hybrid_search(mock_session, "query", "org/repo", ref="main", limit=3)
     assert len(results) == 3
 
 
@@ -334,7 +334,7 @@ async def test_hybrid_search_vector_only_when_fts_empty(
     mock_session = MagicMock()
     mock_session.execute.return_value.mappings.return_value.all.return_value = [FAKE_ROW]
 
-    results = await hybrid_search(mock_session, "query", "org/repo", installation_id=1)
+    results = await hybrid_search(mock_session, "query", "org/repo", ref="main")
     assert len(results) == 1
     assert results[0].chunk_id == 10
 
@@ -349,7 +349,7 @@ async def test_hybrid_search_returns_empty_without_active_generation(mock_embed)
         mock_session,
         "query",
         "Org/Repo",
-        installation_id=1,
+        ref="main",
     )
 
     assert results == []
@@ -399,7 +399,7 @@ async def test_hybrid_search_retries_once_when_generation_changes():
             MagicMock(),
             "query",
             "org/repo",
-            installation_id=1,
+            ref="main",
         )
 
     assert results == [hydrated]
@@ -456,7 +456,7 @@ async def test_hybrid_search_discards_results_when_generation_changes_again():
             MagicMock(),
             "query",
             "org/repo",
-            installation_id=1,
+            ref="main",
         )
 
     assert results == []

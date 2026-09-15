@@ -8,10 +8,11 @@ from pathlib import Path
 import tarfile
 import tempfile
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
+from urllib.parse import quote
 from uuid import uuid4
 
-from github import Auth, GithubException, GithubIntegration
+from github import GithubException
 import requests
 from requests.exceptions import RequestException
 from sqlalchemy import exc, text
@@ -27,6 +28,7 @@ from app.services.embeddings import (
     embed_all,
 )
 from app.services.jobs import normalize_repository_name
+from app.services.github_app import github_integration, installation_access_token
 from app.services.parser import (
     LANGUAGES,
     MAX_FILE_BYTES,
@@ -45,31 +47,38 @@ _DOWNLOAD_TIMEOUT_SECONDS = (10, 120)
 _CLEANUP_STAGED_SQL = text("""
     DELETE FROM code_chunks AS c
     WHERE c.repo_name = :repo_name
-      AND c.installation_id = :installation_id
+      AND c.ref = :ref
       AND NOT EXISTS (
           SELECT 1
           FROM repo_index_state AS s
           WHERE s.repo_name = c.repo_name
-            AND s.installation_id = c.installation_id
+            AND s.ref = c.ref
             AND s.active_generation = c.generation
       )
 """)
 
 _PUBLISH_GENERATION_SQL = text("""
     INSERT INTO repo_index_state (
-        installation_id,
         repo_name,
-        active_generation
+        ref,
+        visibility,
+        active_generation,
+        indexed_sha,
+        indexed_at
     )
-    VALUES (:installation_id, :repo_name, :generation)
-    ON CONFLICT (installation_id, repo_name)
-    DO UPDATE SET active_generation = EXCLUDED.active_generation
+    VALUES (:repo_name, :ref, :visibility, :generation, :commit_sha, now())
+    ON CONFLICT (repo_name, ref)
+    DO UPDATE SET
+        visibility = EXCLUDED.visibility,
+        active_generation = EXCLUDED.active_generation,
+        indexed_sha = EXCLUDED.indexed_sha,
+        indexed_at = EXCLUDED.indexed_at
 """)
 
 _DELETE_OLD_GENERATIONS_SQL = text("""
     DELETE FROM code_chunks
     WHERE repo_name = :repo_name
-      AND installation_id = :installation_id
+      AND ref = :ref
       AND generation <> :generation
 """)
 
@@ -97,9 +106,14 @@ class _RepositoryWalkStats:
     dirs_walked: int
 
 
-def _download_tarball(repo_name: str, token: str, destination: Path) -> None:
+def _download_tarball(
+    repo_name: str,
+    ref: str,
+    token: str,
+    destination: Path,
+) -> None:
     response = requests.get(
-        f"https://api.github.com/repos/{repo_name}/tarball",
+        f"https://api.github.com/repos/{repo_name}/tarball/{quote(ref, safe='')}",
         headers={
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {token}",
@@ -203,31 +217,49 @@ def _iter_file_chunks(
 def _prepare_repository(
     repo_name: str,
     installation_id: int,
+    ref: str,
     temp_path: Path,
-) -> tuple[Path, str]:
+) -> tuple[Path, str, str]:
     """Synchronously verify access, download, and extract one snapshot."""
-    app_auth = Auth.AppAuth(
-        app_id=settings.gh_app_id,
-        private_key=settings.gh_app_private_key,
-    )
-    integration = GithubIntegration(auth=app_auth)
-    installation = integration.get_app_installation(installation_id)
+    integration = github_integration()
     normalized_repo_name = normalize_repository_name(repo_name)
-    repo_selected = next(
-        (
-            repo
-            for repo in installation.get_repos()
-            if normalize_repository_name(repo.full_name) == normalized_repo_name
-        ),
-        None,
+    token = installation_access_token(
+        installation_id,
+        integration=integration,
     )
-    if repo_selected is None:
-        raise PermanentRepositoryIngestionError("Repository not found")
+    response = requests.get(
+        f"https://api.github.com/repos/{normalized_repo_name}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout=_DOWNLOAD_TIMEOUT_SECONDS,
+    )
+    try:
+        if response.status_code == 404:
+            raise PermanentRepositoryIngestionError("Repository not found")
+        if response.status_code >= 400:
+            message = f"GitHub request failed with status {response.status_code}"
+            if response.status_code in _RETRYABLE_GH_STATUS:
+                raise TransientRepositoryIngestionError(message)
+            raise PermanentRepositoryIngestionError(message)
+        repo_payload = response.json()
+    finally:
+        response.close()
 
-    token = integration.get_access_token(installation_id).token
+    if not isinstance(repo_payload, Mapping):
+        raise PermanentRepositoryIngestionError(
+            "GitHub repository response was invalid"
+        )
+    canonical_name = normalize_repository_name(
+        repo_payload.get("full_name") or normalized_repo_name
+    )
+    visibility = "private" if repo_payload.get("private") else "public"
     archive_path = temp_path / "repo.tar.gz"
-    _download_tarball(repo_selected.full_name, token, archive_path)
-    return _extract_tarball(archive_path, temp_path)
+    _download_tarball(canonical_name, ref, token, archive_path)
+    repo_root, commit_sha = _extract_tarball(archive_path, temp_path)
+    return repo_root, commit_sha, visibility
 
 
 async def _persist_wave(
@@ -235,7 +267,7 @@ async def _persist_wave(
     chunks: list[CodeChunk],
     *,
     repo_name: str,
-    installation_id: int,
+    ref: str,
     generation: str,
     ensure_owned: Callable[[Session], None] | None = None,
 ) -> int:
@@ -247,7 +279,7 @@ async def _persist_wave(
         CodeChunkModel.from_parsed(
             chunk,
             repo_name=repo_name,
-            installation_id=installation_id,
+            ref=ref,
             generation=generation,
         )
         for chunk in chunks
@@ -274,6 +306,7 @@ async def ingest_repository(
     *,
     repo_name: str,
     installation_id: int,
+    ref: str,
     ensure_owned: Callable[[Session], None] | None = None,
     finalize_publication: (
         Callable[[Session, dict[str, int]], None] | None
@@ -291,8 +324,9 @@ async def ingest_repository(
 
     try:
         logger.info(
-            "ingest start | repo=%r installation=%s generation=%s",
+            "ingest start | repo=%r ref=%r installation=%s generation=%s",
             repo_name,
+            ref,
             installation_id,
             generation,
         )
@@ -304,17 +338,18 @@ async def ingest_repository(
             _CLEANUP_STAGED_SQL,
             {
                 "repo_name": repo_name,
-                "installation_id": installation_id,
+                "ref": ref,
             },
         )
         session.commit()
 
         with tempfile.TemporaryDirectory() as temp_directory:
             phase = "github_auth"
-            repo_root, commit_sha = await asyncio.to_thread(
+            repo_root, commit_sha, visibility = await asyncio.to_thread(
                 _prepare_repository,
                 repo_name,
                 installation_id,
+                ref,
                 Path(temp_directory),
             )
 
@@ -348,7 +383,7 @@ async def ingest_repository(
                         session,
                         wave,
                         repo_name=repo_name,
-                        installation_id=installation_id,
+                        ref=ref,
                         generation=generation,
                         ensure_owned=ensure_owned,
                     )
@@ -373,7 +408,7 @@ async def ingest_repository(
                     session,
                     wave,
                     repo_name=repo_name,
-                    installation_id=installation_id,
+                    ref=ref,
                     generation=generation,
                     ensure_owned=ensure_owned,
                 )
@@ -407,7 +442,7 @@ async def ingest_repository(
         session.execute(
             text(populate_search_vector_sql(only_null=True)).bindparams(
                 repo_name=repo_name,
-                installation_id=installation_id,
+                ref=ref,
                 generation=generation,
             )
         )
@@ -422,8 +457,10 @@ async def ingest_repository(
             ensure_owned(session)
         publish_params = {
             "repo_name": repo_name,
-            "installation_id": installation_id,
+            "ref": ref,
+            "visibility": visibility,
             "generation": generation,
+            "commit_sha": commit_sha,
         }
         session.execute(_PUBLISH_GENERATION_SQL, publish_params)
         session.execute(_DELETE_OLD_GENERATIONS_SQL, publish_params)

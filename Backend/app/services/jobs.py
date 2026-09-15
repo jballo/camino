@@ -12,22 +12,34 @@ def normalize_repository_name(repo_name: str) -> str:
 
 
 def tour_dedupe_key(
-    *, user_id: str, installation_id: int, repo_name: str, topic: str
+    *, user_id: str, repo_name: str, ref: str, topic: str
 ) -> str:
     normalized_repo_name = normalize_repository_name(repo_name)
     return (
-        f"{JobType.TOUR}:{user_id}:{installation_id}:"
-        f"{normalized_repo_name}:{topic}"
+        f"{JobType.TOUR}:{user_id}:{normalized_repo_name}:{ref}:{topic}"
     )
 
 
 def repository_ingest_dedupe_key(
-    *, installation_id: int, repo_name: str
+    *, repo_name: str, ref: str
 ) -> str:
     normalized_repo_name = normalize_repository_name(repo_name)
+    return f"{JobType.REPOSITORY_INGEST}:{normalized_repo_name}:{ref}"
+
+
+def issue_brief_dedupe_key(
+    *,
+    user_id: str,
+    repo_name: str,
+    ref: str,
+    issue_repo: str,
+    issue_number: int,
+) -> str:
+    normalized_repo_name = normalize_repository_name(repo_name)
+    normalized_issue_repo = normalize_repository_name(issue_repo)
     return (
-        f"{JobType.REPOSITORY_INGEST}:{installation_id}:"
-        f"{normalized_repo_name}"
+        f"{JobType.ISSUE_BRIEF}:{user_id}:{normalized_repo_name}:"
+        f"{ref}:{normalized_issue_repo}:{issue_number}"
     )
 
 
@@ -66,9 +78,13 @@ def enqueue_job(
     user_id: str,
     installation_id: int,
     repo_name: str,
+    ref: str,
     job_type: str,
     dedupe_key: str,
     topic: str | None = None,
+    issue_repo: str | None = None,
+    issue_number: int | None = None,
+    blocked_by_job_id: int | None = None,
 ) -> tuple[Job, bool]:
     """Return the active equivalent job, or atomically enqueue a new one.
 
@@ -85,9 +101,15 @@ def enqueue_job(
         userId=user_id,
         installation_id=installation_id,
         repo_name=repo_name,
+        ref=ref,
         job_type=job_type,
         dedupe_key=dedupe_key,
         topic=topic,
+        issue_repo=(
+            normalize_repository_name(issue_repo) if issue_repo is not None else None
+        ),
+        issue_number=issue_number,
+        blocked_by_job_id=blocked_by_job_id,
         status=JobStatus.PENDING,
     )
     try:

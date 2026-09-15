@@ -6,9 +6,55 @@ from app.models.job import JobStatus, JobType
 from app.services.jobs import (
     cancel_job,
     enqueue_job,
+    issue_brief_dedupe_key,
     normalize_repository_name,
     repository_ingest_dedupe_key,
 )
+
+
+def test_issue_brief_identity_is_per_user():
+    first = issue_brief_dedupe_key(
+        user_id="user_1",
+        repo_name="Org/Repo",
+        ref="main",
+        issue_repo="Contributor/Repo",
+        issue_number=44,
+    )
+    same = issue_brief_dedupe_key(
+        user_id="user_1",
+        repo_name="org/repo",
+        ref="main",
+        issue_repo="contributor/repo",
+        issue_number=44,
+    )
+    other_user = issue_brief_dedupe_key(
+        user_id="user_2",
+        repo_name="org/repo",
+        ref="main",
+        issue_repo="contributor/repo",
+        issue_number=44,
+    )
+    assert first == same
+    assert first != other_user
+
+
+def test_issue_brief_identity_includes_issue_repository():
+    fork_issue = issue_brief_dedupe_key(
+        user_id="user_1",
+        repo_name="org/repo",
+        ref="main",
+        issue_repo="contributor/repo",
+        issue_number=44,
+    )
+    upstream_issue = issue_brief_dedupe_key(
+        user_id="user_1",
+        repo_name="org/repo",
+        ref="main",
+        issue_repo="org/repo",
+        issue_number=44,
+    )
+
+    assert fork_issue != upstream_issue
 
 
 def _enqueue(session: MagicMock):
@@ -17,10 +63,11 @@ def _enqueue(session: MagicMock):
         user_id="user_1",
         installation_id=123,
         repo_name="org/repo",
+        ref="main",
         job_type=JobType.REPOSITORY_INGEST,
         dedupe_key=repository_ingest_dedupe_key(
-            installation_id=123,
             repo_name="org/repo",
+            ref="main",
         ),
     )
 
@@ -53,7 +100,8 @@ def test_enqueue_creates_job_when_no_active_match_exists():
     assert job.id == 8
     assert job.status == JobStatus.PENDING
     assert job.job_type == JobType.REPOSITORY_INGEST
-    assert job.dedupe_key == "repository_ingest:123:org/repo"
+    assert job.dedupe_key == "repository_ingest:org/repo:main"
+    assert job.ref == "main"
     session.add.assert_called_once_with(job)
     session.commit.assert_called_once_with()
 
@@ -61,11 +109,11 @@ def test_enqueue_creates_job_when_no_active_match_exists():
 def test_repository_ingestion_identity_is_case_insensitive():
     assert normalize_repository_name("Org/Repo") == "org/repo"
     assert repository_ingest_dedupe_key(
-        installation_id=123,
         repo_name="Org/Repo",
+        ref="main",
     ) == repository_ingest_dedupe_key(
-        installation_id=123,
         repo_name="org/repo",
+        ref="main",
     )
 
     session = MagicMock()
@@ -75,16 +123,17 @@ def test_repository_ingestion_identity_is_case_insensitive():
         user_id="user_1",
         installation_id=123,
         repo_name="Org/Repo",
+        ref="main",
         job_type=JobType.REPOSITORY_INGEST,
         dedupe_key=repository_ingest_dedupe_key(
-            installation_id=123,
             repo_name="Org/Repo",
+            ref="main",
         ),
     )
 
     assert created is True
     assert job.repo_name == "org/repo"
-    assert job.dedupe_key == "repository_ingest:123:org/repo"
+    assert job.dedupe_key == "repository_ingest:org/repo:main"
 
 
 def test_enqueue_recovers_concurrent_unique_index_loser():

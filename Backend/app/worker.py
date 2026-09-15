@@ -8,6 +8,7 @@ dedicated ``python -m app.worker``) cannot double-run the same job.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 import os
 import signal
@@ -24,17 +25,30 @@ from openai import (
 )
 from requests.exceptions import RequestException
 from sqlalchemy import exc, text, update
-from sqlmodel import Session
+from sqlmodel import Session, select
 
+from app.brief import (
+    BriefGenerationCancelledError,
+    BriefGenerationError,
+    BriefNeedsRefreshError,
+    generate_brief,
+)
 from app.config import settings
 from app.db import engine
 from app.models.job import Job, JobStatus, JobType
+from app.models.code import RepoIndexState
+from app.models.tour import TourArtifact, TourFreshness
+from app.services.fork_status import resolve_fork_status
+from app.services.issue_thread import IssueThreadError, fetch_issue_thread
+from app.services.jobs import enqueue_job, repository_ingest_dedupe_key
 from app.services.repository_ingestion import (
     IngestionCancelledError,
     PermanentRepositoryIngestionError,
     TransientRepositoryIngestionError,
     ingest_repository,
 )
+from app.services.staleness import compare_to_head
+from app.services.target_branch import TargetBranchResolution, resolve_target_branch
 from app.tour import (
     TourGenerationCancelledError,
     TourGenerationError,
@@ -47,16 +61,21 @@ WORKER_RECOVERY_INTERVAL = 60.0
 WORKER_SHUTDOWN_TIMEOUT = 10.0
 
 CLAIM_SQL = text("""
-UPDATE jobs
+UPDATE jobs AS candidate
 SET status = 'running',
     claimed_at = now(),
     claimed_by = :worker_id,
     attempts = attempts + 1,
     error = NULL
-WHERE id = (
-    SELECT id FROM jobs
-    WHERE status = 'pending'
-    ORDER BY "createdAt"
+WHERE candidate.id = (
+    SELECT j.id FROM jobs AS j
+    WHERE j.status = 'pending'
+      AND NOT EXISTS (
+          SELECT 1 FROM jobs AS dependency
+          WHERE dependency.id = j.blocked_by_job_id
+            AND dependency.status IN ('pending', 'running')
+      )
+    ORDER BY j."createdAt"
     LIMIT 1
     FOR UPDATE SKIP LOCKED
 )
@@ -108,13 +127,69 @@ def _make_worker_id() -> str:
 
 
 def claim_next_job(session: Session, worker_id: str) -> int | None:
-    """Atomically claim the oldest pending job. Commits before returning."""
-    result = session.execute(CLAIM_SQL, {"worker_id": worker_id})
-    job_id = result.scalar_one_or_none()
-    session.commit()
-    if job_id is not None:
+    """Atomically claim the oldest unblocked job. Commits before returning."""
+    while True:
+        result = session.execute(CLAIM_SQL, {"worker_id": worker_id})
+        job_id = result.scalar_one_or_none()
+        if job_id is None:
+            session.commit()
+            return None
+        job = session.get(Job, job_id)
+        dependency = (
+            session.get(Job, job.blocked_by_job_id)
+            if job is not None and job.blocked_by_job_id is not None
+            else None
+        )
+        if dependency is not None and dependency.status in (
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        ):
+            reason = dependency.error or dependency.status
+            job.status = JobStatus.FAILED
+            job.error = f"ingest failed: {reason}"
+            job.claimed_at = None
+            job.claimed_by = None
+            session.add(job)
+            session.commit()
+            logger.warning(
+                "failed dependent job | id=%s dependency=%s", job_id, dependency.id
+            )
+            continue
+        session.commit()
         logger.info("claimed job | id=%s worker=%s", job_id, worker_id)
-    return job_id
+        return job_id
+
+
+def park_job(
+    session: Session,
+    job_id: int,
+    worker_id: str,
+    *,
+    blocked_by_job_id: int,
+) -> bool:
+    """Park owned work behind a dependency without consuming a retry attempt."""
+    result = session.execute(
+        update(Job)
+        .where(
+            Job.id == job_id,
+            Job.status == JobStatus.RUNNING,
+            Job.claimed_by == worker_id,
+        )
+        .values(
+            status=JobStatus.PENDING,
+            blocked_by_job_id=blocked_by_job_id,
+            claimed_at=None,
+            claimed_by=None,
+            attempts=Job.attempts - 1,
+            refresh_cycles=Job.refresh_cycles + 1,
+            error=None,
+        )
+    )
+    if result.rowcount != 1:
+        session.rollback()
+        return False
+    session.commit()
+    return True
 
 
 def recover_stale_jobs(
@@ -367,6 +442,70 @@ _TRANSIENT_JOB_ERRORS = (
 )
 
 
+async def _stamp_tour_freshness(
+    session: Session,
+    artifact: TourArtifact,
+    *,
+    repo_name: str,
+    installation_id: int,
+    ref: str,
+) -> None:
+    """Attach a best-effort generation-time freshness disclosure."""
+    try:
+        state = session.exec(
+            select(RepoIndexState).where(
+                RepoIndexState.repo_name == repo_name,
+                RepoIndexState.ref == ref,
+            )
+        ).one_or_none()
+    except exc.SQLAlchemyError:
+        session.rollback()
+        artifact.freshness = None
+        logger.exception(
+            "tour freshness check failed | repo=%r reason=index_state_read",
+            repo_name,
+        )
+        return
+
+    try:
+        indexed_sha = state.indexed_sha if state is not None else None
+        if not isinstance(indexed_sha, str) or not indexed_sha:
+            logger.info(
+                "tour freshness unknown | repo=%r reason=missing_indexed_sha",
+                repo_name,
+            )
+            return
+
+        comparison = await asyncio.to_thread(
+            compare_to_head,
+            repo_name,
+            installation_id,
+            indexed_sha,
+            ref,
+        )
+        cited_paths = {step.file_path.lstrip("./") for step in artifact.steps}
+        changed_cited_files = sorted(
+            {
+                changed.path
+                for changed in comparison.changed_files
+                if changed.path.lstrip("./") in cited_paths
+            }
+        )
+        artifact.freshness = TourFreshness(
+            indexed_sha=indexed_sha,
+            head_sha=comparison.head_sha,
+            commits_behind=comparison.commits_behind,
+            measurable=comparison.measurable,
+            changed_cited_files=changed_cited_files,
+            checked_at=dt.datetime.now(dt.UTC),
+        )
+    except Exception:
+        # Freshness is disclosure metadata, never a reason to retry an otherwise
+        # valid and expensive tour generation.
+        artifact.freshness = None
+        logger.exception("tour freshness check failed | repo=%r", repo_name)
+
+
 async def run_job(job_id: int, worker_id: str) -> None:
     """Dispatch one claimed job and persist its outcome. Never raises."""
     with Session(engine) as session:
@@ -387,7 +526,11 @@ async def run_job(job_id: int, worker_id: str) -> None:
         topic = job.topic
         repo_name = job.repo_name
         installation_id = job.installation_id
+        ref = job.ref
         attempts = job.attempts
+        issue_repo = job.issue_repo
+        issue_number = job.issue_number
+        refresh_cycles = job.refresh_cycles
 
         try:
             owns_lease = _renew_job_lease(job_id, worker_id)
@@ -427,7 +570,12 @@ async def run_job(job_id: int, worker_id: str) -> None:
         permanent_error: str | None = None
         job_cancelled = False
         ingestion_completed = False
+        job_parked = False
         try:
+            if ref is None:
+                raise PermanentRepositoryIngestionError(
+                    "Legacy job is missing its repository ref"
+                )
             if job_type == JobType.TOUR:
                 if topic is None:
                     raise TourGenerationError("Tour job is missing its topic")
@@ -435,10 +583,98 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     session,
                     topic=topic,
                     repo_name=repo_name,
-                    installation_id=installation_id,
+                    ref=ref,
                     cancel_event=lease_lost,
                 )
-                result = artifact.model_dump()
+                await _stamp_tour_freshness(
+                    session,
+                    artifact,
+                    repo_name=repo_name,
+                    installation_id=installation_id,
+                    ref=ref,
+                )
+                result = artifact.model_dump(mode="json")
+            elif job_type == JobType.ISSUE_BRIEF:
+                if issue_repo is None:
+                    raise BriefGenerationError(
+                        "Issue brief job is missing its issue repository"
+                    )
+                if topic is None or issue_number is None:
+                    raise BriefGenerationError(
+                        "Issue brief job is missing its issue metadata"
+                    )
+                issue = await asyncio.to_thread(
+                    fetch_issue_thread,
+                    issue_repo,
+                    issue_number,
+                    installation_id,
+                )
+                resolved = await asyncio.to_thread(
+                    resolve_target_branch,
+                    repo_name,
+                    installation_id,
+                )
+                if (
+                    issue.branch_instruction is not None
+                    and issue.branch_instruction.branch == ref
+                ):
+                    target_resolution = TargetBranchResolution(
+                        branch=ref,
+                        source="issue_thread",
+                        evidence=issue.branch_instruction.evidence,
+                        evidence_path=None,
+                        default_branch=resolved.default_branch,
+                        checked_at=dt.datetime.now(dt.UTC),
+                    )
+                elif resolved.branch == ref:
+                    target_resolution = resolved
+                else:
+                    target_resolution = TargetBranchResolution(
+                        branch=ref,
+                        source="user_override",
+                        evidence="Target branch selected by the requester",
+                        evidence_path=None,
+                        default_branch=resolved.default_branch,
+                        checked_at=dt.datetime.now(dt.UTC),
+                    )
+                fork_status = await asyncio.to_thread(
+                    resolve_fork_status,
+                    issue_repo,
+                    installation_id,
+                    ref,
+                )
+                try:
+                    artifact = await generate_brief(
+                        session,
+                        issue=issue,
+                        repo_name=repo_name,
+                        ref=ref,
+                        installation_id=installation_id,
+                        target_resolution=target_resolution,
+                        fork_status=fork_status,
+                        allow_stale=refresh_cycles >= 2,
+                        cancel_event=lease_lost,
+                    )
+                    result = artifact.model_dump(mode="json")
+                except BriefNeedsRefreshError:
+                    session.rollback()
+                    ingest_job, _ = enqueue_job(
+                        session,
+                        user_id=job.userId,
+                        installation_id=installation_id,
+                        repo_name=repo_name,
+                        ref=ref,
+                        job_type=JobType.REPOSITORY_INGEST,
+                        dedupe_key=repository_ingest_dedupe_key(
+                            repo_name=repo_name, ref=ref
+                        ),
+                    )
+                    job_parked = park_job(
+                        session,
+                        job_id,
+                        worker_id,
+                        blocked_by_job_id=ingest_job.id,
+                    )
             elif job_type == JobType.REPOSITORY_INGEST:
                 def ensure_ingestion_owned(guard_session: Session) -> None:
                     _ensure_ingestion_owned(
@@ -464,13 +700,18 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     session,
                     repo_name=repo_name,
                     installation_id=installation_id,
+                    ref=ref,
                     ensure_owned=ensure_ingestion_owned,
                     finalize_publication=finalize_ingestion_publication,
                 )
                 ingestion_completed = True
             else:
                 permanent_error = f"Unsupported job type: {job_type}"
-        except (IngestionCancelledError, TourGenerationCancelledError) as error:
+        except (
+            BriefGenerationCancelledError,
+            IngestionCancelledError,
+            TourGenerationCancelledError,
+        ) as error:
             logger.warning(
                 "job cancelled | id=%s type=%s repo=%r: %s",
                 job_id,
@@ -480,7 +721,12 @@ async def run_job(job_id: int, worker_id: str) -> None:
             )
             session.rollback()
             job_cancelled = True
-        except (TourGenerationError, PermanentRepositoryIngestionError) as error:
+        except (
+            BriefGenerationError,
+            IssueThreadError,
+            TourGenerationError,
+            PermanentRepositoryIngestionError,
+        ) as error:
             logger.warning(
                 "job failed permanently | id=%s type=%s repo=%r: %s",
                 job_id,
@@ -519,6 +765,12 @@ async def run_job(job_id: int, worker_id: str) -> None:
                 job_id,
                 job_type,
                 repo_name,
+            )
+            return
+
+        if job_parked:
+            logger.info(
+                "job parked for repository refresh | id=%s repo=%r", job_id, repo_name
             )
             return
 

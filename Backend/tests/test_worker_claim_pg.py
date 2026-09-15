@@ -30,14 +30,17 @@ from app.config import settings
 from app.db import get_session
 from app.main import app
 from app.models.github_connection import GithubConnections
+from app.models.code import RepoIndexState
 from app.models.tour import TourArtifact, TourStep
 from app.models.job import Job, JobStatus, JobType
 from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
 from app.security import get_authenticated_user_id
+from app.services.repo_access import RepoAccess
 from app.services.repository_ingestion import IngestionCancelledError
 from app.worker import (
     _ensure_ingestion_owned,
     claim_next_job,
+    park_job,
     recover_stale_jobs,
     run_job,
 )
@@ -92,11 +95,18 @@ def pg_engine():
         engine.dispose()
         pytest.skip(f"Postgres not reachable ({e}); skipping claim integration tests")
     GithubConnections.__table__.create(engine, checkfirst=True)
+    RepoIndexState.__table__.create(engine, checkfirst=True)
     with engine.connect() as conn:
         conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ"))
         conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_by TEXT"))
         conn.execute(text(
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0"
+        ))
+        conn.execute(text(
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS blocked_by_job_id INTEGER"
+        ))
+        conn.execute(text(
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS refresh_cycles INTEGER NOT NULL DEFAULT 0"
         ))
         conn.execute(text(
             'CREATE INDEX IF NOT EXISTS ix_jobs_pending '
@@ -121,7 +131,7 @@ def pg_engine():
 @pytest.fixture
 def pg_engine_clean(pg_engine):
     with Session(pg_engine) as session:
-        session.execute(text("TRUNCATE jobs RESTART IDENTITY CASCADE"))
+        session.execute(text("TRUNCATE jobs, repo_index_state RESTART IDENTITY CASCADE"))
         session.commit()
     return pg_engine
 
@@ -132,6 +142,7 @@ def _insert_job(session: Session, **overrides) -> Job:
         userId=overrides.get("userId", "user_1"),
         installation_id=overrides.get("installation_id", 1),
         repo_name=overrides.get("repo_name", "org/repo"),
+        ref=overrides.get("ref", "main"),
         topic=overrides.get("topic", "topic"),
         job_type=overrides.get("job_type", JobType.TOUR),
         dedupe_key=overrides.get("dedupe_key"),
@@ -140,6 +151,8 @@ def _insert_job(session: Session, **overrides) -> Job:
         claimed_by=overrides.get("claimed_by"),
         attempts=overrides.get("attempts", 0),
         error=overrides.get("error"),
+        blocked_by_job_id=overrides.get("blocked_by_job_id"),
+        refresh_cycles=overrides.get("refresh_cycles", 0),
         createdAt=overrides.get("createdAt", now),
         updatedAt=overrides.get("updatedAt", now),
     )
@@ -248,6 +261,88 @@ def test_claim_skips_non_pending_rows(pg_engine_clean):
 
     with Session(pg_engine_clean) as session:
         assert claim_next_job(session, WORKER_A) is None
+
+
+def test_claim_skips_job_while_dependency_is_active(pg_engine_clean):
+    with Session(pg_engine_clean) as session:
+        dependency = _insert_job(session, job_type=JobType.REPOSITORY_INGEST)
+        blocked = _insert_job(session, blocked_by_job_id=dependency.id)
+
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) == dependency.id
+    assert _reload(pg_engine_clean, blocked.id).status == JobStatus.PENDING
+
+    barrier = threading.Barrier(2)
+    results: list[int | None] = [blocked.id, blocked.id]
+
+    def attempt(index: int, worker_id: str) -> None:
+        barrier.wait()
+        with Session(pg_engine_clean) as session:
+            results[index] = claim_next_job(session, worker_id)
+
+    first = threading.Thread(target=attempt, args=(0, WORKER_A))
+    second = threading.Thread(target=attempt, args=(1, WORKER_B))
+    first.start()
+    second.start()
+    first.join()
+    second.join()
+    assert results == [None, None]
+
+
+@pytest.mark.parametrize("dependency_status", [JobStatus.COMPLETE])
+def test_claim_unblocks_after_successful_dependency(pg_engine_clean, dependency_status):
+    with Session(pg_engine_clean) as session:
+        dependency = _insert_job(session, status=dependency_status)
+        blocked = _insert_job(session, blocked_by_job_id=dependency.id)
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) == blocked.id
+
+
+@pytest.mark.parametrize("dependency_status", [JobStatus.FAILED, JobStatus.CANCELLED])
+def test_claim_fails_job_after_unsuccessful_dependency(pg_engine_clean, dependency_status):
+    with Session(pg_engine_clean) as session:
+        dependency = _insert_job(
+            session, status=dependency_status, error="clone failed"
+        )
+        blocked = _insert_job(session, blocked_by_job_id=dependency.id)
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) is None
+    row = _reload(pg_engine_clean, blocked.id)
+    assert row.status == JobStatus.FAILED
+    assert row.error == "ingest failed: clone failed"
+
+
+def test_missing_dependency_fails_open(pg_engine_clean):
+    with Session(pg_engine_clean) as session:
+        blocked = _insert_job(session, blocked_by_job_id=999999)
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) == blocked.id
+
+
+def test_parking_preserves_retry_budget_and_created_at(pg_engine_clean):
+    created = dt.datetime(2026, 2, 1, tzinfo=dt.timezone.utc)
+    with Session(pg_engine_clean) as session:
+        dependency = _insert_job(session, job_type=JobType.REPOSITORY_INGEST)
+        job = _insert_job(
+            session,
+            status=JobStatus.RUNNING,
+            claimed_at=dt.datetime.now(dt.timezone.utc),
+            claimed_by=WORKER_A,
+            attempts=2,
+            createdAt=created,
+            updatedAt=created,
+        )
+        assert park_job(
+            session, job.id, WORKER_A, blocked_by_job_id=dependency.id
+        )
+    row = _reload(pg_engine_clean, job.id)
+    assert row.status == JobStatus.PENDING
+    assert row.attempts == 1
+    assert row.refresh_cycles == 1
+    assert row.blocked_by_job_id == dependency.id
+    assert row.claimed_at is None
+    assert row.claimed_by is None
+    assert row.createdAt == created
 
 
 # ── D. Stale recovery ───────────────────────────────────────────────
@@ -361,6 +456,14 @@ def test_ingestion_guard_requires_current_claim_and_installation(pg_engine_clean
                 encryptedRefreshToken="rtok",
                 tokenExpiresAt=now + dt.timedelta(hours=1),
                 refreshTokenExpiresAt=now + dt.timedelta(days=30),
+            )
+        )
+        session.add(
+            RepoIndexState(
+                repo_name="org/repo",
+                ref="main",
+                visibility="public",
+                active_generation="generation-1",
             )
         )
         session.commit()
@@ -483,6 +586,14 @@ async def test_post_then_worker_then_get_completes(pg_engine_clean):
                 refreshTokenExpiresAt=now + dt.timedelta(days=30),
             )
         )
+        session.add(
+            RepoIndexState(
+                repo_name="org/repo",
+                ref="main",
+                visibility="public",
+                active_generation="generation-1",
+            )
+        )
         session.commit()
 
     def _session():
@@ -495,6 +606,11 @@ async def test_post_then_worker_then_get_completes(pg_engine_clean):
     artifact = _artifact()
     client = TestClient(app)
 
+    access_probe = patch(
+        "app.services.repo_access.resolve_repo_access",
+        return_value=RepoAccess(installation_id=12345, visibility="public"),
+    )
+    access_probe.start()
     try:
         created = client.post(
             "/api/v1/journeys",
@@ -535,6 +651,7 @@ async def test_post_then_worker_then_get_completes(pg_engine_clean):
         assert body["artifact"] == artifact.model_dump()
         assert body["error"] is None
     finally:
+        access_probe.stop()
         app.dependency_overrides.clear()
 
 

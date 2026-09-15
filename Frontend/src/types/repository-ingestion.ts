@@ -19,6 +19,7 @@ export type RepositoryIngestionJob = {
   id: number;
   status: RepositoryIngestionStatus;
   repoName: string;
+  ref: string | null;
   attempts: number;
   result: RepositoryIngestionResult | null;
   error: string | null;

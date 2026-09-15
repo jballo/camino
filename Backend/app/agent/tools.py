@@ -42,28 +42,28 @@ def _format_results(results: list[SearchResult]) -> str:
 def build_hybrid_search_tool(
     session: Session,
     repo_name: str,
-    installation_id: int,
+    ref: str,
     *,
     sink: list[SearchResult],
     limit: int = 8,
 ) -> StructuredTool:
     """Create a request-scoped ``hybrid_search`` tool.
 
-    The DB session, target repository, and installation are bound via closure so
+    The DB session, target repository, and ref are bound via closure so
     the model only has to supply a query. Every retrieved chunk is appended to
     ``sink`` so the caller can surface citations alongside the final answer.
     """
 
     async def _run(query: str) -> str:
         logger.info(
-            "agent hybrid_search | repo=%r installation=%s query=%r",
-            repo_name, installation_id, query,
+            "agent hybrid_search | repo=%r ref=%s query=%r",
+            repo_name, ref, query,
         )
         results = await hybrid_search(
             session,
             query,
             repo_name,
-            installation_id=installation_id,
+            ref=ref,
             limit=limit,
         )
         sink.extend(results)

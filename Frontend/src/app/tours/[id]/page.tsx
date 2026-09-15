@@ -1,6 +1,10 @@
 "use client";
 
-import type { JourneyResponse, TourStep } from "@/types/tour";
+import type {
+  JourneyResponse,
+  TourFreshness,
+  TourStep,
+} from "@/types/tour";
 import { ApiError, backendFetch } from "@/lib/api";
 import { useAuth } from "@clerk/nextjs";
 import {
@@ -175,9 +179,67 @@ export default function TourReader({
           {artifact.steps.map((step, i) => (
             <StepBlock key={i} step={step} index={i} />
           ))}
+
+          <FreshnessFooter freshness={artifact.freshness} />
         </main>
       </div>
     </div>
+  );
+}
+
+function shortSha(sha: string): string {
+  return sha.slice(0, 7);
+}
+
+function FreshnessFooter({
+  freshness,
+}: {
+  freshness: TourFreshness | null | undefined;
+}) {
+  if (
+    !freshness ||
+    !freshness.measurable ||
+    !freshness.indexed_sha ||
+    !freshness.head_sha ||
+    freshness.commits_behind === null
+  ) {
+    return (
+      <footer className="border-t border-border pt-6 text-sm text-muted-foreground">
+        Index freshness unknown — re-ingest to enable freshness checks.
+      </footer>
+    );
+  }
+
+  if (freshness.changed_cited_files.length > 0) {
+    return (
+      <footer className="flex flex-col gap-2 border-t border-border pt-6 text-sm">
+        <p className="text-muted-foreground">
+          Indexed at{" "}
+          <span className="font-mono">{shortSha(freshness.indexed_sha)}</span>,{" "}
+          {freshness.commits_behind} commits behind head.
+        </p>
+        {freshness.changed_cited_files.map((path) => (
+          <div
+            key={path}
+            className="flex items-start gap-2 text-amber-700 dark:text-amber-400"
+          >
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+            <span>
+              <span className="font-mono">{path}</span> changed since indexing.
+            </span>
+          </div>
+        ))}
+      </footer>
+    );
+  }
+
+  return (
+    <footer className="border-t border-border pt-6 text-sm text-muted-foreground">
+      Indexed at{" "}
+      <span className="font-mono">{shortSha(freshness.indexed_sha)}</span>,{" "}
+      {freshness.commits_behind} commits behind head — nothing this tour cites
+      has changed.
+    </footer>
   );
 }
 

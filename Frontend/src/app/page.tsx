@@ -18,6 +18,7 @@ import {
 import { useAuth } from "@clerk/nextjs";
 
 import { ApiError, backendFetch } from "@/lib/api";
+import { fetchContributionTarget } from "@/lib/contribution-target";
 import {
   cancelRepositoryIngestion,
   enqueueRepositoryIngestion,
@@ -26,6 +27,7 @@ import {
   pollRepositoryIngestion,
 } from "@/lib/repository-ingestion";
 import type { RepositoryIngestionJob } from "@/types/repository-ingestion";
+import type { ContributionTarget } from "@/types/contribution-target";
 
 const EXAMPLE_TOPICS = [
   "Authentication flow",
@@ -42,6 +44,7 @@ export default function Home() {
     undefined,
   );
   const [repos, setRepos] = useState<string[]>([]);
+  const [publicRepo, setPublicRepo] = useState("");
   const [repoRetrievalError, setRepoRetrievalError] = useState<
     string | undefined
   >(undefined);
@@ -56,6 +59,11 @@ export default function Home() {
     RepositoryIngestionJob | undefined
   >(undefined);
   const ingestionAbortRef = useRef<AbortController | null>(null);
+  const [contributionTarget, setContributionTarget] = useState<
+    ContributionTarget | undefined
+  >(undefined);
+  const [contributionTargetLoading, setContributionTargetLoading] =
+    useState(false);
 
   const canSubmit = prompt.trim().length > 0 && !!repoSelected && !submitting;
 
@@ -78,12 +86,16 @@ export default function Home() {
         "/api/v1/journeys",
         token,
         {
-        method: "POST",
-        body: {
-          repoName: repoSelected,
-          topic: prompt,
-        }
-      });
+          method: "POST",
+          body: {
+            repoName: repoSelected,
+            ...(contributionTarget?.targetBranch
+              ? { ref: contributionTarget.targetBranch }
+              : {}),
+            topic: prompt,
+          },
+        },
+      );
       router.push(`/generate?id=${result.id}`);
     } catch (error) {
       console.log("error: ", error);
@@ -104,7 +116,7 @@ export default function Home() {
     } finally {
       setSubmitting(false);
     }
-  }, [getToken, repoSelected, prompt, router]);
+  }, [contributionTarget, getToken, repoSelected, prompt, router]);
 
   const openDialog = async () => {
     setRepoSelectionDialog(true);
@@ -144,12 +156,14 @@ export default function Home() {
 
       const created = await enqueueRepositoryIngestion(
         repoSelected,
+        contributionTarget?.targetBranch ?? undefined,
         token,
         controller.signal,
       );
       setIngestionJob({
         ...created,
         repoName: repoSelected,
+        ref: contributionTarget?.targetBranch ?? null,
         attempts: 0,
         result: null,
         error: null,
@@ -195,7 +209,7 @@ export default function Home() {
         setProcessing(false);
       }
     }
-  }, [getToken, repoSelected]);
+  }, [contributionTarget, getToken, repoSelected]);
 
   const stopRepositoryIngestion = useCallback(async () => {
     const job = ingestionJob;
@@ -235,6 +249,48 @@ export default function Home() {
     [],
   );
 
+  useEffect(() => {
+    setContributionTarget(undefined);
+    if (!repoSelected) {
+      setContributionTargetLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setContributionTargetLoading(true);
+    void fetchContributionTarget(repoSelected, getToken, controller.signal)
+      .then(setContributionTarget)
+      .catch((error: unknown) => {
+        if (!isAbortError(error)) {
+          console.log("Failed to discover contribution target: ", error);
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setContributionTargetLoading(false);
+      });
+
+    return () => controller.abort();
+  }, [getToken, repoSelected]);
+
+  const contributionTargetSource = (() => {
+    if (!contributionTarget?.targetBranch) return undefined;
+    if (
+      contributionTarget.source === "contributing_doc" ||
+      contributionTarget.source === "pr_template"
+    ) {
+      return contributionTarget.evidencePath
+        ? `from ${contributionTarget.evidencePath}`
+        : "from repository guidance";
+    }
+    if (contributionTarget.source === "merged_prs") {
+      return "based on recent merged PRs";
+    }
+    if (contributionTarget.source === "default_branch") {
+      return "repository default branch";
+    }
+    return undefined;
+  })();
+
   return (
     <div className="flex flex-col justify-center items-center w-full min-h-full">
       <div className="flex flex-col justify-center items-center w-full max-w-[760px] px-8 py-12 gap-3">
@@ -262,6 +318,24 @@ export default function Home() {
                   <span className="text-muted-foreground">Select a repository…</span>
                 )}
               </Button>
+              {repoSelected && contributionTargetLoading && (
+                <div
+                  aria-label="Discovering contribution target"
+                  className="h-4 w-64 animate-pulse rounded bg-accent"
+                />
+              )}
+              {repoSelected &&
+                !contributionTargetLoading &&
+                contributionTarget?.targetBranch &&
+                contributionTargetSource && (
+                  <div className="rounded-md border border-border bg-accent/30 px-3 py-2 text-xs text-muted-foreground">
+                    PRs to this project target{" "}
+                    <code className="font-mono text-foreground">
+                      {contributionTarget.targetBranch}
+                    </code>{" "}
+                    — {contributionTargetSource}
+                  </div>
+                )}
             </div>
 
             {/* Step 2: topic */}
@@ -372,6 +446,35 @@ export default function Home() {
                         </Radio>
                       ))}
                     </RadioGroup>
+                    <div className="flex flex-col gap-2 border-t border-border pt-3">
+                      <label
+                        htmlFor="public-repository"
+                        className="text-xs font-medium text-muted-foreground"
+                      >
+                        Or enter any public repository
+                      </label>
+                      <div className="flex gap-2">
+                        <input
+                          id="public-repository"
+                          aria-label="Public repository"
+                          placeholder="owner/repo"
+                          value={publicRepo}
+                          onChange={(event) => setPublicRepo(event.target.value)}
+                          className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-3 py-2 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                          disabled={processing}
+                        />
+                        <Button
+                          className="rounded-md border border-border px-3 py-2 text-sm hover:bg-accent disabled:opacity-50"
+                          onClick={() => setRepoSelected(publicRepo.trim())}
+                          disabled={
+                            processing ||
+                            !/^[^/\s]+\/[^/\s]+$/.test(publicRepo.trim())
+                          }
+                        >
+                          Select
+                        </Button>
+                      </div>
+                    </div>
                     <div className="flex justify-between gap-3 pt-2">
                       <Button
                         className="rounded-sm px-3 py-1.5 text-sm hover:bg-accent"

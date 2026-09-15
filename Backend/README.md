@@ -85,7 +85,9 @@ configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
 | `INGEST_WAVE_CHUNKS` | Parsed chunks embedded and persisted per ingestion wave (default `256`) |
 | `INGEST_MAX_CHUNKS` | Hard per-repository chunk cap; oversized ingests fail permanently (default `25000`) |
 | `RATE_LIMIT_REPOSITORY_SEARCH_REQUESTS` / `RATE_LIMIT_REPOSITORY_SEARCH_WINDOW_SECONDS` | Direct-search limit (default 60 requests / 60 seconds) |
+| `RATE_LIMIT_CONTRIBUTION_TARGET_REQUESTS` / `RATE_LIMIT_CONTRIBUTION_TARGET_WINDOW_SECONDS` | Contribution-target discovery limit (default 60 requests / 60 seconds) |
 | `RATE_LIMIT_JOURNEY_CREATE_REQUESTS` / `RATE_LIMIT_JOURNEY_CREATE_WINDOW_SECONDS` | Journey creation limit (default 5 requests / 3600 seconds) |
+| `RATE_LIMIT_ISSUE_BRIEF_CREATE_REQUESTS` / `RATE_LIMIT_ISSUE_BRIEF_CREATE_WINDOW_SECONDS` | Issue-brief creation limit (default 5 requests / 3600 seconds) |
 | `RUN_WORKER` | Start the shared job worker in the API process (default `false`; use only for an explicitly combined deployment) |
 | `WORKER_POLL_INTERVAL` | Seconds between empty-queue polls (default `1.5`) |
 | `WORKER_LEASE_TIMEOUT` | Seconds before a dead worker's claim is stale (default `600`); active jobs renew their lease every one-third of this interval |

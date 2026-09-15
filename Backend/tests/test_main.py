@@ -30,11 +30,22 @@ async def test_lifespan_provisions_schema_extras():
     create_all.assert_called_once_with(mock_engine)
     statements = _normalized_sql(connection)
     assert "CREATE EXTENSION IF NOT EXISTS vector" in statements
+    assert "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS ref VARCHAR" in statements
     assert (
-        "CREATE INDEX IF NOT EXISTS ix_chunks_repo_generation "
-        "ON code_chunks (installation_id, repo_name, generation)"
+        "UPDATE jobs SET status = 'failed', "
+        "error = 'Legacy issue brief is missing its issue repository; recreate it', "
+        "claimed_at = NULL, claimed_by = NULL "
+        "WHERE job_type = 'issue_brief' AND issue_repo IS NULL "
+        "AND status IN ('pending', 'running')"
         in statements
     )
+    assert (
+        "CREATE INDEX IF NOT EXISTS ix_chunks_repo_generation "
+        "ON code_chunks (repo_name, ref, generation)"
+        in statements
+    )
+    assert any("column_name = 'installation_id'" in sql for sql in statements)
+    assert "DROP VIEW IF EXISTS live_code_chunks" in statements
     assert any("CREATE OR REPLACE VIEW live_code_chunks AS" in sql for sql in statements)
     assert (
         'CREATE INDEX IF NOT EXISTS ix_jobs_pending '

@@ -7,10 +7,16 @@ from sqlmodel import select
 
 from app.agent import answer_question
 from app.db import SessionDep
-from app.models.github_connection import GithubConnections
+from app.models.code import RepoIndexState
 from app.rate_limit import AGENT_ASK_RATE_LIMIT
 from app.security import get_authenticated_user_id
 from app.services.embeddings import EmbeddingError
+from app.services.jobs import normalize_repository_name
+from app.services.repo_access import (
+    RepoAccessDenied,
+    RepoAccessUnavailable,
+    authorize_index_read,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +28,7 @@ class AskBody(BaseModel):
 
     question: str = Field(min_length=1, max_length=4000)
     repoName: str
+    ref: str | None = None
 
 
 class SourceResponse(BaseModel):
@@ -48,22 +55,36 @@ async def ask_agent(
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> AskResponse:
     try:
-        statement = select(GithubConnections).where(
-            GithubConnections.userId == auth_user_id
+        statement = select(RepoIndexState).where(
+            RepoIndexState.repo_name == normalize_repository_name(payload.repoName)
         )
-        gh_connection = session.exec(statement).one()
-    except exc.NoResultFound:
-        raise HTTPException(status_code=404, detail="Github connection not found for user")
-    except exc.OperationalError:
+        if payload.ref is not None:
+            statement = statement.where(RepoIndexState.ref == payload.ref)
+        states = session.exec(statement).all()
+    except exc.SQLAlchemyError:
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
+    if not states:
+        raise HTTPException(status_code=404, detail="Repository index not found")
+    if payload.ref is None and len(states) != 1:
+        raise HTTPException(
+            status_code=409,
+            detail="Repository has multiple indexed refs; specify ref",
+        )
+    index_state = states[0]
+    try:
+        authorize_index_read(session, auth_user_id, index_state)
+    except RepoAccessDenied:
+        raise HTTPException(status_code=404, detail="Repository index not found")
+    except RepoAccessUnavailable:
+        raise HTTPException(status_code=502, detail="Github access check failed")
 
     try:
         result = await answer_question(
             session,
             question=payload.question,
             repo_name=payload.repoName,
-            installation_id=gh_connection.installationId,
+            ref=index_state.ref,
         )
     except EmbeddingError as e:
         logger.error(

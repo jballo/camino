@@ -37,14 +37,14 @@ async def answer_question(
     *,
     question: str,
     repo_name: str,
-    installation_id: int,
+    ref: str,
     model: str | None = None,
     search_limit: int = 8,
 ) -> AgentAnswer:
     """Run the LangGraph agent for a single question and return the answer.
 
     Builds a request-scoped graph whose ``hybrid_search`` tool is bound to this
-    session/repo/installation, runs it to completion, and returns the final
+    session/repo/ref, runs it to completion, and returns the final
     assistant message together with the de-duplicated code chunks the agent
     retrieved as citations.
     """
@@ -52,7 +52,7 @@ async def answer_question(
     search_tool = build_hybrid_search_tool(
         session,
         repo_name,
-        installation_id,
+        ref,
         sink=sources,
         limit=search_limit,
     )

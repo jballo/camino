@@ -27,6 +27,7 @@ function job(
     id: 42,
     status,
     repoName: "camino/app",
+    ref: "main",
     attempts: status === "pending" ? 0 : 1,
     result: null,
     error: null,
@@ -51,7 +52,7 @@ describe("repository ingestion jobs", () => {
     fetchMock.mockResolvedValue(mockResponse({ id: 42, status: "pending" }));
 
     await expect(
-      enqueueRepositoryIngestion("camino/app", "my-token"),
+      enqueueRepositoryIngestion("camino/app", "feature/Issue44", "my-token"),
     ).resolves.toEqual({ id: 42, status: "pending" });
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -62,7 +63,10 @@ describe("repository ingestion jobs", () => {
           Authorization: "Bearer my-token",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ repoName: "camino/app" }),
+        body: JSON.stringify({
+          repoName: "camino/app",
+          ref: "feature/Issue44",
+        }),
       },
     );
   });

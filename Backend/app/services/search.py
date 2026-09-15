@@ -57,7 +57,7 @@ class SearchResult:
 def _get_active_generation(
     session: Session,
     repo_name: str,
-    installation_id: int,
+    ref: str,
 ) -> str | None:
     """Resolve the repository generation that one search should use."""
     return session.execute(
@@ -65,11 +65,11 @@ def _get_active_generation(
             SELECT active_generation
             FROM repo_index_state
             WHERE repo_name = :repo_name
-              AND installation_id = :installation_id
+              AND ref = :ref
         """),
         {
             "repo_name": repo_name,
-            "installation_id": installation_id,
+            "ref": ref,
         },
     ).scalar_one_or_none()
 
@@ -78,7 +78,7 @@ def _vector_search(
     session: Session,
     query_embedding: list[float],
     repo_name: str,
-    installation_id: int,
+    ref: str,
     top_n: int,
     model_name: str = EMBED_MODEL,
     *,
@@ -95,7 +95,7 @@ def _vector_search(
         FROM   code_chunk_embeddings e
         JOIN   code_chunks c ON c.id = e.chunk_id
         WHERE  c.repo_name = :repo_name
-          AND  c.installation_id = :installation_id
+          AND  c.ref = :ref
           AND  c.generation = :generation
           AND  e.model_name = :model_name
           {path_filter}
@@ -107,7 +107,7 @@ def _vector_search(
         {
             "embedding": str(query_embedding),
             "repo_name": repo_name,
-            "installation_id": installation_id,
+            "ref": ref,
             "generation": generation,
             "model_name": model_name,
             "top_n": top_n,
@@ -119,7 +119,7 @@ def _fts_search(
     session: Session,
     query: str,
     repo_name: str,
-    installation_id: int,
+    ref: str,
     top_n: int,
     *,
     generation: str,
@@ -150,7 +150,7 @@ def _fts_search(
                ) AS rank
         FROM   code_chunks c, q
         WHERE  c.repo_name = :repo_name
-          AND  c.installation_id = :installation_id
+          AND  c.ref = :ref
           AND  c.generation = :generation
           AND  q.query IS NOT NULL
           AND  c.search_vector @@ q.query
@@ -163,7 +163,7 @@ def _fts_search(
         {
             "query": query,
             "repo_name": repo_name,
-            "installation_id": installation_id,
+            "ref": ref,
             "generation": generation,
             "top_n": top_n,
         },
@@ -201,7 +201,7 @@ def _demote_paths(
     penalty: float,
     *,
     repo_name: str,
-    installation_id: int,
+    ref: str,
     generation: str,
     substrings: tuple[str, ...] = DEMOTE_PATH_SUBSTRINGS,
 ) -> list[tuple[int, float]]:
@@ -219,13 +219,13 @@ def _demote_paths(
             FROM code_chunks
             WHERE id = ANY(:ids)
               AND repo_name = :repo_name
-              AND installation_id = :installation_id
+              AND ref = :ref
               AND generation = :generation
         """),
         {
             "ids": ids,
             "repo_name": repo_name,
-            "installation_id": installation_id,
+            "ref": ref,
             "generation": generation,
         },
     ).all()
@@ -248,7 +248,7 @@ def _load_chunks(
     limit: int,
     *,
     repo_name: str,
-    installation_id: int,
+    ref: str,
     generation: str,
 ) -> list[SearchResult]:
     """Hydrate chunk_ids into full SearchResult objects, preserving rank order."""
@@ -263,7 +263,7 @@ def _load_chunks(
         FROM   code_chunks
         WHERE  id = ANY(:ids)
           AND  repo_name = :repo_name
-          AND  installation_id = :installation_id
+          AND  ref = :ref
           AND  generation = :generation
     """)
     rows = session.execute(
@@ -271,7 +271,7 @@ def _load_chunks(
         {
             "ids": ids,
             "repo_name": repo_name,
-            "installation_id": installation_id,
+            "ref": ref,
             "generation": generation,
         },
     ).mappings().all()
@@ -317,7 +317,7 @@ async def hybrid_search_debug(
     query: str,
     repo_name: str,
     *,
-    installation_id: int,
+    ref: str,
     top_n: int = DEFAULT_TOP_N,
     rrf_k: int = DEFAULT_K,
     limit: int = DEFAULT_FINAL_LIMIT,
@@ -340,7 +340,7 @@ async def hybrid_search_debug(
     from the retriever candidate pools (Exp 5).
     """
     repo_name = normalize_repository_name(repo_name)
-    generation = _get_active_generation(session, repo_name, installation_id)
+    generation = _get_active_generation(session, repo_name, ref)
     if generation is None:
         return [], RetrievalDebug(vector_ranks={}, fts_ranks={}, fused=[])
 
@@ -359,7 +359,7 @@ async def hybrid_search_debug(
                 session,
                 query_embedding,
                 repo_name,
-                installation_id,
+                ref,
                 top_n,
                 generation=generation,
                 filter_demo_paths=filter_demo_paths,
@@ -372,7 +372,7 @@ async def hybrid_search_debug(
                 session,
                 query,
                 repo_name,
-                installation_id,
+                ref,
                 top_n,
                 generation=generation,
                 filter_demo_paths=filter_demo_paths,
@@ -391,7 +391,7 @@ async def hybrid_search_debug(
             fused,
             path_penalty,
             repo_name=repo_name,
-            installation_id=installation_id,
+            ref=ref,
             generation=generation,
         )
         results = _load_chunks(
@@ -399,14 +399,14 @@ async def hybrid_search_debug(
             fused,
             hydrate_limit,
             repo_name=repo_name,
-            installation_id=installation_id,
+            ref=ref,
             generation=generation,
         )
 
         current_generation = _get_active_generation(
             session,
             repo_name,
-            installation_id,
+            ref,
         )
         if current_generation == generation:
             break
@@ -465,7 +465,7 @@ async def hybrid_search(
     query: str,
     repo_name: str,
     *,
-    installation_id: int,
+    ref: str,
     top_n: int = DEFAULT_TOP_N,
     rrf_k: int = DEFAULT_K,
     limit: int = DEFAULT_FINAL_LIMIT,
@@ -488,7 +488,7 @@ async def hybrid_search(
         session,
         query,
         repo_name,
-        installation_id=installation_id,
+        ref=ref,
         top_n=top_n,
         rrf_k=rrf_k,
         limit=limit,
@@ -503,7 +503,6 @@ async def hybrid_search(
         rerank_model=rerank_model,
     )
     return results
-
 
 
 
