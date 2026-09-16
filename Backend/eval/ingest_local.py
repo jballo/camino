@@ -8,7 +8,7 @@ without needing a GitHub App installation.
 
 Usage:
     uv run python -m eval.ingest_local --path eval/.data/fastapi \
-        --repo tiangolo/fastapi
+        --repo tiangolo/fastapi --ref 0.115.6
 """
 
 from __future__ import annotations
@@ -32,14 +32,15 @@ from app.services.embeddings import (
     build_embedding_text,
     embed_all,
 )
+from app.services.jobs import normalize_repository_name
 from app.services.parser import LANGUAGES, MAX_FILE_BYTES, SKIP_DIRS, parse_file
 from app.services.search_index import (
     populate_search_vector_sql,
     rebuild_search_vector,
 )
 
-# A sentinel installation id reserved for eval fixtures so it never collides
-# with real GitHub installation ids.
+# Live eval generation still needs a placeholder installation id for GitHub-bound
+# interfaces. The shared code index itself is keyed only by repository and ref.
 EVAL_INSTALLATION_ID = 999_999_999
 
 # The eval fixture is checked out (not committed) so it can be reproduced from a
@@ -88,20 +89,37 @@ def _iter_source_files(root: Path):
             yield full
 
 
+def _git_commit_sha(root: Path) -> str | None:
+    """Return the checked-out commit for provenance when ``root`` is a Git repo."""
+    result = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    commit_sha = result.stdout.strip()
+    return commit_sha or None
+
+
 async def ingest(
     root: Path,
     repo_name: str,
-    installation_id: int = EVAL_INSTALLATION_ID,
+    ref: str = FIXTURE_REPO_VERSION,
+    visibility: str = "public",
 ) -> dict:
     started = time.monotonic()
     engine = create_engine(settings.database_url)
+    repo_name = normalize_repository_name(repo_name)
     generation = uuid4().hex
+    commit_sha = _git_commit_sha(root)
 
     all_chunks = []
     files_parsed = 0
     for full in _iter_source_files(root):
         # store paths relative to the repo root so they look like GitHub paths
-        rel_path = str(full.relative_to(root))
+        rel_path = full.relative_to(root).as_posix()
         try:
             source_bytes = full.read_bytes()
         except OSError:
@@ -125,7 +143,7 @@ async def ingest(
         session.exec(
             delete(CodeChunkModel).where(
                 CodeChunkModel.repo_name == repo_name,
-                CodeChunkModel.installation_id == installation_id,
+                CodeChunkModel.ref == ref,
             )
         )
 
@@ -133,7 +151,7 @@ async def ingest(
             CodeChunkModel.from_parsed(
                 c,
                 repo_name=repo_name,
-                installation_id=installation_id,
+                ref=ref,
                 generation=generation,
             )
             for c in all_chunks
@@ -148,31 +166,47 @@ async def ingest(
                 dimension=EMBED_DIMENSIONS,
                 embedding=vector,
             )
-            for chunk, vector in zip(chunk_models, vectors)
+            for chunk, vector in zip(chunk_models, vectors, strict=True)
         ]
         session.add_all(embedding_models)
 
         session.exec(
             text(populate_search_vector_sql(only_null=True)).bindparams(
                 repo_name=repo_name,
-                installation_id=installation_id,
+                ref=ref,
                 generation=generation,
             )
         )
         session.exec(
             text("""
                 INSERT INTO repo_index_state (
-                    installation_id,
                     repo_name,
-                    active_generation
+                    ref,
+                    visibility,
+                    active_generation,
+                    indexed_sha,
+                    indexed_at
                 )
-                VALUES (:installation_id, :repo_name, :generation)
-                ON CONFLICT (installation_id, repo_name)
-                DO UPDATE SET active_generation = EXCLUDED.active_generation
+                VALUES (
+                    :repo_name,
+                    :ref,
+                    :visibility,
+                    :generation,
+                    :commit_sha,
+                    now()
+                )
+                ON CONFLICT (repo_name, ref)
+                DO UPDATE SET
+                    visibility = EXCLUDED.visibility,
+                    active_generation = EXCLUDED.active_generation,
+                    indexed_sha = EXCLUDED.indexed_sha,
+                    indexed_at = EXCLUDED.indexed_at
             """).bindparams(
                 repo_name=repo_name,
-                installation_id=installation_id,
+                ref=ref,
+                visibility=visibility,
                 generation=generation,
+                commit_sha=commit_sha,
             )
         )
 
@@ -181,7 +215,7 @@ async def ingest(
 
     print(
         f"ingested: chunks={inserted} embeddings={len(embedding_models)} "
-        f"repo={repo_name!r} installation_id={installation_id} "
+        f"repo={repo_name!r} ref={ref!r} commit_sha={commit_sha or 'unknown'} "
         f"elapsed={time.monotonic() - started:.1f}s"
     )
     return {"chunks": inserted, "embeddings": len(embedding_models)}
@@ -200,10 +234,15 @@ def main() -> None:
         help="Logical repo_name to store chunks under.",
     )
     parser.add_argument(
-        "--installation-id",
-        type=int,
-        default=EVAL_INSTALLATION_ID,
-        help="Installation id to store chunks under.",
+        "--ref",
+        default=FIXTURE_REPO_VERSION,
+        help="Git ref represented by the local checkout.",
+    )
+    parser.add_argument(
+        "--visibility",
+        choices=("public", "private"),
+        default="public",
+        help="Repository visibility recorded in the index state.",
     )
     parser.add_argument(
         "--no-clone",
@@ -221,10 +260,10 @@ def main() -> None:
     if args.rebuild_fts:
         engine = create_engine(settings.database_url)
         with Session(engine) as session:
-            rebuild_search_vector(session, args.repo, args.installation_id)
+            rebuild_search_vector(session, args.repo, args.ref)
         print(
             f"rebuilt search_vector: repo={args.repo!r} "
-            f"installation_id={args.installation_id}"
+            f"ref={args.ref!r}"
         )
         return
 
@@ -239,7 +278,7 @@ def main() -> None:
             "(pass without --no-clone to auto-fetch the fixture)"
         )
 
-    asyncio.run(ingest(root, args.repo, args.installation_id))
+    asyncio.run(ingest(root, args.repo, args.ref, args.visibility))
 
 
 if __name__ == "__main__":
