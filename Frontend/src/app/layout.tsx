@@ -23,7 +23,7 @@ const fontMono = JetBrains_Mono({
 export const metadata: Metadata = {
   title: "Camino",
   description:
-    "Guided tours of unfamiliar codebases — connect a repo, pick a topic, get a structured walkthrough.",
+    "Open-source contribution helper — paste a GitHub issue and get a grounded implementation brief, plus guided tours of the code it touches.",
 };
 
 export default function RootLayout({

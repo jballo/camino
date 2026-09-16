@@ -2,6 +2,7 @@
 
 import type { JourneyStatus, JourneySummary } from "@/types/tour";
 import { ApiError, backendFetch } from "@/lib/api";
+import TourGenerator from "@/components/tour-generator";
 import { useAuth } from "@clerk/nextjs";
 import { Button } from "@headlessui/react";
 import {
@@ -104,7 +105,7 @@ export default function ToursList() {
     <div className="flex flex-col w-full min-h-full">
       <div className="page-shell max-w-4xl">
         <div className="flex items-center justify-between">
-          <div><span className="eyebrow">Walkthrough archive</span><h1 className="display-title mt-2 text-5xl font-black sm:text-6xl">Your tours<span className="text-brand-accent">.</span></h1></div>
+          <div><span className="eyebrow">Context tours — understand the code behind an issue</span><h1 className="display-title mt-2 text-5xl font-black sm:text-6xl">Guided tours<span className="text-brand-accent">.</span></h1></div>
           <Button
             onClick={loadTours}
             className="flex size-11 items-center justify-center rounded-full border border-border hover:bg-accent"
@@ -114,18 +115,15 @@ export default function ToursList() {
           </Button>
         </div>
 
+        <TourGenerator />
+
         {error && <div className="text-sm text-destructive">{error}</div>}
 
         {!loading && !error && tours.length === 0 && (
           <div className="flex flex-col items-center gap-3 py-20 text-center text-muted-foreground">
             <Map className="size-8" />
             <p className="text-sm">No tours yet.</p>
-            <Link
-              href="/"
-              className="button-primary"
-            >
-              Generate a tour
-            </Link>
+            <p className="text-sm">Use the form above to generate your first tour.</p>
           </div>
         )}
 

@@ -1,12 +1,12 @@
 # Camino
 
-Generate **guided tours and contribution briefs** for unfamiliar codebases. Connect a
-GitHub repo and either explore a topic ("authentication flow", "request lifecycle") or
-paste an issue URL. Camino returns a grounded walkthrough with code snippets, file
-references, setup guidance, and explanations of *why* the code exists the way it does.
+Turn a GitHub issue into a **grounded implementation brief**. Camino checks contribution
+signals, finds the right branch, and maps the setup, code, tests, and implementation
+steps needed to make a first contribution. Guided code tours remain available when you
+want deeper context on an unfamiliar part of the repository.
 
-Built for new hires, OSS contributors, and anyone who's opened a repo and thought
-"where do I even start?"
+Built for OSS contributors and anyone who's opened an issue and thought, "where do I
+even start?"
 
 ---
 
@@ -89,9 +89,10 @@ flowchart TB
     Clerk[Clerk auth]
     Settings["/settings — GitHub connection"]
     Explore["/explore — ingest + Q&A"]
-    Home["/ — guided tour request form"]
-    TourUI["/generate + /tours — tour polling + reader"]
-    BriefUI["/briefs — issue preflight + brief reader"]
+    Home["/ — issue preflight + brief list"]
+    TourUI["/tours — library + generator"]
+    GenerateUI["/generate — tour polling"]
+    BriefUI["/briefs/[id] — brief reader"]
     GithubRoutes["/api/github/* — install/OAuth redirects"]
   end
 
@@ -124,6 +125,7 @@ flowchart TB
   Explore -->|"Bearer JWT"| API
   Home -->|"Bearer JWT"| API
   TourUI -->|"Bearer JWT"| API
+  GenerateUI -->|"Bearer JWT"| API
   BriefUI -->|"Bearer JWT"| API
   Settings --> GithubRoutes
   GithubRoutes -->|github/connect| API
@@ -241,12 +243,12 @@ does not add, rename, or remove columns on existing tables.
 2. Open **Explore** → select a repo → **Process**. Camino queues ingestion and polls its
   status; **Stop** cancels an active job. Indexes are scoped to the selected ref, and
   the repo must be indexed before Q&A or tour generation can use it.
-3. Ask a question in **Explore**, or go back to **Home** to generate a tour:
+3. Ask a question in **Explore**, or open **Tours** to generate a tour:
   select the processed repo, enter a topic such as "authentication flow", and click
    **Generate tour**.
 4. Camino routes to `/generate?id=...`, polls the job, then opens `/tours/{id}` when
   the grounded tour is ready.
-5. Open **Issue briefs**, paste a GitHub issue URL, review the issue warnings and
+5. Open **Home**, paste a GitHub issue URL, review the issue warnings and
    discovered target branch, then generate a brief. Camino queues the required ref
    ingestion automatically, if needed, before producing setup steps, grounded reading
    guidance, tests, and an implementation checklist.
@@ -433,12 +435,12 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 
 ### Web app
 
-- [x] Request-a-tour form — select repo, enter topic, create journey, route to `/generate`
+- [x] Tours library + generator — select repo, enter topic, create journey, route to `/generate`
 - [x] Explore page — repo list, ingest, ask-the-codebase with source citations
 - [x] Tour reader page — TOC, markdown explanations, file paths, line-numbered snippets
 - [x] Generation status / polling page
-- [x] Tours library page
-- [x] Issue briefs page — GitHub issue preflight, branch override, recent briefs, and reader
+- [x] Issue brief home page — GitHub issue preflight, branch override, and recent briefs
+- [x] Issue brief reader — polling, cancellation, and grounded implementation guidance
 - [x] Settings page — GitHub connection status plus install/manage-repositories entry point
 - [x] Clerk auth (sign-in, session JWT to backend)
 - [x] GitHub App connect + repo listing

@@ -109,7 +109,7 @@ function CenteredError({ message }: { message: string }) {
     <div className="flex min-h-full flex-col items-center justify-center gap-4 px-8 text-center">
       <AlertTriangle className="size-9 text-destructive" />
       <p className="text-sm text-muted-foreground">{message}</p>
-      <Link href="/briefs" className="text-sm text-primary underline">Back to issue briefs</Link>
+      <Link href="/" className="text-sm text-primary underline">Back to issue briefs</Link>
     </div>
   );
 }
@@ -122,7 +122,7 @@ function ArtifactReader({ artifact }: { artifact: BriefArtifact }) {
   return (
     <div className="page-shell">
       <header className="console flex flex-col gap-3 p-6 sm:p-8">
-        <Link href="/briefs" className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
+        <Link href="/" className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
           <ArrowLeft className="size-4" /> All issue briefs
         </Link>
         <div className="font-mono text-xs text-muted-foreground">

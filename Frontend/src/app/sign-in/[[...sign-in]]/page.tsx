@@ -4,18 +4,18 @@ import { FileCode, Map, Sparkles } from "lucide-react";
 const HIGHLIGHTS = [
   {
     icon: FileCode,
-    title: "Connect a repository",
-    description: "Point Camino at any repo you can access on GitHub.",
+    title: "Paste an issue",
+    description: "Start with a GitHub issue you want to solve.",
   },
   {
     icon: Sparkles,
-    title: "Describe a topic",
-    description: "Ask how something works and get a grounded walkthrough.",
+    title: "Check contribution signals",
+    description: "Find the right branch and catch blockers before you start.",
   },
   {
     icon: Map,
-    title: "Follow the tour",
-    description: "Step through an ordered, code-linked explanation.",
+    title: "Follow the brief",
+    description: "Work through a grounded, code-linked implementation plan.",
   },
 ];
 
@@ -39,11 +39,11 @@ export default async function Page({
       <div className="grid w-full max-w-4xl items-center gap-12 lg:grid-cols-2">
         <div className="flex flex-col gap-8">
           <div className="flex flex-col gap-3">
-            <span className="eyebrow">Guided code intelligence</span>
+            <span className="eyebrow">Open-source contribution helper</span>
             <h1 className="display-title text-5xl font-black">Welcome to Camino<span className="text-brand-accent">.</span></h1>
             <p className="max-w-md text-sm text-muted-foreground">
-              Guided tours of unfamiliar codebases. Sign in to connect a
-              repository and start building code-grounded walkthroughs.
+              Turn a GitHub issue into a grounded implementation brief. Sign in
+              to inspect an issue and find the right path through the code.
             </p>
           </div>
 

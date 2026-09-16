@@ -56,7 +56,7 @@ function GenerateInner() {
 
   useEffect(() => {
     if (!id) {
-      router.replace("/");
+      router.replace("/tours");
       return;
     }
 
@@ -192,7 +192,7 @@ function GenerateInner() {
                 This tour was stopped before it finished.
               </p>
               <Link
-                href="/"
+                href="/tours"
                 className="button-primary"
               >
                 Start over
@@ -204,7 +204,7 @@ function GenerateInner() {
               <h2 className="text-xl font-semibold">Generation failed</h2>
               <p className="text-sm text-muted-foreground">{error}</p>
               <Link
-                href="/"
+                href="/tours"
                 className="button-primary"
               >
                 Start over
@@ -227,7 +227,7 @@ function GenerateInner() {
                   Keep waiting
                 </Button>
                 <Link
-                  href="/"
+                  href="/tours"
                   className="button-ghost"
                 >
                   Start over
