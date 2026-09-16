@@ -8,6 +8,7 @@ from sqlalchemy import exc
 
 from app.api.repositories import (
     RepoFollowBody,
+    _index_rows,
     follow_repository,
     lookup_repository,
     repository_overview,
@@ -35,6 +36,24 @@ def _index_row(repo_name: str = "org/repo"):
     )
 
 
+def test_index_rows_filters_repositories_before_aggregation():
+    session = MagicMock()
+    session.execute.return_value.all.return_value = []
+
+    assert _index_rows(session, {"Org/Beta", "org/alpha"}) == []
+
+    statement, parameters = session.execute.call_args.args
+    assert "WHERE s.repo_name IN" in str(statement)
+    assert parameters == {"repo_names": ["org/alpha", "org/beta"]}
+
+
+def test_index_rows_skips_query_for_empty_repository_set():
+    session = MagicMock()
+
+    assert _index_rows(session, set()) == []
+    session.execute.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_lookup_returns_index_facts_and_personal_follow():
     session = MagicMock()
@@ -47,7 +66,10 @@ async def test_lookup_returns_index_facts_and_personal_follow():
             "app.api.repositories.resolve_repo_access",
             return_value=RepoAccess(installation_id=12, visibility="public"),
         ),
-        patch("app.api.repositories._index_rows", return_value=[_index_row()]),
+        patch(
+            "app.api.repositories._index_rows",
+            return_value=[_index_row()],
+        ) as index_rows,
     ):
         result = await lookup_repository("Org/Repo", session, USER_ID)
 
@@ -56,6 +78,7 @@ async def test_lookup_returns_index_facts_and_personal_follow():
     assert result.followed is True
     assert result.refs[0].chunkCount == 42
     assert result.refs[0].indexedSha == "abcdef123456"
+    index_rows.assert_called_once_with(session, {"org/repo"})
 
 
 @pytest.mark.asyncio
@@ -88,7 +111,7 @@ async def test_overview_keeps_installed_and_requested_separate():
                 _index_row("public/requested"),
                 _index_row("other/not-visible"),
             ],
-        ),
+        ) as index_rows,
     ):
         result = await repository_overview(session, USER_ID)
 
@@ -100,6 +123,10 @@ async def test_overview_keeps_installed_and_requested_separate():
         session,
         USER_ID,
         "public/requested",
+    )
+    index_rows.assert_called_once_with(
+        session,
+        {"private/installed", "public/requested"},
     )
 
 

@@ -2,11 +2,12 @@ import asyncio
 import datetime as dt
 import logging
 import re
+from collections.abc import Collection
 
 from fastapi import APIRouter, Depends, HTTPException
 from github import Auth, GithubException, GithubIntegration
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import exc, text
+from sqlalchemy import bindparam, exc, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlmodel import Session, select
 
@@ -168,22 +169,28 @@ def _installed_repository_names(installation_id: int) -> set[str]:
     }
 
 
-def _index_rows(session: Session, repo_name: str | None = None) -> list:
-    where = "WHERE s.repo_name = :repo_name" if repo_name is not None else ""
+def _index_rows(session: Session, repo_names: Collection[str]) -> list:
+    normalized_names = sorted(
+        {normalize_repository_name(repo_name) for repo_name in repo_names}
+    )
+    if not normalized_names:
+        return []
+
+    statement = text("""
+        SELECT s.repo_name, s.ref, s.indexed_sha, s.indexed_at,
+               count(DISTINCT c.id) AS chunk_count
+        FROM repo_index_state AS s
+        LEFT JOIN code_chunks AS c
+          ON c.repo_name = s.repo_name
+         AND c.ref = s.ref
+         AND c.generation = s.active_generation
+        WHERE s.repo_name IN :repo_names
+        GROUP BY s.repo_name, s.ref, s.indexed_sha, s.indexed_at
+        ORDER BY s.repo_name, s.ref
+    """).bindparams(bindparam("repo_names", expanding=True))
     return session.execute(
-        text(f"""
-            SELECT s.repo_name, s.ref, s.indexed_sha, s.indexed_at,
-                   count(DISTINCT c.id) AS chunk_count
-            FROM repo_index_state AS s
-            LEFT JOIN code_chunks AS c
-              ON c.repo_name = s.repo_name
-             AND c.ref = s.ref
-             AND c.generation = s.active_generation
-            {where}
-            GROUP BY s.repo_name, s.ref, s.indexed_sha, s.indexed_at
-            ORDER BY s.repo_name, s.ref
-        """),
-        {} if repo_name is None else {"repo_name": repo_name},
+        statement,
+        {"repo_names": normalized_names},
     ).all()
 
 
@@ -333,7 +340,7 @@ async def lookup_repository(
             auth_user_id,
             repo_name,
         )
-        rows = _index_rows(session, repo_name)
+        rows = _index_rows(session, {repo_name})
         followed = session.exec(
             select(UserRepoFollow).where(
                 UserRepoFollow.userId == auth_user_id,
@@ -403,7 +410,7 @@ async def repository_overview(
             authorized_requested_names.add(repo_name)
 
         visible_names = installed_names | authorized_requested_names
-        rows = _index_rows(session)
+        rows = _index_rows(session, visible_names)
     except exc.NoResultFound:
         raise HTTPException(
             status_code=404,
