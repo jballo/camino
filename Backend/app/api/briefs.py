@@ -150,7 +150,12 @@ async def _preview(
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error))
     try:
-        access = resolve_repo_access(session, user_id, requested_repo)
+        access = await asyncio.to_thread(
+            resolve_repo_access,
+            session,
+            user_id,
+            requested_repo,
+        )
     except RepoAccessDenied as error:
         raise HTTPException(status_code=404, detail=str(error))
     except RepoAccessUnavailable as error:
@@ -237,7 +242,12 @@ async def create_brief(
         ).one_or_none()
         dependency_id = None
         if state is not None:
-            authorize_index_read(session, auth_user_id, state)
+            await asyncio.to_thread(
+                authorize_index_read,
+                session,
+                auth_user_id,
+                state,
+            )
         else:
             ingest, _ = enqueue_job(
                 session,

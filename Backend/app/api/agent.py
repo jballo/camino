@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -73,7 +74,12 @@ async def ask_agent(
         )
     index_state = states[0]
     try:
-        authorize_index_read(session, auth_user_id, index_state)
+        await asyncio.to_thread(
+            authorize_index_read,
+            session,
+            auth_user_id,
+            index_state,
+        )
     except RepoAccessDenied:
         raise HTTPException(status_code=404, detail="Repository index not found")
     except RepoAccessUnavailable:

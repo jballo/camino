@@ -150,7 +150,7 @@ def _normalized_repository_name(repo_name: str) -> str:
     return normalize_repository_name(candidate)
 
 
-def _installed_repository_names(installation_id: int) -> set[str]:
+def _installed_repositories(installation_id: int) -> list[str]:
     app_auth = Auth.AppAuth(
         app_id=settings.gh_app_id,
         private_key=settings.gh_app_private_key,
@@ -158,9 +158,13 @@ def _installed_repository_names(installation_id: int) -> set[str]:
     installation = GithubIntegration(auth=app_auth).get_app_installation(
         installation_id
     )
+    return [repo.full_name for repo in installation.get_repos()]
+
+
+def _installed_repository_names(installation_id: int) -> set[str]:
     return {
-        normalize_repository_name(repo.full_name)
-        for repo in installation.get_repos()
+        normalize_repository_name(repo_name)
+        for repo_name in _installed_repositories(installation_id)
     }
 
 
@@ -192,7 +196,7 @@ def _ref_response(row) -> RepoRefResponse:
     )
 
 
-def _get_authorized_repository_ingest(
+async def _get_authorized_repository_ingest(
     session: Session,
     job_id: int,
     auth_user_id: str,
@@ -220,9 +224,19 @@ def _get_authorized_repository_ingest(
         raise HTTPException(status_code=500, detail="Database error")
     try:
         if state is not None:
-            authorize_index_read(session, auth_user_id, state)
+            await asyncio.to_thread(
+                authorize_index_read,
+                session,
+                auth_user_id,
+                state,
+            )
         else:
-            resolve_repo_access(session, auth_user_id, job.repo_name)
+            await asyncio.to_thread(
+                resolve_repo_access,
+                session,
+                auth_user_id,
+                job.repo_name,
+            )
     except RepoAccessDenied:
         raise HTTPException(status_code=404, detail="Ingestion job not found")
     except RepoAccessUnavailable:
@@ -230,7 +244,7 @@ def _get_authorized_repository_ingest(
     return job
 
 
-def _resolve_readable_index(
+async def _resolve_readable_index(
     session: Session,
     user_id: str,
     repo_name: str,
@@ -255,7 +269,7 @@ def _resolve_readable_index(
         )
     state = states[0]
     try:
-        authorize_index_read(session, user_id, state)
+        await asyncio.to_thread(authorize_index_read, session, user_id, state)
     except RepoAccessDenied:
         raise HTTPException(status_code=404, detail="Repository index not found")
     except RepoAccessUnavailable:
@@ -293,13 +307,10 @@ async def list_repositories(
         raise HTTPException(status_code=500, detail="Database error")
 
     try:
-        app_auth = Auth.AppAuth(
-            app_id=settings.gh_app_id, private_key=settings.gh_app_private_key
+        return await asyncio.to_thread(
+            _installed_repositories,
+            gh_connection.installationId,
         )
-        gi = GithubIntegration(auth=app_auth)
-        installation = gi.get_app_installation(gh_connection.installationId)
-        repos = installation.get_repos()
-        return [repo.full_name for repo in repos]
     except GithubException:
         raise HTTPException(status_code=500, detail="Github error")
 
@@ -316,7 +327,12 @@ async def lookup_repository(
 ) -> RepoLookupResponse:
     repo_name = _normalized_repository_name(repoName)
     try:
-        access = resolve_repo_access(session, auth_user_id, repo_name)
+        access = await asyncio.to_thread(
+            resolve_repo_access,
+            session,
+            auth_user_id,
+            repo_name,
+        )
         rows = _index_rows(session, repo_name)
         followed = session.exec(
             select(UserRepoFollow).where(
@@ -352,7 +368,10 @@ async def repository_overview(
                 GithubConnections.userId == auth_user_id
             )
         ).one()
-        installed_names = _installed_repository_names(connection.installationId)
+        installed_names = await asyncio.to_thread(
+            _installed_repository_names,
+            connection.installationId,
+        )
         followed_names = {
             row.repo_name
             for row in session.exec(
@@ -364,7 +383,12 @@ async def repository_overview(
         authorized_requested_names: set[str] = set()
         for repo_name in followed_names - installed_names:
             try:
-                resolve_repo_access(session, auth_user_id, repo_name)
+                await asyncio.to_thread(
+                    resolve_repo_access,
+                    session,
+                    auth_user_id,
+                    repo_name,
+                )
             except RepoAccessDenied:
                 logger.info(
                     "Omitting inaccessible followed repository from overview",
@@ -419,10 +443,17 @@ async def follow_repository(
 ) -> RepoFollowResponse:
     repo_name = _normalized_repository_name(payload.repoName)
     try:
-        access = resolve_repo_access(session, auth_user_id, repo_name)
-        installed = repo_name in _installed_repository_names(
-            access.installation_id
+        access = await asyncio.to_thread(
+            resolve_repo_access,
+            session,
+            auth_user_id,
+            repo_name,
         )
+        installed_names = await asyncio.to_thread(
+            _installed_repository_names,
+            access.installation_id,
+        )
+        installed = repo_name in installed_names
         indexed = session.exec(
             select(RepoIndexState).where(RepoIndexState.repo_name == repo_name)
         ).first() is not None
@@ -554,7 +585,12 @@ async def process_repository(
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> RepoIngestJobResponse:
     try:
-        access = resolve_repo_access(session, auth_user_id, payload.repoName)
+        access = await asyncio.to_thread(
+            resolve_repo_access,
+            session,
+            auth_user_id,
+            payload.repoName,
+        )
     except RepoAccessDenied as error:
         raise HTTPException(status_code=404, detail=str(error))
     except RepoAccessUnavailable as error:
@@ -606,7 +642,11 @@ async def get_repository_ingest(
     session: SessionDep,
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> RepoIngestStatusResponse:
-    job = _get_authorized_repository_ingest(session, job_id, auth_user_id)
+    job = await _get_authorized_repository_ingest(
+        session,
+        job_id,
+        auth_user_id,
+    )
     return _repository_ingest_response(job)
 
 
@@ -616,7 +656,11 @@ async def cancel_repository_ingest(
     session: SessionDep,
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> RepoIngestStatusResponse:
-    job = _get_authorized_repository_ingest(session, job_id, auth_user_id)
+    job = await _get_authorized_repository_ingest(
+        session,
+        job_id,
+        auth_user_id,
+    )
     if job.userId != auth_user_id:
         raise HTTPException(
             status_code=403,
@@ -653,7 +697,7 @@ async def search_repository(
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> list[SearchResultResponse]:
     try:
-        index_state = _resolve_readable_index(
+        index_state = await _resolve_readable_index(
             session, auth_user_id, payload.repoName, payload.ref
         )
     except exc.OperationalError:
