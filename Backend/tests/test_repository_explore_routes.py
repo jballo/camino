@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 
 from app.api.repositories import (
     RepoFollowBody,
@@ -12,7 +13,11 @@ from app.api.repositories import (
     unfollow_repository,
 )
 from app.models.repo_follow import UserRepoFollow
-from app.services.repo_access import RepoAccess
+from app.services.repo_access import (
+    RepoAccess,
+    RepoAccessDenied,
+    RepoAccessUnavailable,
+)
 
 
 USER_ID = "user_123"
@@ -69,6 +74,13 @@ async def test_overview_keeps_installed_and_requested_separate():
             return_value={"private/installed"},
         ),
         patch(
+            "app.api.repositories.resolve_repo_access",
+            return_value=RepoAccess(
+                installation_id=12,
+                visibility="public",
+            ),
+        ) as resolve_access,
+        patch(
             "app.api.repositories._index_rows",
             return_value=[
                 _index_row("private/installed"),
@@ -83,6 +95,70 @@ async def test_overview_keeps_installed_and_requested_separate():
     assert [item.repoName for item in result.requested] == ["public/requested"]
     assert result.installed[0].refs[0].chunkCount == 42
     assert result.requested[0].refs[0].ref == "main"
+    resolve_access.assert_called_once_with(
+        session,
+        USER_ID,
+        "public/requested",
+    )
+
+
+@pytest.mark.asyncio
+async def test_overview_omits_follow_after_access_is_revoked():
+    session = MagicMock()
+    connection_result = MagicMock()
+    connection_result.one.return_value = MagicMock(installationId=12)
+    follows_result = MagicMock()
+    follows_result.all.return_value = [
+        UserRepoFollow(userId=USER_ID, repo_name="private/revoked")
+    ]
+    session.exec.side_effect = [connection_result, follows_result]
+
+    with (
+        patch(
+            "app.api.repositories._installed_repository_names",
+            return_value=set(),
+        ),
+        patch(
+            "app.api.repositories.resolve_repo_access",
+            side_effect=RepoAccessDenied("Repository not found"),
+        ),
+        patch(
+            "app.api.repositories._index_rows",
+            return_value=[_index_row("private/revoked")],
+        ),
+    ):
+        result = await repository_overview(session, USER_ID)
+
+    assert result.installed == []
+    assert result.requested == []
+
+
+@pytest.mark.asyncio
+async def test_overview_fails_closed_when_access_cannot_be_checked():
+    session = MagicMock()
+    connection_result = MagicMock()
+    connection_result.one.return_value = MagicMock(installationId=12)
+    follows_result = MagicMock()
+    follows_result.all.return_value = [
+        UserRepoFollow(userId=USER_ID, repo_name="public/requested")
+    ]
+    session.exec.side_effect = [connection_result, follows_result]
+
+    with (
+        patch(
+            "app.api.repositories._installed_repository_names",
+            return_value=set(),
+        ),
+        patch(
+            "app.api.repositories.resolve_repo_access",
+            side_effect=RepoAccessUnavailable("Github unavailable"),
+        ),
+        pytest.raises(HTTPException) as error,
+    ):
+        await repository_overview(session, USER_ID)
+
+    assert error.value.status_code == 502
+    assert error.value.detail == "Github access check failed"
 
 
 @pytest.mark.asyncio

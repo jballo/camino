@@ -361,6 +361,24 @@ async def repository_overview(
                 )
             ).all()
         }
+        authorized_requested_names: set[str] = set()
+        for repo_name in followed_names - installed_names:
+            try:
+                resolve_repo_access(session, auth_user_id, repo_name)
+            except RepoAccessDenied:
+                logger.info(
+                    "Omitting inaccessible followed repository from overview",
+                    extra={"repo_name": repo_name, "user_id": auth_user_id},
+                )
+                continue
+            except RepoAccessUnavailable:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Github access check failed",
+                )
+            authorized_requested_names.add(repo_name)
+
+        visible_names = installed_names | authorized_requested_names
         rows = _index_rows(session)
     except exc.NoResultFound:
         raise HTTPException(
@@ -375,7 +393,7 @@ async def repository_overview(
 
     refs_by_repo: dict[str, list[RepoRefResponse]] = {}
     for row in rows:
-        if row.repo_name in installed_names or row.repo_name in followed_names:
+        if row.repo_name in visible_names:
             refs_by_repo.setdefault(row.repo_name, []).append(_ref_response(row))
 
     def entry(repo_name: str) -> RepoEntryResponse:
@@ -388,7 +406,7 @@ async def repository_overview(
         installed=[entry(name) for name in sorted(installed_names)],
         requested=[
             entry(name)
-            for name in sorted(followed_names - installed_names)
+            for name in sorted(authorized_requested_names)
         ],
     )
 
