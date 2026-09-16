@@ -1,11 +1,13 @@
 import asyncio
 import datetime as dt
 import logging
+import re
 
 from fastapi import APIRouter, Depends, HTTPException
 from github import Auth, GithubException, GithubIntegration
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import exc, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlmodel import Session, select
 
 from app.config import settings
@@ -14,6 +16,7 @@ from app.db import SessionDep
 from app.models.github_connection import GithubConnections
 from app.models.code import RepoIndexState
 from app.models.job import Job, JobStatus, JobType
+from app.models.repo_follow import UserRepoFollow
 from app.rate_limit import (
     CONTRIBUTION_TARGET_RATE_LIMIT,
     REPOSITORY_INGEST_RATE_LIMIT,
@@ -94,6 +97,99 @@ class ContributionTargetResponse(BaseModel):
     evidencePath: str | None
     defaultBranch: str | None
     checkedAt: dt.datetime
+
+
+class RepoRefResponse(BaseModel):
+    ref: str
+    chunkCount: int
+    indexedSha: str | None
+    indexedAt: dt.datetime | None
+
+
+class RepoLookupResponse(BaseModel):
+    repoName: str
+    visibility: str
+    indexed: bool
+    followed: bool
+    refs: list[RepoRefResponse]
+
+
+class RepoEntryResponse(BaseModel):
+    repoName: str
+    refs: list[RepoRefResponse]
+
+
+class RepoOverviewResponse(BaseModel):
+    installed: list[RepoEntryResponse]
+    requested: list[RepoEntryResponse]
+
+
+class RepoFollowBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repoName: str
+
+
+class RepoFollowResponse(BaseModel):
+    repoName: str
+    followed: bool
+    indexed: bool
+    jobQueued: bool
+
+
+_REPOSITORY_NAME = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def _normalized_repository_name(repo_name: str) -> str:
+    candidate = repo_name.strip()
+    if not _REPOSITORY_NAME.fullmatch(candidate):
+        raise HTTPException(
+            status_code=422,
+            detail="Repository name must use the owner/repo format",
+        )
+    return normalize_repository_name(candidate)
+
+
+def _installed_repository_names(installation_id: int) -> set[str]:
+    app_auth = Auth.AppAuth(
+        app_id=settings.gh_app_id,
+        private_key=settings.gh_app_private_key,
+    )
+    installation = GithubIntegration(auth=app_auth).get_app_installation(
+        installation_id
+    )
+    return {
+        normalize_repository_name(repo.full_name)
+        for repo in installation.get_repos()
+    }
+
+
+def _index_rows(session: Session, repo_name: str | None = None) -> list:
+    where = "WHERE s.repo_name = :repo_name" if repo_name is not None else ""
+    return session.execute(
+        text(f"""
+            SELECT s.repo_name, s.ref, s.indexed_sha, s.indexed_at,
+                   count(DISTINCT c.id) AS chunk_count
+            FROM repo_index_state AS s
+            LEFT JOIN code_chunks AS c
+              ON c.repo_name = s.repo_name
+             AND c.ref = s.ref
+             AND c.generation = s.active_generation
+            {where}
+            GROUP BY s.repo_name, s.ref, s.indexed_sha, s.indexed_at
+            ORDER BY s.repo_name, s.ref
+        """),
+        {} if repo_name is None else {"repo_name": repo_name},
+    ).all()
+
+
+def _ref_response(row) -> RepoRefResponse:
+    return RepoRefResponse(
+        ref=row.ref,
+        chunkCount=row.chunk_count,
+        indexedSha=row.indexed_sha,
+        indexedAt=row.indexed_at,
+    )
 
 
 def _get_authorized_repository_ingest(
@@ -208,70 +304,188 @@ async def list_repositories(
         raise HTTPException(status_code=500, detail="Github error")
 
 
-@router.get("/processed")
-async def list_processed_repositories(
+@router.get(
+    "/lookup",
+    response_model=RepoLookupResponse,
+    dependencies=[Depends(REPOSITORY_SEARCH_RATE_LIMIT)],
+)
+async def lookup_repository(
+    repoName: str,
     session: SessionDep,
     auth_user_id: str = Depends(get_authenticated_user_id),
-) -> list[dict]:
+) -> RepoLookupResponse:
+    repo_name = _normalized_repository_name(repoName)
     try:
-        statement = select(GithubConnections).where(
-            GithubConnections.userId == auth_user_id
-        )
-        result = session.exec(statement)
-        gh_connection = result.one()
-    except exc.NoResultFound:
-        raise HTTPException(status_code=404, detail="Github connection not found for user")
+        access = resolve_repo_access(session, auth_user_id, repo_name)
+        rows = _index_rows(session, repo_name)
+        followed = session.exec(
+            select(UserRepoFollow).where(
+                UserRepoFollow.userId == auth_user_id,
+                UserRepoFollow.repo_name == repo_name,
+            )
+        ).first() is not None
+    except RepoAccessDenied:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    except RepoAccessUnavailable:
+        raise HTTPException(status_code=502, detail="Github access check failed")
     except exc.SQLAlchemyError:
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
 
+    return RepoLookupResponse(
+        repoName=repo_name,
+        visibility=access.visibility,
+        indexed=bool(rows),
+        followed=followed,
+        refs=[_ref_response(row) for row in rows],
+    )
+
+
+@router.get("/overview", response_model=RepoOverviewResponse)
+async def repository_overview(
+    session: SessionDep,
+    auth_user_id: str = Depends(get_authenticated_user_id),
+) -> RepoOverviewResponse:
     try:
-        app_auth = Auth.AppAuth(
-            app_id=settings.gh_app_id, private_key=settings.gh_app_private_key
-        )
-        installation = GithubIntegration(auth=app_auth).get_app_installation(
-            gh_connection.installationId
-        )
-        installed_repos = {
-            normalize_repository_name(repo.full_name)
-            for repo in installation.get_repos()
+        connection = session.exec(
+            select(GithubConnections).where(
+                GithubConnections.userId == auth_user_id
+            )
+        ).one()
+        installed_names = _installed_repository_names(connection.installationId)
+        followed_names = {
+            row.repo_name
+            for row in session.exec(
+                select(UserRepoFollow).where(
+                    UserRepoFollow.userId == auth_user_id
+                )
+            ).all()
         }
-        rows = session.execute(
-            text("""
-                SELECT s.repo_name, s.ref, s.visibility, s.indexed_sha,
-                       count(DISTINCT c.id) AS chunk_count,
-                       bool_or(j.id IS NOT NULL) AS requested_by_user
-                FROM repo_index_state AS s
-                LEFT JOIN code_chunks AS c
-                  ON c.repo_name = s.repo_name
-                 AND c.ref = s.ref
-                 AND c.generation = s.active_generation
-                LEFT JOIN jobs AS j
-                  ON j.repo_name = s.repo_name
-                 AND j.ref = s.ref
-                 AND j."userId" = :user_id
-                GROUP BY s.repo_name, s.ref, s.visibility, s.indexed_sha
-            """),
-            {"user_id": auth_user_id},
-        ).all()
+        rows = _index_rows(session)
+    except exc.NoResultFound:
+        raise HTTPException(
+            status_code=404,
+            detail="Github connection not found for user",
+        )
     except GithubException:
         raise HTTPException(status_code=500, detail="Github error")
     except exc.SQLAlchemyError:
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
 
-    return [
-        {
-            "repo_name": row.repo_name,
-            "ref": row.ref,
-            "visibility": row.visibility,
-            "indexed_sha": row.indexed_sha,
-            "chunk_count": row.chunk_count,
-        }
-        for row in rows
-        if row.repo_name in installed_repos
-        or (row.visibility == "public" and row.requested_by_user)
-    ]
+    refs_by_repo: dict[str, list[RepoRefResponse]] = {}
+    for row in rows:
+        if row.repo_name in installed_names or row.repo_name in followed_names:
+            refs_by_repo.setdefault(row.repo_name, []).append(_ref_response(row))
+
+    def entry(repo_name: str) -> RepoEntryResponse:
+        return RepoEntryResponse(
+            repoName=repo_name,
+            refs=refs_by_repo.get(repo_name, []),
+        )
+
+    return RepoOverviewResponse(
+        installed=[entry(name) for name in sorted(installed_names)],
+        requested=[
+            entry(name)
+            for name in sorted(followed_names - installed_names)
+        ],
+    )
+
+
+@router.post("/follows", response_model=RepoFollowResponse)
+async def follow_repository(
+    payload: RepoFollowBody,
+    session: SessionDep,
+    auth_user_id: str = Depends(get_authenticated_user_id),
+) -> RepoFollowResponse:
+    repo_name = _normalized_repository_name(payload.repoName)
+    try:
+        access = resolve_repo_access(session, auth_user_id, repo_name)
+        installed = repo_name in _installed_repository_names(
+            access.installation_id
+        )
+        indexed = session.exec(
+            select(RepoIndexState).where(RepoIndexState.repo_name == repo_name)
+        ).first() is not None
+
+        followed = False
+        if not installed:
+            session.execute(
+                pg_insert(UserRepoFollow)
+                .values(userId=auth_user_id, repo_name=repo_name)
+                .on_conflict_do_nothing(constraint="uq_user_repo_follow")
+            )
+            session.commit()
+            followed = True
+    except RepoAccessDenied:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    except RepoAccessUnavailable:
+        raise HTTPException(status_code=502, detail="Github access check failed")
+    except GithubException:
+        raise HTTPException(status_code=502, detail="Github access check failed")
+    except exc.SQLAlchemyError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+
+    job_queued = False
+    if not indexed:
+        resolution = await asyncio.to_thread(
+            resolve_target_branch,
+            repo_name,
+            access.installation_id,
+        )
+        if not resolution.branch:
+            raise HTTPException(
+                status_code=422,
+                detail="Could not resolve repository ref",
+            )
+        try:
+            _, job_queued = enqueue_job(
+                session,
+                user_id=auth_user_id,
+                installation_id=access.installation_id,
+                repo_name=repo_name,
+                ref=resolution.branch,
+                job_type=JobType.REPOSITORY_INGEST,
+                dedupe_key=repository_ingest_dedupe_key(
+                    repo_name=repo_name,
+                    ref=resolution.branch,
+                ),
+            )
+        except exc.SQLAlchemyError:
+            session.rollback()
+            raise HTTPException(status_code=500, detail="Database error")
+
+    return RepoFollowResponse(
+        repoName=repo_name,
+        followed=followed,
+        indexed=indexed,
+        jobQueued=job_queued,
+    )
+
+
+@router.delete("/follows/{owner}/{repo}", status_code=204)
+async def unfollow_repository(
+    owner: str,
+    repo: str,
+    session: SessionDep,
+    auth_user_id: str = Depends(get_authenticated_user_id),
+) -> None:
+    repo_name = _normalized_repository_name(f"{owner}/{repo}")
+    try:
+        follow = session.exec(
+            select(UserRepoFollow).where(
+                UserRepoFollow.userId == auth_user_id,
+                UserRepoFollow.repo_name == repo_name,
+            )
+        ).first()
+        if follow is not None:
+            session.delete(follow)
+            session.commit()
+    except exc.SQLAlchemyError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
 
 
 @router.get(

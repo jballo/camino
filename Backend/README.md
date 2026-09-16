@@ -298,7 +298,10 @@ eval/
 | `GET` | `/api/v1/github/connection` | Return the authenticated user's GitHub connection status |
 | `POST` | `/api/v1/github/connect` | Exchange GitHub OAuth code and persist encrypted, expiring user-to-server credentials |
 | `GET` | `/api/v1/repositories` | List repos for the authenticated user's GitHub installation |
-| `GET` | `/api/v1/repositories/processed` | List indexed repos and chunk counts for the authenticated user's installation |
+| `GET` | `/api/v1/repositories/overview` | List installed and personally requested repositories with index facts |
+| `GET` | `/api/v1/repositories/lookup` | Check an exact `owner/repo` against GitHub and the shared index |
+| `POST` | `/api/v1/repositories/follows` | Attach or request a repository for the authenticated user |
+| `DELETE` | `/api/v1/repositories/follows/{owner}/{repo}` | Remove a repository from the authenticated user's requested list |
 | `GET` | `/api/v1/repositories/contribution-target?repoName=` | Resolve the preferred pull-request target branch and its evidence |
 | `POST` | `/api/v1/repositories/ingest` | Queue repository parsing + embedding; returns `{id, status}` |
 | `GET` | `/api/v1/repositories/ingest/{id}` | Poll an ingestion job; returns result/error when available |

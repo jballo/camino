@@ -1,32 +1,23 @@
 "use client";
 
 import { Button, Textarea } from "@headlessui/react";
-import {
-  ArrowUp,
-  Check,
-  CheckCircle2,
-  Circle,
-  FileCode,
-  Loader2,
-  RefreshCw,
-  Search,
-} from "lucide-react";
 import { useAuth } from "@clerk/nextjs";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { ArrowUp, CircleCheck, Loader2, Search } from "lucide-react";
+import {
+  FormEvent,
+  KeyboardEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import ReactMarkdown from "react-markdown";
 
 import { ApiError, backendFetch } from "@/lib/api";
 import {
-  cancelRepositoryIngestion,
-  enqueueRepositoryIngestion,
-  IngestionTimeoutError,
-  isAbortError,
-  pollRepositoryIngestion,
-} from "@/lib/repository-ingestion";
-import type {
-  RepositoryIngestionJob,
-  RepositoryIngestionResult,
-} from "@/types/repository-ingestion";
+  answerMatchesSelection,
+  repositorySelectionChanged,
+} from "./state";
 
 type Source = {
   chunk_id: number;
@@ -40,558 +31,875 @@ type Source = {
   score: number;
 };
 
-type AgentAnswer = {
-  answer: string;
-  sources: Source[];
-};
+type AgentAnswer = { answer: string; sources: Source[] };
 
-type IngestResult = RepositoryIngestionResult & {
-  repoName: string;
-};
+type DisplayedAnswer = AgentAnswer & { repoName: string; ref: string };
 
-type ProcessedRef = {
-  chunkCount: number;
+type RepoRef = {
   ref: string;
+  chunkCount: number;
+  indexedSha: string | null;
+  indexedAt: string | null;
 };
+
+type RepoEntry = {
+  repoName: string;
+  refs: RepoRef[];
+  transient?: boolean;
+};
+
+type RepoOverview = {
+  installed: RepoEntry[];
+  requested: RepoEntry[];
+};
+
+type RepoLookup = {
+  repoName: string;
+  visibility: string;
+  indexed: boolean;
+  followed: boolean;
+  refs: RepoRef[];
+};
+
+type RepoFollowResult = {
+  repoName: string;
+  followed: boolean;
+  indexed: boolean;
+  jobQueued: boolean;
+};
+
+type ActiveTab = "installed" | "requested";
+
+type LookupState =
+  | { status: "idle" }
+  | { status: "checking" }
+  | { status: "found"; data: RepoLookup }
+  | { status: "notFound"; data: RepoLookup }
+  | { status: "error"; message: string };
+
+const EMPTY_OVERVIEW: RepoOverview = { installed: [], requested: [] };
+const REPOSITORY_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+function normalizeRepoName(repoName: string) {
+  return repoName.trim().toLocaleLowerCase();
+}
+
+function relativeTime(value: string | null) {
+  if (!value) return "unknown";
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return "unknown";
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo ago`;
+  return `${Math.floor(months / 12)}y ago`;
+}
+
+function shortSha(sha: string | null) {
+  return sha ? sha.slice(0, 7) : "—";
+}
+
+function repoMeta(repo: RepoEntry, tab: ActiveTab) {
+  if (repo.transient) return "not in your list yet";
+  if (repo.refs.length === 0) {
+    return tab === "installed"
+      ? "no index yet — select to request"
+      : "requested — not indexed yet";
+  }
+  const chunks = repo.refs.reduce((sum, item) => sum + item.chunkCount, 0);
+  const newest = [...repo.refs]
+    .filter((item) => item.indexedAt)
+    .sort(
+      (a, b) =>
+        new Date(b.indexedAt ?? 0).getTime() -
+        new Date(a.indexedAt ?? 0).getTime(),
+    )[0];
+  const refLabel = repo.refs.length === 1 ? "ref" : "refs";
+  return `${repo.refs.length} ${refLabel} · ${chunks.toLocaleString()} chunks · ${relativeTime(newest?.indexedAt ?? null)}`;
+}
 
 export default function Explore() {
   const { getToken } = useAuth();
-  const [repos, setRepos] = useState<string[]>([]);
-  const [reposLoading, setReposLoading] = useState(false);
-  const [reposError, setReposError] = useState<string | undefined>(undefined);
-  const [selectedRepo, setSelectedRepo] = useState<string | undefined>(
-    undefined,
-  );
-
-  const [processingRepo, setProcessingRepo] = useState<string | undefined>(
-    undefined,
-  );
-  const [ingestResult, setIngestResult] = useState<IngestResult | undefined>(
-    undefined,
-  );
-  const [processError, setProcessError] = useState<string | undefined>(
-    undefined,
-  );
-  const [ingestionJob, setIngestionJob] = useState<
-    RepositoryIngestionJob | undefined
-  >(undefined);
-  const ingestionAbortRef = useRef<AbortController | null>(null);
-  const [processedMap, setProcessedMap] = useState<
-    Record<string, ProcessedRef[]>
-  >({});
+  const [overview, setOverview] = useState<RepoOverview>(EMPTY_OVERVIEW);
+  const [overviewLoading, setOverviewLoading] = useState(true);
+  const [overviewError, setOverviewError] = useState<string>();
+  const [activeTab, setActiveTab] = useState<ActiveTab>("installed");
+  const [selectedRepo, setSelectedRepo] = useState<string>();
   const [selectedRefs, setSelectedRefs] = useState<Record<string, string>>({});
-  const [processedLoading, setProcessedLoading] = useState(false);
+
+  const [repoInput, setRepoInput] = useState("");
+  const [lookup, setLookup] = useState<LookupState>({ status: "idle" });
+  const [addingRepo, setAddingRepo] = useState(false);
+  const [toast, setToast] = useState<string>();
 
   const [query, setQuery] = useState("");
   const [asking, setAsking] = useState(false);
-  const [askError, setAskError] = useState<string | undefined>(undefined);
-  const [answer, setAnswer] = useState<AgentAnswer | undefined>(undefined);
+  const [askError, setAskError] = useState<string>();
+  const [answer, setAnswer] = useState<DisplayedAnswer>();
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const loadedOnce = useRef(false);
+  const previousRepo = useRef<string | undefined>(undefined);
+  const askAbortRef = useRef<AbortController | null>(null);
 
-  const loadRepos = useCallback(async () => {
-    setReposLoading(true);
-    setReposError(undefined);
-    try {
-      const token = await getToken();
-      if (!token) throw new ApiError(401, "Not authenticated");
-
-      const result = await backendFetch<string[]>(
-        "/api/v1/repositories",
-        token,
-      );
-      setRepos(Array.isArray(result) ? result : []);
-    } catch (error) {
-      console.log("Error: ", error);
-      setReposError("Failed to retrieve repositories");
-    } finally {
-      setReposLoading(false);
-    }
-  }, [getToken]);
-
-  const loadProcessed = useCallback(async () => {
-    setProcessedLoading(true);
-    try {
-      const token = await getToken();
-      if (!token) throw new ApiError(401, "Not authenticated");
-
-      const result = await backendFetch<
-        { repo_name: string; ref: string; chunk_count: number }[]
-      >("/api/v1/repositories/processed", token);
-      const map: Record<string, ProcessedRef[]> = {};
-      if (Array.isArray(result)) {
-        for (const row of result) {
-          (map[row.repo_name] ??= []).push({
-            chunkCount: row.chunk_count,
-            ref: row.ref,
-          });
+  const loadOverview = useCallback(
+    async (preferredRepo?: string) => {
+      setOverviewLoading(true);
+      setOverviewError(undefined);
+      try {
+        const token = await getToken();
+        if (!token) throw new ApiError(401, "Not authenticated");
+        const result = await backendFetch<RepoOverview>(
+          "/api/v1/repositories/overview",
+          token,
+        );
+        const next: RepoOverview = {
+          installed: Array.isArray(result.installed) ? result.installed : [],
+          requested: Array.isArray(result.requested) ? result.requested : [],
+        };
+        const normalizedPreferred = preferredRepo
+          ? normalizeRepoName(preferredRepo)
+          : undefined;
+        const preferredInstalled = next.installed.some(
+          (repo) => repo.repoName === normalizedPreferred,
+        );
+        const preferredRequested = next.requested.some(
+          (repo) => repo.repoName === normalizedPreferred,
+        );
+        if (normalizedPreferred && !preferredInstalled && !preferredRequested) {
+          let transientRefs: RepoRef[] = [];
+          try {
+            const lookupResult = await backendFetch<RepoLookup>(
+              `/api/v1/repositories/lookup?repoName=${encodeURIComponent(normalizedPreferred)}`,
+              token,
+            );
+            transientRefs = lookupResult.refs;
+          } catch {
+            // Keep the deep-link row visible; the detail panel will offer a
+            // request path if the repository is accessible but not indexed.
+          }
+          next.requested = [
+            {
+              repoName: normalizedPreferred,
+              refs: transientRefs,
+              transient: true,
+            },
+            ...next.requested,
+          ];
         }
-        for (const refs of Object.values(map)) {
-          refs.sort((a, b) => a.ref.localeCompare(b.ref));
-        }
+
+        setOverview(next);
+        setSelectedRepo((current) => {
+          if (normalizedPreferred) return normalizedPreferred;
+          const stillPresent = [...next.installed, ...next.requested].some(
+            (repo) => repo.repoName === current,
+          );
+          if (stillPresent) return current;
+          return next.requested[0]?.repoName ?? next.installed[0]?.repoName;
+        });
+        setActiveTab((current) => {
+          if (preferredInstalled) return "installed";
+          if (normalizedPreferred) return "requested";
+          if (!loadedOnce.current) {
+            return next.requested.length > 0 ? "requested" : "installed";
+          }
+          return current === "requested" && next.requested.length === 0
+            ? "installed"
+            : current;
+        });
+        loadedOnce.current = true;
+      } catch (error) {
+        console.error("Failed to load repository overview", error);
+        setOverviewError("Could not load your repositories.");
+      } finally {
+        setOverviewLoading(false);
       }
-      setProcessedMap(map);
-    } catch (error) {
-      console.log("Error: ", error);
-    } finally {
-      setProcessedLoading(false);
-    }
-  }, [getToken]);
+    },
+    [getToken],
+  );
 
   useEffect(() => {
-    loadRepos();
-    loadProcessed();
     const params = new URLSearchParams(window.location.search);
-    const initialRepo = params.get("repo");
+    const initialRepo = params.get("repo") ?? undefined;
     const initialQuestion = params.get("question");
-    if (initialRepo) setSelectedRepo(initialRepo);
     if (initialQuestion) setQuery(initialQuestion);
-  }, [loadRepos, loadProcessed]);
+    void loadOverview(initialRepo);
+  }, [loadOverview]);
+
+  useEffect(() => {
+    if (repositorySelectionChanged(previousRepo.current, selectedRepo)) {
+      askAbortRef.current?.abort();
+      askAbortRef.current = null;
+      setQuery("");
+      setAnswer(undefined);
+      setAskError(undefined);
+      setAsking(false);
+    }
+    previousRepo.current = selectedRepo;
+  }, [selectedRepo]);
 
   useEffect(
     () => () => {
-      ingestionAbortRef.current?.abort();
+      askAbortRef.current?.abort();
     },
     [],
   );
 
-  const processRepo = useCallback(
-    async (repoName: string) => {
-      ingestionAbortRef.current?.abort();
-      const controller = new AbortController();
-      ingestionAbortRef.current = controller;
+  useEffect(() => {
+    const value = repoInput.trim();
+    if (!value) {
+      setLookup({ status: "idle" });
+      return;
+    }
+    if (!REPOSITORY_NAME.test(value)) {
+      setLookup({ status: "error", message: "Use the owner/repo format." });
+      return;
+    }
 
-      setProcessingRepo(repoName);
-      setIngestionJob(undefined);
-      setIngestResult(undefined);
-      setProcessError(undefined);
+    const controller = new AbortController();
+    const timeout = window.setTimeout(async () => {
+      setLookup({ status: "checking" });
       try {
         const token = await getToken();
         if (!token) throw new ApiError(401, "Not authenticated");
-
-        const created = await enqueueRepositoryIngestion(
-          repoName,
-          undefined,
+        const result = await backendFetch<RepoLookup>(
+          `/api/v1/repositories/lookup?repoName=${encodeURIComponent(value)}`,
           token,
-          controller.signal,
+          { signal: controller.signal },
         );
-        setIngestionJob({
-          ...created,
-          repoName,
-          ref: null,
-          attempts: 0,
-          result: null,
-          error: null,
+        setLookup({
+          status: result.indexed ? "found" : "notFound",
+          data: result,
         });
-
-        const job = await pollRepositoryIngestion(created.id, getToken, {
-          signal: controller.signal,
-          onUpdate: setIngestionJob,
-        });
-        if (job.status === "cancelled") return;
-        if (job.status === "failed") {
-          throw new Error(job.error ?? "Repository ingestion failed.");
-        }
-        if (!job.result) {
-          throw new Error("Repository ingestion completed without a result.");
-        }
-
-        setIngestResult({ repoName, ...job.result });
-        if (job.ref) {
-          setProcessedMap((prev) => {
-            const refs = prev[repoName] ?? [];
-            const nextRef = {
-              chunkCount: job.result?.chunks_inserted ?? 0,
-              ref: job.ref ?? "",
-            };
-            return {
-              ...prev,
-              [repoName]: [
-                ...refs.filter((item) => item.ref !== job.ref),
-                nextRef,
-              ].sort((a, b) => a.ref.localeCompare(b.ref)),
-            };
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        if (error instanceof ApiError && error.status === 404) {
+          setLookup({
+            status: "error",
+            message: "Not found — or private (install the GitHub App).",
+          });
+        } else if (error instanceof ApiError && error.status === 502) {
+          setLookup({
+            status: "error",
+            message: "GitHub check failed — try again.",
+          });
+        } else {
+          setLookup({
+            status: "error",
+            message: "Could not check that repository.",
           });
         }
-        void loadProcessed();
+      }
+    }, 400);
+
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [getToken, repoInput]);
+
+  const selectedEntry = [...overview.installed, ...overview.requested].find(
+    (repo) => repo.repoName === selectedRepo,
+  );
+  const selectedRepoRefs = selectedEntry?.refs ?? [];
+  const selectedRef = selectedRepoRefs.some(
+    (item) => item.ref === selectedRefs[selectedRepo ?? ""],
+  )
+    ? selectedRefs[selectedRepo ?? ""]
+    : selectedRepoRefs[0]?.ref;
+  const activeRef = selectedRepoRefs.find((item) => item.ref === selectedRef);
+
+  const followRepository = useCallback(
+    async (repoName: string, lookupData?: RepoLookup) => {
+      setAddingRepo(true);
+      setAskError(undefined);
+      try {
+        const token = await getToken();
+        if (!token) throw new ApiError(401, "Not authenticated");
+        const result = await backendFetch<RepoFollowResult>(
+          "/api/v1/repositories/follows",
+          token,
+          { method: "POST", body: { repoName } },
+        );
+        const inInstalled = overview.installed.some(
+          (repo) => repo.repoName === result.repoName,
+        );
+        setToast(
+          result.indexed
+            ? `${result.repoName} added to ${inInstalled ? "Installed" : "Requested"}.`
+            : `${result.repoName} queued. It appears above with full detail once indexed — no need to wait around.`,
+        );
+        if (result.indexed && lookupData && !inInstalled) {
+          setOverview((current) => ({
+            ...current,
+            requested: [
+              { repoName: result.repoName, refs: lookupData.refs },
+              ...current.requested.filter(
+                (repo) => repo.repoName !== result.repoName,
+              ),
+            ],
+          }));
+        }
+        setSelectedRepo(result.repoName);
+        setActiveTab(inInstalled ? "installed" : "requested");
+        setRepoInput("");
+        setLookup({ status: "idle" });
+        await loadOverview(result.repoName);
+        return true;
       } catch (error) {
-        if (isAbortError(error)) return;
-        console.log("Error: ", error);
-        if (error instanceof IngestionTimeoutError) {
-          setProcessError(
-            "Still queued — the ingestion worker may be unavailable. Try again later.",
-          );
-        } else if (
-          error instanceof ApiError &&
-          (error.status === 401 || error.status === 403)
-        ) {
-          setProcessError(
-            "Your session expired. Please refresh the page and log in again.",
-          );
-        } else {
-          setProcessError(
-            error instanceof Error
-              ? `Failed to process ${repoName}: ${error.message}`
-              : `Failed to process ${repoName}`,
-          );
-        }
+        console.error("Failed to follow repository", error);
+        const message =
+          error instanceof ApiError && error.status === 404
+            ? "Repository not found — or it is private and unavailable to the GitHub App."
+            : error instanceof ApiError && error.status === 502
+              ? "GitHub check failed — try again."
+              : "Could not add that repository.";
+        setLookup({ status: "error", message });
+        setAskError(message);
+        return false;
       } finally {
-        if (ingestionAbortRef.current === controller) {
-          ingestionAbortRef.current = null;
-          setProcessingRepo(undefined);
-        }
+        setAddingRepo(false);
       }
     },
-    [getToken, loadProcessed],
+    [getToken, loadOverview, overview.installed],
   );
 
-  const stopRepositoryIngestion = useCallback(async () => {
-    const job = ingestionJob;
-    const controller = ingestionAbortRef.current;
-    if (!job || !controller) return;
-
-    setProcessError(undefined);
-    try {
-      const token = await getToken();
-      if (!token) throw new ApiError(401, "Not authenticated");
-
-      const cancelledJob = await cancelRepositoryIngestion(job.id, token);
-      setIngestionJob(cancelledJob);
-    } catch (error) {
-      if (!(error instanceof ApiError && error.status === 409)) {
-        setProcessError(
-          error instanceof Error
-            ? `Failed to stop ${job.repoName}: ${error.message}`
-            : `Failed to stop ${job.repoName}`,
-        );
-        return;
-      }
-    }
-
-    controller.abort();
-    if (ingestionAbortRef.current === controller) {
-      ingestionAbortRef.current = null;
-      setProcessingRepo(undefined);
-    }
-    void loadProcessed();
-  }, [getToken, ingestionJob, loadProcessed]);
+  const submitRepo = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (lookup.status !== "found" && lookup.status !== "notFound") return;
+    void followRepository(lookup.data.repoName, lookup.data);
+  };
 
   const askAgent = useCallback(async () => {
-    if (!selectedRepo || query.trim().length === 0) return;
-    const processedRefs = processedMap[selectedRepo] ?? [];
-    const selectedRef = processedRefs.some(
-      (item) => item.ref === selectedRefs[selectedRepo],
-    )
-      ? selectedRefs[selectedRepo]
-      : processedRefs[0]?.ref;
+    if (!selectedRepo || !selectedRef || query.trim().length === 0) return;
+    askAbortRef.current?.abort();
+    const controller = new AbortController();
+    askAbortRef.current = controller;
     setAsking(true);
     setAskError(undefined);
     setAnswer(undefined);
     try {
       const token = await getToken();
       if (!token) throw new ApiError(401, "Not authenticated");
-
       const result = await backendFetch<AgentAnswer>(
         "/api/v1/agent/ask",
         token,
         {
           method: "POST",
-          body: {
-            question: query,
-            repoName: selectedRepo,
-            ...(selectedRef ? { ref: selectedRef } : {}),
-          },
+          body: { question: query, repoName: selectedRepo, ref: selectedRef },
+          signal: controller.signal,
         },
       );
-      setAnswer(result);
+      setAnswer({ ...result, repoName: selectedRepo, ref: selectedRef });
+      if (selectedEntry?.transient) {
+        void backendFetch<RepoFollowResult>(
+          "/api/v1/repositories/follows",
+          token,
+          { method: "POST", body: { repoName: selectedRepo } },
+        )
+          .then(() => loadOverview(selectedRepo))
+          .catch((error) => {
+            console.error("Failed to save deep-linked repository", error);
+          });
+      }
     } catch (error) {
-      console.log("Error: ", error);
-      setAskError("Failed to get an answer");
+      if (controller.signal.aborted) return;
+      console.error("Failed to get an answer", error);
+      setAskError("Failed to get an answer.");
     } finally {
-      setAsking(false);
+      if (askAbortRef.current === controller) {
+        askAbortRef.current = null;
+        setAsking(false);
+      }
     }
-  }, [getToken, processedMap, query, selectedRefs, selectedRepo]);
+  }, [
+    getToken,
+    loadOverview,
+    query,
+    selectedEntry?.transient,
+    selectedRef,
+    selectedRepo,
+  ]);
 
-  const selectedRepoRefs = selectedRepo
-    ? (processedMap[selectedRepo] ?? [])
-    : [];
-  const selectedRef = selectedRepoRefs.some(
-    (item) => item.ref === selectedRefs[selectedRepo ?? ""],
-  )
-    ? selectedRefs[selectedRepo ?? ""]
-    : selectedRepoRefs[0]?.ref;
+  const visibleRepos = overview[activeTab];
+  const lookupHint = (() => {
+    if (lookup.status === "checking") return "Checking shared index…";
+    if (lookup.status === "found") {
+      const firstRef = lookup.data.refs[0];
+      return `Already indexed · ${firstRef?.ref ?? "ref available"} · ${(firstRef?.chunkCount ?? 0).toLocaleString()} chunks — ⏎ add`;
+    }
+    if (lookup.status === "notFound") {
+      return "Not indexed — ⏎ request index";
+    }
+    if (lookup.status === "error") return lookup.message;
+    return "";
+  })();
+
+  const changeTab = (tab: ActiveTab) => {
+    setActiveTab(tab);
+    const firstRepo = overview[tab][0];
+    setSelectedRepo(firstRepo?.repoName);
+  };
+
+  const handleTabKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const nextIndex = index === 0 ? 1 : 0;
+    const nextTab: ActiveTab = nextIndex === 0 ? "installed" : "requested";
+    changeTab(nextTab);
+    tabRefs.current[nextIndex]?.focus();
+  };
 
   return (
-    <div className="flex flex-col w-full min-h-full">
-      <div className="mx-auto flex w-full max-w-[1400px] flex-1 flex-col gap-6 px-5 py-10 sm:px-8 lg:flex-row">
-        {/* Repositories panel */}
-        <aside className="console flex w-full shrink-0 flex-col gap-4 p-5 lg:w-80">
-          <div className="flex items-center justify-between">
-            <h2 className="font-display text-xl font-black uppercase">Repositories</h2>
-            <Button
-              onClick={() => {
-                loadRepos();
-                loadProcessed();
+    <div className="mx-auto flex min-h-full w-full max-w-[1400px] flex-col gap-6 px-5 py-10 sm:px-8 lg:flex-row lg:items-start">
+      <aside className="console flex w-full shrink-0 flex-col lg:min-h-[560px] lg:w-[330px]">
+        <div
+          className="flex border-b border-border"
+          role="tablist"
+          aria-label="Repository groups"
+        >
+          {(["installed", "requested"] as const).map((tab, index) => (
+            <button
+              key={tab}
+              ref={(node) => {
+                tabRefs.current[index] = node;
               }}
-              className="flex items-center justify-center size-8 rounded-md hover:bg-accent transition"
-              aria-label="Refresh repositories"
+              id={`${tab}-tab`}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab}
+              aria-controls="repository-list-panel"
+              tabIndex={activeTab === tab ? 0 : -1}
+              onClick={() => changeTab(tab)}
+              onKeyDown={(event) => handleTabKeyDown(event, index)}
+              className={`flex min-h-12 flex-1 items-center justify-center gap-2 border-b-2 font-mono text-[10.5px] uppercase tracking-[.14em] transition ${
+                activeTab === tab
+                  ? "border-brand-accent bg-muted text-foreground"
+                  : "border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+              }`}
             >
-              <RefreshCw
-                className={`size-4 ${
-                  reposLoading || processedLoading ? "animate-spin" : ""
-                }`}
-              />
-            </Button>
-          </div>
+              {tab}
+              <span className="text-brand-accent">{overview[tab].length}</span>
+            </button>
+          ))}
+        </div>
 
-          <div className="flex flex-col gap-2">
-            {reposLoading && repos.length === 0 && (
-              <div className="text-sm text-muted-foreground">Loading…</div>
-            )}
-            {reposError && (
-              <div className="text-sm text-destructive">{reposError}</div>
-            )}
-            {!reposLoading && !reposError && repos.length === 0 && (
-              <div className="text-sm text-muted-foreground">
-                No repositories found. Connect GitHub first.
+        <div
+          id="repository-list-panel"
+          role="tabpanel"
+          aria-labelledby={`${activeTab}-tab`}
+          className="flex flex-1 flex-col"
+        >
+          <div className="flex flex-col">
+            {overviewLoading && visibleRepos.length === 0 && (
+              <div className="flex items-center gap-2 px-4 py-5 font-mono text-[11px] text-muted-foreground">
+                <Loader2
+                  className="size-3.5 animate-spin"
+                  aria-hidden="true"
+                />
+                Loading repositories…
               </div>
             )}
-
-            {repos.map((repo) => {
-              const isSelected = repo === selectedRepo;
-              const isProcessing = repo === processingRepo;
-              const processedRefs = processedMap[repo] ?? [];
-              const isProcessed = processedRefs.length > 0;
-              const chunkCount = processedRefs.reduce(
-                (total, item) => total + item.chunkCount,
-                0,
-              );
-              const jobStatus = isProcessing ? ingestionJob?.status : undefined;
-              return (
-                <div
-                  key={repo}
-                  className={`group flex cursor-pointer flex-col gap-2 rounded-[10px] border p-3 transition ${
-                    isSelected
-                      ? "border-primary bg-accent"
-                      : "border-border hover:bg-accent/50"
-                  }`}
-                  onClick={() => setSelectedRepo(repo)}
+            {overviewError && (
+              <div className="space-y-3 px-4 py-5 text-sm text-destructive">
+                <p>{overviewError}</p>
+                <button
+                  type="button"
+                  className="button-ghost min-h-9 px-4"
+                  onClick={() => void loadOverview(selectedRepo)}
                 >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <FileCode className="size-4 shrink-0 text-muted-foreground" />
-                    <span className="text-sm truncate" title={repo}>
-                      {repo}
-                    </span>
-                    {isSelected && (
-                      <Check className="size-4 shrink-0 ml-auto text-primary" />
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    {isProcessing ? (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-primary/15 px-2 py-0.5 text-xs text-primary">
-                        <Loader2 className="size-3 animate-spin" />
-                        {jobStatus === "pending"
-                          ? ingestionJob && ingestionJob.attempts > 0
-                            ? `Retry queued · attempt ${ingestionJob.attempts}`
-                            : "Queued"
-                          : jobStatus === "running"
-                            ? ingestionJob && ingestionJob.attempts > 1
-                              ? `Processing · attempt ${ingestionJob.attempts}`
-                              : "Processing"
-                            : "Starting"}
-                      </span>
-                    ) : isProcessed ? (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-primary/15 px-2 py-0.5 text-xs text-primary">
-                        <CheckCircle2 className="size-3" />
-                        Processed
-                        {` · ${chunkCount} chunks`}
-                        {` · ${processedRefs.length} ${
-                          processedRefs.length === 1 ? "ref" : "refs"
-                        }`}
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-accent px-2 py-0.5 text-xs text-muted-foreground">
-                        <Circle className="size-3" />
-                        Not processed
-                      </span>
-                    )}
-                  </div>
-                  <Button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (isProcessing) {
-                        void stopRepositoryIngestion();
-                      } else {
-                        processRepo(repo);
-                      }
-                    }}
-                    disabled={processingRepo !== undefined && !isProcessing}
-                    className="flex items-center justify-center gap-2 h-8 rounded-md bg-primary text-primary-foreground text-sm disabled:opacity-60"
-                  >
-                    {isProcessing ? (
-                      "Stop"
-                    ) : isProcessed ? (
-                      <>
-                        <RefreshCw className="size-3.5" />
-                        Reprocess
-                      </>
-                    ) : (
-                      "Process"
-                    )}
-                  </Button>
+                  Try again
+                </button>
+              </div>
+            )}
+            {!overviewLoading &&
+              !overviewError &&
+              visibleRepos.length === 0 && (
+                <div className="px-4 py-5 text-sm leading-relaxed text-muted-foreground">
+                  {activeTab === "installed"
+                    ? "No installed repositories found. Connect or update the GitHub App first."
+                    : "Repositories you request will appear here."}
                 </div>
+              )}
+            {visibleRepos.map((repo) => {
+              const selected = repo.repoName === selectedRepo;
+              return (
+                <button
+                  key={repo.repoName}
+                  type="button"
+                  onClick={() => setSelectedRepo(repo.repoName)}
+                  className={`flex w-full flex-col gap-1 border-b border-border px-4 py-3 text-left transition hover:bg-muted ${
+                    selected
+                      ? "bg-muted shadow-[inset_3px_0_0_var(--brand-accent)]"
+                      : ""
+                  }`}
+                  aria-pressed={selected}
+                >
+                  <span
+                    className={
+                      repo.refs.length === 0
+                        ? "text-muted-foreground"
+                        : "text-foreground"
+                    }
+                  >
+                    {repo.repoName}
+                  </span>
+                  <span className="font-mono text-[10.5px] leading-relaxed tracking-[.04em] text-muted-foreground">
+                    {repoMeta(repo, activeTab)}
+                  </span>
+                </button>
               );
             })}
           </div>
 
-          {ingestResult && (
-            <div className="rounded-lg border border-primary/40 bg-accent/50 p-3 text-sm">
-              <div className="font-medium truncate">{ingestResult.repoName}</div>
-              <div className="text-muted-foreground">
-                {ingestResult.chunks_inserted} chunks ·{" "}
-                {ingestResult.embeddings_created} embeddings
-              </div>
-            </div>
-          )}
-          {processError && (
-            <div className="text-sm text-destructive">{processError}</div>
-          )}
-        </aside>
-
-        {/* Search panel */}
-        <main className="flex-1 flex flex-col gap-4 min-w-0">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div><span className="eyebrow">Grounded code search</span><h1 className="display-title mt-2 text-4xl font-black">Ask the codebase<span className="text-brand-accent">.</span></h1></div>
-            {selectedRepo && selectedRepoRefs.length > 0 && (
-              <label className="flex items-center gap-2 text-sm text-muted-foreground">
-                Indexed ref
-                <select
-                  value={selectedRef}
-                  onChange={(event) =>
-                    setSelectedRefs((previous) => ({
-                      ...previous,
-                      [selectedRepo]: event.target.value,
-                    }))
-                  }
-                  className="h-9 max-w-64 rounded-md border border-border bg-background px-3 text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                >
-                  {selectedRepoRefs.map((item) => (
-                    <option key={item.ref} value={item.ref}>
-                      {item.ref} ({item.chunkCount} chunks)
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
-          </div>
-
-          <div className="console flex flex-col gap-3 p-5">
-            <Textarea
-              placeholder={
-                selectedRepo
-                  ? `Ask a question about ${selectedRepo}…`
-                  : "Select a repository first…"
-              }
-              className="w-full text-start focus:outline-none field-sizing-content min-h-12 max-h-48 resize-none"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                  e.preventDefault();
-                  askAgent();
-                }
+          <form
+            onSubmit={submitRepo}
+            className="mt-auto flex flex-col gap-2.5 border-t border-border bg-background p-4"
+          >
+            <label htmlFor="repo-lookup" className="field-label">
+              Find or index — owner/repo
+            </label>
+            <input
+              id="repo-lookup"
+              value={repoInput}
+              onChange={(event) => {
+                setRepoInput(event.target.value);
+                setToast(undefined);
               }}
+              placeholder="e.g. django/django"
+              autoComplete="off"
+              spellCheck={false}
+              className="field-control min-h-[42px] w-full font-mono text-xs"
             />
-            <div className="flex items-center justify-end gap-3">
-              {(!selectedRepo || query.trim().length === 0) && (
-                <span className="text-xs text-muted-foreground">
-                  {!selectedRepo ? "Select a repository" : "Type a question"}
-                </span>
-              )}
-              <Button
-                onClick={askAgent}
-                disabled={
-                  asking || !selectedRepo || query.trim().length === 0
-                }
-                className="button-primary min-h-10 px-5 disabled:opacity-50"
-                aria-label="Ask"
+            {lookupHint && (
+              <p
+                className={`font-mono text-[10.5px] leading-relaxed tracking-[.03em] ${
+                  lookup.status === "error"
+                    ? "text-destructive"
+                    : "text-muted-foreground"
+                }`}
+                aria-live="polite"
               >
-                {asking ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <ArrowUp className="size-4" />
-                )}
-                Ask
-              </Button>
-            </div>
-          </div>
+                {lookupHint}
+              </p>
+            )}
+            <button
+              type="submit"
+              className="sr-only"
+              disabled={
+                addingRepo ||
+                (lookup.status !== "found" && lookup.status !== "notFound")
+              }
+            >
+              Add repository
+            </button>
+            {toast && (
+              <div
+                role="status"
+                className="flex items-start gap-2.5 rounded-[10px] border border-success p-3"
+              >
+                <CircleCheck
+                  className="mt-0.5 size-4 shrink-0 text-success"
+                  aria-hidden="true"
+                />
+                <span className="font-mono text-[10.5px] leading-relaxed tracking-[.03em]">
+                  {toast}
+                </span>
+              </div>
+            )}
+          </form>
+        </div>
+      </aside>
 
-          {!selectedRepo && (
-            <div className="flex flex-col items-center justify-center gap-2 text-muted-foreground py-16">
-              <Search className="size-8" />
-              <p className="text-sm">
-                Select a repository on the left to start asking questions.
+      <main className="flex min-w-0 flex-1 flex-col gap-5">
+        <header>
+          <span className="eyebrow">Grounded code search</span>
+          <h1 className="display-title mt-2 text-4xl font-black sm:text-[42px]">
+            Ask the codebase<span className="text-brand-accent">.</span>
+          </h1>
+        </header>
+
+        {selectedEntry && selectedRepoRefs.length > 0 && activeRef && (
+          <section className="console" aria-labelledby="index-detail-title">
+            <div className="console-bar gap-4">
+              <span
+                className="truncate text-foreground"
+                title={selectedEntry.repoName}
+              >
+                {selectedEntry.repoName}
+              </span>
+              <span id="index-detail-title" className="shrink-0">
+                Index detail
+              </span>
+            </div>
+            <div className="grid grid-cols-2 border-b border-border lg:grid-cols-4">
+              <DetailCell
+                label="Refs"
+                value={selectedRepoRefs.length.toString()}
+              />
+              <DetailCell
+                label="Chunks"
+                value={activeRef.chunkCount.toLocaleString()}
+              />
+              <DetailCell
+                label="Indexed SHA"
+                value={shortSha(activeRef.indexedSha)}
+              />
+              <DetailCell
+                label="Indexed"
+                value={relativeTime(activeRef.indexedAt)}
+              />
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[560px] border-collapse">
+                <thead>
+                  <tr>
+                    {["Ref", "Chunks", "SHA", "Indexed"].map((label) => (
+                      <th
+                        key={label}
+                        scope="col"
+                        className="px-[18px] py-2.5 text-left font-mono text-[9.5px] uppercase tracking-[.14em] text-muted-foreground"
+                      >
+                        {label}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {selectedRepoRefs.map((item) => {
+                    const isActive = item.ref === selectedRef;
+                    return (
+                      <tr
+                        key={item.ref}
+                        onClick={() =>
+                          setSelectedRefs((current) => ({
+                            ...current,
+                            [selectedEntry.repoName]: item.ref,
+                          }))
+                        }
+                        className="cursor-pointer border-t border-border transition hover:bg-muted/60"
+                        aria-selected={isActive}
+                      >
+                        <td
+                          className={`px-[18px] py-2.5 font-mono text-[11px] ${
+                            isActive ? "text-brand-accent" : ""
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            className="w-full text-left"
+                            aria-label={`Use ref ${item.ref}`}
+                          >
+                            {item.ref}{" "}
+                            {isActive && <span aria-hidden="true">●</span>}
+                          </button>
+                        </td>
+                        <td className="px-[18px] py-2.5 font-mono text-[11px]">
+                          {item.chunkCount.toLocaleString()}
+                        </td>
+                        <td className="px-[18px] py-2.5 font-mono text-[11px]">
+                          {shortSha(item.indexedSha)}
+                        </td>
+                        <td className="px-[18px] py-2.5 font-mono text-[11px] text-muted-foreground">
+                          {relativeTime(item.indexedAt)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <p className="border-t border-border px-[18px] py-3 font-mono text-[10px] leading-relaxed tracking-[.05em] text-muted-foreground">
+              Shared index — anyone on Camino may refresh it. You always query
+              the latest completed build.
+            </p>
+          </section>
+        )}
+
+        {selectedEntry ? (
+          <section className="console" aria-labelledby="ask-title">
+            <div className="console-bar gap-4">
+              <span id="ask-title">Ask</span>
+              <span className="truncate">
+                {selectedRef ? `Ref · ${selectedRef}` : "Index required"}
+              </span>
+            </div>
+            {selectedRepoRefs.length > 0 ? (
+              <div className="flex flex-col gap-3.5 p-[18px]">
+                <label htmlFor="code-question" className="sr-only">
+                  Question about {selectedEntry.repoName}
+                </label>
+                <Textarea
+                  id="code-question"
+                  placeholder={`Ask a question about ${selectedEntry.repoName}…`}
+                  className="min-h-16 max-h-48 w-full resize-none bg-transparent text-start outline-none"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (
+                      event.key === "Enter" &&
+                      (event.metaKey || event.ctrlKey)
+                    ) {
+                      event.preventDefault();
+                      void askAgent();
+                    }
+                  }}
+                />
+                <div className="flex items-center justify-between gap-4">
+                  <span className="font-mono text-[10.5px] tracking-[.06em] text-muted-foreground">
+                    ⌘⏎ to ask
+                  </span>
+                  <Button
+                    onClick={() => void askAgent()}
+                    disabled={asking || query.trim().length === 0}
+                    className="button-primary min-h-11 px-6"
+                  >
+                    {asking ? (
+                      <Loader2
+                        className="size-4 animate-spin"
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <ArrowUp className="size-4" aria-hidden="true" />
+                    )}
+                    Ask
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col items-start gap-4 p-5 sm:p-6">
+                <div>
+                  <h2 className="text-lg font-medium">
+                    {selectedEntry.repoName} isn&apos;t indexed yet
+                  </h2>
+                  <p className="mt-1 max-w-xl text-sm leading-relaxed text-muted-foreground">
+                    Request a shared index, then come back later. You do not
+                    need to keep this page open.
+                  </p>
+                </div>
+                <Button
+                  onClick={() =>
+                    void followRepository(selectedEntry.repoName)
+                  }
+                  disabled={addingRepo}
+                  className="button-primary"
+                >
+                  {addingRepo && (
+                    <Loader2
+                      className="size-4 animate-spin"
+                      aria-hidden="true"
+                    />
+                  )}
+                  Request index
+                </Button>
+              </div>
+            )}
+          </section>
+        ) : (
+          !overviewLoading && (
+            <div className="console flex flex-col items-center justify-center gap-3 px-6 py-16 text-center text-muted-foreground">
+              <Search className="size-7" aria-hidden="true" />
+              <p className="max-w-sm text-sm leading-relaxed">
+                Choose a repository from the rail or find a public repository
+                by owner and name.
               </p>
             </div>
-          )}
+          )
+        )}
 
-          {askError && (
-            <div className="text-sm text-destructive">{askError}</div>
-          )}
+        {askError && (
+          <p role="alert" className="text-sm text-destructive">
+            {askError}
+          </p>
+        )}
 
-          {answer && (
+        {answerMatchesSelection(answer, selectedRepo, selectedRef) && answer && (
             <div className="flex flex-col gap-4">
-              <div className="rounded-2xl border border-border bg-card p-4">
-                <div className="mb-2 text-sm text-muted-foreground">
-                  Answer for{" "}
+              <section
+                className="console p-5 sm:p-6"
+                aria-labelledby="answer-title"
+              >
+                <div
+                  id="answer-title"
+                  className="mb-3 font-mono text-[11px] uppercase tracking-[.14em] text-muted-foreground"
+                >
+                  Answer ·{" "}
                   <span className="text-foreground">{selectedRepo}</span>
                 </div>
-                <div className="text-sm leading-relaxed [&_p:not(:last-child)]:mb-3 [&_ul]:mb-3 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:mb-3 [&_ol]:list-decimal [&_ol]:pl-5 [&_li:not(:last-child)]:mb-1 [&_code]:rounded [&_code]:bg-accent [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-xs [&_pre]:mb-3 [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:border [&_pre]:border-border [&_pre]:bg-muted [&_pre]:p-3 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_strong]:font-semibold">
+                <div className="text-sm leading-relaxed [&_a]:text-brand-accent [&_a]:underline [&_code]:rounded [&_code]:bg-accent [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-xs [&_li:not(:last-child)]:mb-1 [&_ol]:mb-3 [&_ol]:list-decimal [&_ol]:pl-5 [&_p:not(:last-child)]:mb-3 [&_pre]:mb-3 [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:border [&_pre]:border-border [&_pre]:bg-muted [&_pre]:p-3 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_strong]:font-semibold [&_ul]:mb-3 [&_ul]:list-disc [&_ul]:pl-5">
                   <ReactMarkdown>{answer.answer}</ReactMarkdown>
                 </div>
-              </div>
+              </section>
 
               {answer.sources.length > 0 && (
-                <div className="flex flex-col gap-3">
-                  <div className="text-sm text-muted-foreground">
-                    {answer.sources.length} source
-                    {answer.sources.length === 1 ? "" : "s"}
-                  </div>
-                  {answer.sources.map((s) => (
-                    <SourceCard key={s.chunk_id} source={s} />
+                <section
+                  className="flex flex-col gap-3"
+                  aria-labelledby="sources-title"
+                >
+                  <h2 id="sources-title" className="eyebrow">
+                    {answer.sources.length}{" "}
+                    {answer.sources.length === 1 ? "source" : "sources"}
+                  </h2>
+                  {answer.sources.map((source) => (
+                    <SourceCard key={source.chunk_id} source={source} />
                   ))}
-                </div>
+                </section>
               )}
             </div>
           )}
-        </main>
-      </div>
+      </main>
+    </div>
+  );
+}
+
+function DetailCell({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1 border-b border-r border-border p-3.5 last:border-r-0 even:border-r-0 lg:even:border-r lg:last:border-r-0">
+      <span className="font-mono text-[9.5px] uppercase tracking-[.14em] text-muted-foreground">
+        {label}
+      </span>
+      <span
+        className="truncate font-mono text-[13px] text-foreground"
+        title={value}
+      >
+        {value}
+      </span>
     </div>
   );
 }
 
 function SourceCard({ source }: { source: Source }) {
   return (
-    <div className="rounded-xl border border-border p-4">
+    <article className="rounded-xl border border-border bg-card p-4">
       <div className="flex items-start justify-between gap-3">
-        <div className="flex flex-col gap-1 min-w-0">
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="font-mono text-sm truncate">
+        <div className="flex min-w-0 flex-col gap-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="truncate font-mono text-sm">
               {source.symbol_name}
             </span>
-            <span className="text-xs rounded-sm bg-accent px-1.5 py-0.5 text-muted-foreground shrink-0">
+            <span className="shrink-0 rounded bg-accent px-1.5 py-0.5 text-xs text-muted-foreground">
               {source.symbol_type}
             </span>
-            <span className="text-xs rounded-sm bg-accent px-1.5 py-0.5 text-muted-foreground shrink-0">
+            <span className="shrink-0 rounded bg-accent px-1.5 py-0.5 text-xs text-muted-foreground">
               {source.language}
             </span>
           </div>
-          <div className="text-xs text-muted-foreground truncate">
+          <div className="truncate text-xs text-muted-foreground">
             {source.file_path}:{source.start_line}-{source.end_line}
           </div>
         </div>
-        <div className="text-xs font-mono text-primary shrink-0">
+        <div className="shrink-0 font-mono text-xs text-brand-accent">
           {source.score.toFixed(3)}
         </div>
       </div>
-    </div>
+    </article>
   );
 }
