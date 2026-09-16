@@ -15,6 +15,7 @@ from app.webhooks import clerk, github as github_webhook
 from app.models.code import CodeChunkEmbedding, CodeChunkModel, RepoIndexState
 from app.models.job import Job
 from app.models.rate_limit import RateLimit
+from app.models.repo_follow import UserRepoFollow
 from app.worker import WORKER_SHUTDOWN_TIMEOUT, worker_loop
 
 logger = logging.getLogger(__name__)

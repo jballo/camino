@@ -27,16 +27,15 @@ def test_local_cleanup_deletes_unreferenced_installation_and_commits():
         MagicMock(),
         MagicMock(),
         MagicMock(),
+        MagicMock(),
         _result([]),
-        MagicMock(),
-        MagicMock(),
         MagicMock(),
     ]
 
     delete_local_account_data(session, USER_ID)
 
     statements = [str(call.args[0]) for call in session.exec.call_args_list]
-    assert len(statements) == 8
+    assert len(statements) == 9
     assert "FOR UPDATE" in statements[1]
     job_deletes = [
         statement for statement in statements if "DELETE FROM jobs" in statement
@@ -44,6 +43,10 @@ def test_local_cleanup_deletes_unreferenced_installation_and_commits():
     assert len(job_deletes) == 2
     assert any("jobs.installation_id IN" in statement for statement in job_deletes)
     assert any("DELETE FROM rate_limits" in statement for statement in statements)
+    assert any(
+        "DELETE FROM user_repo_follows" in statement
+        for statement in statements
+    )
     assert any("DELETE FROM githubconnections" in statement for statement in statements)
     assert any("DELETE FROM users" in statement for statement in statements)
     assert not any("DELETE FROM code_chunks" in statement for statement in statements)
@@ -57,6 +60,7 @@ def test_local_cleanup_preserves_shared_installation():
     session.exec.side_effect = [
         _result([101]),
         _result([1]),
+        MagicMock(),
         MagicMock(),
         MagicMock(),
         MagicMock(),
@@ -76,6 +80,7 @@ def test_local_cleanup_is_idempotent_when_no_rows_exist():
     session = MagicMock()
     session.exec.side_effect = [
         _result([]),
+        MagicMock(),
         MagicMock(),
         MagicMock(),
         MagicMock(),

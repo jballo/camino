@@ -106,6 +106,60 @@ def test_enqueue_creates_job_when_no_active_match_exists():
     session.commit.assert_called_once_with()
 
 
+def test_enqueue_can_stage_job_in_callers_transaction():
+    session = MagicMock()
+    session.exec.return_value.first.return_value = None
+
+    job, created = enqueue_job(
+        session,
+        user_id="user_1",
+        installation_id=123,
+        repo_name="org/repo",
+        ref="main",
+        job_type=JobType.REPOSITORY_INGEST,
+        dedupe_key="repository_ingest:org/repo:main",
+        commit=False,
+    )
+
+    assert created is True
+    session.begin_nested.assert_called_once_with()
+    session.add.assert_called_once_with(job)
+    session.flush.assert_called_once_with()
+    session.commit.assert_not_called()
+
+
+def test_staged_enqueue_dedupe_race_preserves_callers_transaction():
+    session = MagicMock()
+    winner = MagicMock(id=9, status=JobStatus.PENDING)
+    first_lookup = MagicMock()
+    first_lookup.first.return_value = None
+    second_lookup = MagicMock()
+    second_lookup.first.return_value = winner
+    session.exec.side_effect = [first_lookup, second_lookup]
+    session.flush.side_effect = exc.IntegrityError(
+        "INSERT INTO jobs",
+        {},
+        Exception("duplicate key"),
+    )
+
+    job, created = enqueue_job(
+        session,
+        user_id="user_1",
+        installation_id=123,
+        repo_name="org/repo",
+        ref="main",
+        job_type=JobType.REPOSITORY_INGEST,
+        dedupe_key="repository_ingest:org/repo:main",
+        commit=False,
+    )
+
+    assert job is winner
+    assert created is False
+    session.begin_nested.assert_called_once_with()
+    session.rollback.assert_not_called()
+    session.commit.assert_not_called()
+
+
 def test_repository_ingestion_identity_is_case_insensitive():
     assert normalize_repository_name("Org/Repo") == "org/repo"
     assert repository_ingest_dedupe_key(
