@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import exc
 
 from app.api.repositories import (
     RepoFollowBody,
@@ -227,6 +228,75 @@ async def test_follow_requests_an_unindexed_repository_once():
     assert enqueue.call_args.kwargs["dedupe_key"] == (
         "repository_ingest:org/repo:main"
     )
+    assert enqueue.call_args.kwargs["commit"] is False
+    session.commit.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_follow_does_not_persist_when_branch_cannot_be_resolved():
+    session = MagicMock()
+    indexed_result = MagicMock()
+    indexed_result.first.return_value = None
+    session.exec.return_value = indexed_result
+
+    with (
+        patch(
+            "app.api.repositories.resolve_repo_access",
+            return_value=RepoAccess(installation_id=12, visibility="public"),
+        ),
+        patch("app.api.repositories._installed_repository_names", return_value=set()),
+        patch(
+            "app.api.repositories.resolve_target_branch",
+            return_value=SimpleNamespace(branch=None),
+        ),
+        patch("app.api.repositories.enqueue_job") as enqueue,
+        pytest.raises(HTTPException) as error,
+    ):
+        await follow_repository(
+            RepoFollowBody(repoName="org/repo"),
+            session,
+            USER_ID,
+        )
+
+    assert error.value.status_code == 422
+    session.execute.assert_not_called()
+    session.commit.assert_not_called()
+    enqueue.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_follow_rolls_back_when_enqueue_fails():
+    session = MagicMock()
+    indexed_result = MagicMock()
+    indexed_result.first.return_value = None
+    session.exec.return_value = indexed_result
+
+    with (
+        patch(
+            "app.api.repositories.resolve_repo_access",
+            return_value=RepoAccess(installation_id=12, visibility="public"),
+        ),
+        patch("app.api.repositories._installed_repository_names", return_value=set()),
+        patch(
+            "app.api.repositories.resolve_target_branch",
+            return_value=SimpleNamespace(branch="main"),
+        ),
+        patch(
+            "app.api.repositories.enqueue_job",
+            side_effect=exc.SQLAlchemyError("enqueue failed"),
+        ),
+        pytest.raises(HTTPException) as error,
+    ):
+        await follow_repository(
+            RepoFollowBody(repoName="org/repo"),
+            session,
+            USER_ID,
+        )
+
+    assert error.value.status_code == 500
+    session.execute.assert_called_once()
+    session.commit.assert_not_called()
+    session.rollback.assert_called_once_with()
 
 
 @pytest.mark.asyncio

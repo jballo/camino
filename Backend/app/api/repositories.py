@@ -426,16 +426,6 @@ async def follow_repository(
         indexed = session.exec(
             select(RepoIndexState).where(RepoIndexState.repo_name == repo_name)
         ).first() is not None
-
-        followed = False
-        if not installed:
-            session.execute(
-                pg_insert(UserRepoFollow)
-                .values(userId=auth_user_id, repo_name=repo_name)
-                .on_conflict_do_nothing(constraint="uq_user_repo_follow")
-            )
-            session.commit()
-            followed = True
     except RepoAccessDenied:
         raise HTTPException(status_code=404, detail="Repository not found")
     except RepoAccessUnavailable:
@@ -446,7 +436,7 @@ async def follow_repository(
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
 
-    job_queued = False
+    resolution = None
     if not indexed:
         resolution = await asyncio.to_thread(
             resolve_target_branch,
@@ -458,7 +448,19 @@ async def follow_repository(
                 status_code=422,
                 detail="Could not resolve repository ref",
             )
-        try:
+
+    followed = False
+    job_queued = False
+    try:
+        if not installed:
+            session.execute(
+                pg_insert(UserRepoFollow)
+                .values(userId=auth_user_id, repo_name=repo_name)
+                .on_conflict_do_nothing(constraint="uq_user_repo_follow")
+            )
+            followed = True
+
+        if resolution is not None:
             _, job_queued = enqueue_job(
                 session,
                 user_id=auth_user_id,
@@ -470,10 +472,12 @@ async def follow_repository(
                     repo_name=repo_name,
                     ref=resolution.branch,
                 ),
+                commit=False,
             )
-        except exc.SQLAlchemyError:
-            session.rollback()
-            raise HTTPException(status_code=500, detail="Database error")
+        session.commit()
+    except exc.SQLAlchemyError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
 
     return RepoFollowResponse(
         repoName=repo_name,

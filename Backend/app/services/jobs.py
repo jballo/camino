@@ -85,12 +85,14 @@ def enqueue_job(
     issue_repo: str | None = None,
     issue_number: int | None = None,
     blocked_by_job_id: int | None = None,
+    commit: bool = True,
 ) -> tuple[Job, bool]:
     """Return the active equivalent job, or atomically enqueue a new one.
 
     The pre-insert lookup handles the common case. The partial unique index on
     ``dedupe_key`` closes the concurrent-enqueue race; its loser reloads the row
-    inserted by the winner.
+    inserted by the winner. Callers that pass ``commit=False`` own the outer
+    transaction; a savepoint keeps their other writes intact after a dedupe race.
     """
     repo_name = normalize_repository_name(repo_name)
     existing = _active_job(session, dedupe_key)
@@ -112,6 +114,19 @@ def enqueue_job(
         blocked_by_job_id=blocked_by_job_id,
         status=JobStatus.PENDING,
     )
+    if not commit:
+        try:
+            with session.begin_nested():
+                session.add(job)
+                session.flush()
+            session.refresh(job)
+            return job, True
+        except exc.IntegrityError:
+            existing = _active_job(session, dedupe_key)
+            if existing is None:
+                raise
+            return existing, False
+
     try:
         session.add(job)
         session.commit()
