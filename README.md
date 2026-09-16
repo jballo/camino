@@ -1,8 +1,9 @@
 # Camino
 
-Generate **guided tours** of unfamiliar codebases. Connect a GitHub repo, pick a topic
-("authentication flow", "request lifecycle"), and get a structured walkthrough with code
-snippets, file references, and explanations of *why* the code exists the way it does.
+Generate **guided tours and contribution briefs** for unfamiliar codebases. Connect a
+GitHub repo and either explore a topic ("authentication flow", "request lifecycle") or
+paste an issue URL. Camino returns a grounded walkthrough with code snippets, file
+references, setup guidance, and explanations of *why* the code exists the way it does.
 
 Built for new hires, OSS contributors, and anyone who's opened a repo and thought
 "where do I even start?"
@@ -11,14 +12,16 @@ Built for new hires, OSS contributors, and anyone who's opened a repo and though
 
 ## Where we are
 
-**Phase 2 — Guided tours** · `✅ M6 implemented`
+**Phase 2 — Guided tours + issue briefs** · `✅ M6 implemented`
 
 The core indexing and hybrid-search pipeline is **built and tuned**. A LangGraph ReAct
 agent can answer natural-language questions about an ingested repo, grounded in retrieved
 code chunks. Phase 2 now has the full guided-tour path: a Plan → Retrieve → Draft →
-Review generator, a durable shared Postgres job queue for ingestion and tours,
+Review generator, a durable shared Postgres job queue for ingestion, tours, and briefs,
 polling/cancellation/list APIs, authenticated direct browser calls, the `/generate`
-polling page, the `/tours` library, and the `/tours/{id}` reader UI.
+polling page, the `/tours` library, and the `/tours/{id}` reader UI. The contribution
+flow now discovers a repository's preferred target branch, indexes code by ref, and
+turns a GitHub issue thread into a grounded, cancellable implementation brief.
 
 What works today:
 
@@ -26,7 +29,7 @@ What works today:
 | Layer                                       | Status                                                    |
 | ------------------------------------------- | --------------------------------------------------------- |
 | GitHub App + Clerk auth                     | ✅ wired end-to-end                                        |
-| Repo ingest (snapshot → parse → embed → publish) | ✅ queued, bounded Python/JS/TS/TSX indexing          |
+| Repo ingest (snapshot → parse → embed → publish) | ✅ queued, bounded, ref-aware Python/JS/TS/TSX indexing |
 | Hybrid retrieval (pgvector + FTS + RRF)     | ✅ shipped stack (exp1–5)                                  |
 | Retrieval eval harness                      | ✅ 20-question FastAPI golden set                          |
 | Agent smoke eval                            | ✅ live agent + citation validity checks                   |
@@ -34,9 +37,10 @@ What works today:
 | LLM-as-judge tour eval                      | ✅ faithfulness/relevance/completeness/ordering + baseline |
 | ReAct Q&A agent                             | ✅ `/explore` + `/api/v1/agent/ask`                        |
 | Guided tour generation                      | ✅ backend pipeline + jobs/API + frontend flow             |
+| GitHub issue briefs                         | ✅ preflight + branch discovery + grounded brief reader    |
 | Durable background-job execution            | ✅ shared Postgres queue, leases, retries, and cancellation |
 | Direct browser API access                   | ✅ Clerk JWT calls from React pages to FastAPI              |
-| Per-user API rate limiting                  | ✅ PostgreSQL fixed windows on costly POST routes           |
+| Per-user API rate limiting                  | ✅ PostgreSQL fixed windows on costly API operations        |
 | Clerk account-deletion webhook cleanup      | ✅ idempotent, transactional local-data cleanup             |
 | GitHub installation webhook cleanup         | ✅ removes local data when an installation is deleted       |
 | Production deploy                           | ❌ local dev only                                          |
@@ -52,7 +56,7 @@ What works today:
 
 ```mermaid
 flowchart LR
-  P1["Phase 1<br/>Retrieval + Q&A"] --> P2["Phase 2<br/>Guided tours"]
+  P1["Phase 1<br/>Retrieval + Q&A"] --> P2["Phase 2<br/>Tours + issue briefs"]
   P2 --> P3["Phase 3<br/>Production"]
   P3 --> P4["Phase 4<br/>CLI + PR bot"]
 
@@ -68,7 +72,7 @@ flowchart LR
 | Phase           | Goal                                 | Key deliverables                                                                            |
 | --------------- | ------------------------------------ | ------------------------------------------------------------------------------------------- |
 | **1 — Done**    | Best-in-class retrieval for code Q&A | exp1–5 shipped (0.900 hit@5); optional exp6 BGE reranker (0.950, closes q17); q03 last miss |
-| **2 — Now**     | Structured guided tours              | End-to-end tour flow, M5 evals, and M6 durable Postgres queue landed                         |
+| **2 — Now**     | Guided tours + contribution briefs   | End-to-end tour/brief flows, M5 evals, and M6 durable Postgres queue landed                   |
 | **3**           | Ship to users                        | AWS CDK, RDS PostgreSQL + pgvector, ECS Fargate, health checks, and observability             |
 | **4 — Stretch** | Meet devs where they work            | CLI (`onboard generate`), PR reviewer bot                                                   |
 
@@ -87,6 +91,7 @@ flowchart TB
     Explore["/explore — ingest + Q&A"]
     Home["/ — guided tour request form"]
     TourUI["/generate + /tours — tour polling + reader"]
+    BriefUI["/briefs — issue preflight + brief reader"]
     GithubRoutes["/api/github/* — install/OAuth redirects"]
   end
 
@@ -98,9 +103,10 @@ flowchart TB
     Embed[OpenAI embeddings]
     Search[Hybrid search — pgvector + FTS + RRF]
     Agent[LangGraph ReAct agent]
-    JobAPIs["Ingest + journey job APIs<br/>enqueue · poll · cancel · list"]
+    JobAPIs["Ingest + tour + brief job APIs<br/>enqueue · poll · cancel · list"]
     Worker["Shared worker<br/>claim + lease recovery"]
     TourGraph["Tour graph<br/>Plan → Retrieve → Draft → Review"]
+    BriefGraph["Issue brief graph<br/>synthesize → retrieve → freshness → draft → review"]
     Limits["Per-user fixed-window rate limits"]
   end
 
@@ -118,6 +124,7 @@ flowchart TB
   Explore -->|"Bearer JWT"| API
   Home -->|"Bearer JWT"| API
   TourUI -->|"Bearer JWT"| API
+  BriefUI -->|"Bearer JWT"| API
   Settings --> GithubRoutes
   GithubRoutes -->|github/connect| API
   API --> GH
@@ -135,7 +142,9 @@ flowchart TB
   Worker -->|"FOR UPDATE SKIP LOCKED"| Jobs
   Worker --> Ingest
   Worker --> TourGraph
+  Worker --> BriefGraph
   TourGraph --> Search
+  BriefGraph --> Search
   Search --> Chunks
   Search --> Vectors
 ```
@@ -162,7 +171,7 @@ Implementation status:
   path/body; identity comes solely from the verified token's `sub` claim. Legacy paths
   return `404`, and legacy body fields return `422`.
 - Frontend: `backendFetch()` and `ApiError` attach the Clerk token and surface FastAPI
-  `detail` strings; all six pages call FastAPI directly.
+  `detail` strings; authenticated product pages call FastAPI directly.
 - Only the three GitHub OAuth redirect routes remain in Next.js (cookie/CSRF handling
   and the Clerk session live on the app's domain).
 
@@ -199,8 +208,8 @@ npm run dev            # http://localhost:3000
 
 Instead of the standalone worker command, you can run the supervised Compose worker
 from the repository root with `docker compose --profile worker up -d worker`. With
-`RUN_WORKER=false` by default, ingestion and tour jobs remain queued unless either
-worker option is running.
+`RUN_WORKER=false` by default, ingestion, tour, and issue-brief jobs remain queued
+unless either worker option is running.
 
 The defaults expect the frontend at `http://localhost:3000` and FastAPI at
 `http://127.0.0.1:8000`. Browser origins are matched exactly: if you open the frontend
@@ -230,13 +239,17 @@ does not add, rename, or remove columns on existing tables.
 
 1. Sign in → open **Settings** → connect or manage the GitHub App.
 2. Open **Explore** → select a repo → **Process**. Camino queues ingestion and polls its
-  status; **Stop** cancels an active job. The repo must be indexed before Q&A or tour
-  generation can use it.
+  status; **Stop** cancels an active job. Indexes are scoped to the selected ref, and
+  the repo must be indexed before Q&A or tour generation can use it.
 3. Ask a question in **Explore**, or go back to **Home** to generate a tour:
   select the processed repo, enter a topic such as "authentication flow", and click
    **Generate tour**.
 4. Camino routes to `/generate?id=...`, polls the job, then opens `/tours/{id}` when
   the grounded tour is ready.
+5. Open **Issue briefs**, paste a GitHub issue URL, review the issue warnings and
+   discovered target branch, then generate a brief. Camino queues the required ref
+   ingestion automatically, if needed, before producing setup steps, grounded reading
+   guidance, tests, and an implementation checklist.
 
 Details: [Backend/README.md](Backend/README.md) · [Frontend/README.md](Frontend/README.md) ·
 [Backend/eval/README.md](Backend/eval/README.md)
@@ -257,15 +270,15 @@ npm run lint
 ```
 
 Backend coverage includes API/auth behavior, webhook cleanup, rate limiting, retrieval,
-staged ingestion, tour generation/cancellation, shared-job lifecycle, and startup schema
-provisioning. When
-the docker-compose Postgres is available, the same command automatically creates and
+ref-aware staged ingestion, tour and issue-brief generation/cancellation, contribution
+target discovery, shared-job lifecycle, and startup schema provisioning. When the
+docker-compose Postgres is available, the same command automatically creates and
 drops a uniquely named `camino_worker_test_*` scratch database for real concurrent
 claim/recovery tests without deleting a pre-existing database; it never truncates
 `onboarding_agent`, and rejects a `TEST_DATABASE_URL` whose database name matches
 `DATABASE_URL` (even through a different host alias). Frontend Vitest coverage exercises
 the shared direct-to-FastAPI client plus queued-ingestion polling, timeout,
-cancellation, and error behavior.
+cancellation, and error behavior, plus contribution-target and issue-brief clients.
 
 ---
 
@@ -327,7 +340,8 @@ Before the first backend deployment:
 - [x] Recover shared jobs left `running` after a task restart with expiring leases,
   bounded attempts, and periodic requeue/fail sweeps.
 - [ ] Add CI checks for backend tests, frontend lint/build, CDK synthesis, and migrations.
-- [ ] Run a deployed smoke test: auth → GitHub connect → ingest → ask → generate tour.
+- [ ] Run a deployed smoke test: auth → GitHub connect → ingest → ask → generate tour
+  → generate issue brief.
 - [ ] Register `https://<backend>/webhooks/clerk` for Clerk user lifecycle events
   (`user.created`, `user.updated`, `user.deleted`) and
   `https://<backend>/webhooks/github` for GitHub installation events.
@@ -382,6 +396,10 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 ### Indexing & retrieval (the engine)
 
 - [x] GitHub tarball snapshots with bounded download/extraction and source-file filtering
+- [x] Ref-aware shared indexes keyed by repository + target branch, with live GitHub
+  access checks before every indexed read
+- [x] Contribution-target discovery from repository guidance, branch metadata, and the
+  default branch, with issue-thread and user overrides for briefs
 - [x] tree-sitter parsing → symbol-level chunks (path, name, type, lines, source, signature/docstring)
 - [x] Postgres + pgvector: chunks table (HNSW embedding col + tsvector col)
 - [x] Embedding pipeline (OpenAI `text-embedding-3-small`, enriched NL headers)
@@ -404,6 +422,15 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 
 - [ ] Suggested tour topics auto-generated from repo structure
 
+### Issue briefs (the contributor workflow)
+
+- [x] GitHub issue preview with state, labels, assignees, open-PR and discussion warnings
+- [x] Fork/upstream resolution, target-branch evidence, and fork-behind status
+- [x] Durable brief jobs that wait for or trigger the required ref-aware index refresh
+- [x] Grounded brief artifact with summary, house rules, setup recipe, code-reading steps,
+  test guidance, implementation checklist, freshness, and confidence questions
+- [x] Brief list/reader UI with polling, cancellation, and Explore follow-up links
+
 ### Web app
 
 - [x] Request-a-tour form — select repo, enter topic, create journey, route to `/generate`
@@ -411,19 +438,22 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [x] Tour reader page — TOC, markdown explanations, file paths, line-numbered snippets
 - [x] Generation status / polling page
 - [x] Tours library page
+- [x] Issue briefs page — GitHub issue preflight, branch override, recent briefs, and reader
 - [x] Settings page — GitHub connection status plus install/manage-repositories entry point
 - [x] Clerk auth (sign-in, session JWT to backend)
 - [x] GitHub App connect + repo listing
 - [~] Account deletion — Clerk provides authenticated typed confirmation and identity deletion, and the verified webhook removes local data; external GitHub App revocation remains
 - [ ] Shareable tour URLs
 
-- [~] Error handling — ingestion and tour flows surface terminal cancellation, expired
+- [~] Error handling — ingestion, tour, and brief flows surface terminal cancellation, expired
   sessions, backend errors, and ten-minute polling timeouts; still needs richer
   clone-fail / repo-too-large / bad-LLM paths
 
-- [x] Direct browser → FastAPI integration — shared `backendFetch`/`ApiError`, six migrated pages, JWT-derived identity, CORS, and only the three GitHub OAuth redirect routes retained in Next.js
+- [x] Direct browser → FastAPI integration — shared `backendFetch`/`ApiError`, JWT-derived identity, CORS, and only the three GitHub OAuth redirect routes retained in Next.js
 - [x] Frontend API client tests — Vitest covers successful JSON requests, authenticated POST bodies, FastAPI `detail` errors, and malformed/non-JSON error responses
-- [x] Per-user PostgreSQL fixed-window rate limiting for agent Q&A, ingest, direct search, and journey creation; the backend returns `429` and `Retry-After`
+- [x] Per-user PostgreSQL fixed-window rate limiting for agent Q&A, ingest, direct search,
+  contribution-target discovery, journey creation, and issue-brief preview/creation; the
+  backend returns `429` and `Retry-After`
 
 ### CLI (stretch)
 

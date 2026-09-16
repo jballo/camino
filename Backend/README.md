@@ -1,8 +1,8 @@
 # Camino — Backend
 
 FastAPI service: GitHub App connection storage, repo ingest, hybrid code search,
-ask-the-codebase Q&A, backend guided-tour generation, per-user API rate limiting, and
-Clerk account-lifecycle and GitHub installation webhook handling.
+ask-the-codebase Q&A, guided-tour and GitHub issue-brief generation, per-user API rate
+limiting, and Clerk account-lifecycle and GitHub installation webhook handling.
 
 **Retrieval loop:** paused at a tuned stack — exp1–5 shipped (hit@5 0.900), plus an
 optional exp6 cross-encoder reranker (BGE blend → 0.950). See
@@ -10,7 +10,10 @@ optional exp6 cross-encoder reranker (BGE blend → 0.950). See
 **Phase 2 status:** the guided-tour backend is wired end-to-end with the frontend.
 The Plan → Retrieve → Draft → Review graph and durable shared Postgres `Job` queue
 back asynchronous repository ingestion and the `/api/v1/journeys` create, poll, list,
-and cancel flow used by `/generate`, `/tours`, and `/tours/{id}`.
+and cancel flow used by `/generate`, `/tours`, and `/tours/{id}`. The same queue now
+supports issue briefs: GitHub issue preflight, fork/upstream and contribution-target
+resolution, ref-aware ingestion dependencies, grounded generation, polling, listing,
+and cancellation through `/api/v1/briefs`.
 
 ---
 
@@ -19,10 +22,10 @@ and cancel flow used by `/generate`, `/tours`, and `/tours/{id}`.
 - **FastAPI** + SQLModel + Postgres with **pgvector**
 - **tree-sitter** — Python, JavaScript, TypeScript/TSX symbol extraction
 - **OpenAI** — embeddings (`text-embedding-3-small`) + chat (`gpt-4o-mini` default)
-- **LangGraph** — ReAct Q&A agent plus structured tour generation graph
+- **LangGraph** — ReAct Q&A agent plus structured tour and issue-brief graphs
 - **Clerk** — JWT auth on API routes plus signed account-lifecycle webhooks
 - **PyGithub** — GitHub App installation tokens for repo access
-- **PostgreSQL fixed windows** — atomic, per-Clerk-user limits for costly POST routes
+- **PostgreSQL fixed windows** — atomic, per-Clerk-user limits for costly API operations
 
 ---
 
@@ -168,8 +171,9 @@ be embedded in the Docker image, CDK source, CloudFormation outputs, or committe
 
 ### Job queue
 
-Tour generation and repository ingestion insert typed `pending` rows in the shared
-`jobs` table. The standalone polling worker (`python -m app.worker`) claims the oldest
+Tour generation, issue-brief generation, and repository ingestion insert typed
+`pending` rows in the shared `jobs` table. The standalone polling worker
+(`python -m app.worker`) claims the oldest
 pending job with `FOR UPDATE SKIP LOCKED` and dispatches it by type. Active duplicate
 requests reuse the same row through a status-scoped unique deduplication key. Known
 transient upstream and database errors return the job to `pending`; each claim
@@ -194,6 +198,21 @@ reclaimed or deleted job cannot commit more data. Single-statement reads use the
 `live_code_chunks` view; multi-statement hybrid search resolves one active generation
 and binds every retrieval and hydration query to it.
 
+Indexes are keyed by normalized repository and ref, so a contribution branch can live
+beside another indexed branch without collisions. Search, Q&A, tours, and briefs resolve
+one ref and recheck the requesting user's live GitHub access before reading the shared
+index; stored visibility is metadata rather than authorization.
+
+Issue-brief creation previews the issue thread, detects contribution warnings and
+maintainer branch instructions, resolves fork/upstream identity, and selects a verified
+target from contribution docs, pull-request templates, recently merged PRs, or the
+default branch. If that repository/ref is not indexed, the brief is parked behind a
+deduplicated ingestion job. The worker can also request a bounded refresh when cited
+files have changed, then resumes the brief without spending a normal retry attempt.
+Legacy active brief rows that predate the stored issue-repository identity are marked
+failed at startup and must be recreated; inferring that identity from the upstream
+repository would be unsafe for issues opened on forks.
+
 Multiple processes can share the queue. If a worker dies, lease recovery returns its
 row to `pending` (or marks it `failed` at the attempt limit) after
 `WORKER_LEASE_TIMEOUT`. The heartbeat runs every one-third of the lease timeout
@@ -202,10 +221,10 @@ scans every 60 seconds.
 
 Pending or running jobs can be cancelled through their type-specific API endpoint.
 Cancellation changes the row to `cancelled` and clears its claim. The heartbeat then
-causes in-flight tour generation to cancel its LangGraph task; ingestion rechecks
-ownership before each wave commit and during atomic publication, preventing a cancelled
-or reclaimed job from publishing more data. Cancelling a completed or failed job returns
-`409`, while cancelling an already-cancelled job is idempotent.
+causes in-flight tour or brief generation to cancel its LangGraph task; ingestion
+rechecks ownership before each wave commit and during atomic publication, preventing a
+cancelled or reclaimed job from publishing more data. Cancelling a completed or failed
+job returns `409`, while cancelling an already-cancelled job is idempotent.
 
 Keep `RUN_WORKER=false` in API processes and supervise the separate worker process.
 The local Compose worker uses `restart: always`; production orchestration should apply
@@ -226,6 +245,7 @@ app/
 │   ├── repositories.py  # list repos, enqueue/poll/cancel ingest, hybrid search
 │   ├── agent.py         # POST /ask — LangGraph Q&A
 │   ├── journeys.py      # create/poll/list/cancel tour generation jobs
+│   ├── briefs.py        # preview/create/poll/list/cancel issue briefs
 │   └── github.py        # GitHub App OAuth / installation
 ├── agent/
 │   ├── graph.py         # ReAct StateGraph (agent ↔ tools loop)
@@ -236,11 +256,19 @@ app/
 │   ├── runner.py        # generate_tour() entry point
 │   ├── extract.py       # deterministic snippet/path/line grounding
 │   └── review.py        # structural + coverage checks
+├── brief/
+│   ├── graph.py         # Synthesize → Retrieve → Freshness → Draft → Review
+│   ├── runner.py        # generate_brief() entry point
+│   └── schemas.py       # structured LLM outputs
 ├── services/
 │   ├── account_deletion.py # transactional, idempotent local account cleanup
 │   ├── installation_deletion.py # installation-scoped GitHub webhook cleanup
 │   ├── jobs.py          # shared enqueue, deduplication, normalization and cancellation
 │   ├── repository_ingestion.py # snapshot, bounded waves and atomic generation publish
+│   ├── target_branch.py # contribution-target evidence ladder
+│   ├── repo_access.py   # live GitHub authorization for shared indexes
+│   ├── issue_thread.py  # issue metadata, comments and preflight warnings
+│   ├── fork_status.py   # fork/upstream identity and drift
 │   ├── parser.py        # tree-sitter chunk extraction
 │   ├── embeddings.py    # build_embedding_text + OpenAI embed
 │   ├── search.py        # hybrid search (vector + FTS + RRF)
@@ -271,6 +299,7 @@ eval/
 | `POST` | `/api/v1/github/connect` | Exchange GitHub OAuth code and persist encrypted, expiring user-to-server credentials |
 | `GET` | `/api/v1/repositories` | List repos for the authenticated user's GitHub installation |
 | `GET` | `/api/v1/repositories/processed` | List indexed repos and chunk counts for the authenticated user's installation |
+| `GET` | `/api/v1/repositories/contribution-target?repoName=` | Resolve the preferred pull-request target branch and its evidence |
 | `POST` | `/api/v1/repositories/ingest` | Queue repository parsing + embedding; returns `{id, status}` |
 | `GET` | `/api/v1/repositories/ingest/{id}` | Poll an ingestion job; returns result/error when available |
 | `POST` | `/api/v1/repositories/ingest/{id}/cancel` | Cancel an owned pending/running ingestion job |
@@ -280,6 +309,11 @@ eval/
 | `GET` | `/api/v1/journeys/{id}` | Poll a journey job; returns artifact/error when available |
 | `POST` | `/api/v1/journeys/{id}/cancel` | Cancel an owned pending/running tour job |
 | `GET` | `/api/v1/journeys?repo=` | List the authenticated user's journey jobs |
+| `POST` | `/api/v1/briefs/preview` | Inspect an issue, contribution warnings, upstream/fork state, and target branch |
+| `POST` | `/api/v1/briefs` | Queue a grounded issue brief and any required ref ingestion |
+| `GET` | `/api/v1/briefs` | List the authenticated user's issue-brief jobs |
+| `GET` | `/api/v1/briefs/{id}` | Poll an issue brief, including its dependency phase and artifact/error |
+| `POST` | `/api/v1/briefs/{id}/cancel` | Cancel an owned pending/running issue brief |
 | `POST` | `/webhooks/clerk` | Process signed Clerk lifecycle events, including account cleanup |
 | `POST` | `/webhooks/github` | Process signed GitHub installation events and clean up deleted installations |
 
@@ -292,23 +326,24 @@ The Clerk webhook instead requires a valid Svix signature.
 POST request bodies:
 
 - GitHub connect: `{ code, installationId }`
-- Repository ingest: `{ repoName }`
-- Repository search: `{ query, repoName, limit? }` (`limit` defaults to `10`, maximum
+- Repository ingest: `{ repoName, ref? }` (omitting `ref` runs contribution-target discovery)
+- Repository search: `{ query, repoName, ref?, limit? }` (`limit` defaults to `10`, maximum
   `100`)
-- Agent Q&A: `{ question, repoName }`
-- Journey creation: `{ repoName, topic }`
+- Agent Q&A: `{ question, repoName, ref? }`
+- Journey creation: `{ repoName, ref?, topic }`
+- Issue-brief preview/create: `{ issueUrl, targetBranch? }`
 
-Both background job types use `pending`, `running`, `complete`, `failed`, and
+All three background job types use `pending`, `running`, `complete`, `failed`, and
 `cancelled` statuses. A completed ingestion poll includes
 `result: {chunks_inserted, embeddings_created}`; failed jobs include `error`, and all
-ingestion polls include the current `attempts` count. Equivalent active ingestion
-requests for the same installation/repository and equivalent active tour requests for
-the same user/repository/topic reuse the existing job instead of racing.
+ingestion polls include the current `attempts` count. Equivalent active ingestion,
+tour, and issue-brief requests reuse an existing job instead of racing. Brief responses
+add a phase so clients can distinguish `blocked_on_ingest`, `queued`, and `generating`.
 
 An ingestion job owner can always poll it. Another user connected to the same
 installation can poll only while GitHub still reports that repository as accessible,
-and only the owner can cancel it. Journey polling, listing, and cancellation remain
-strictly owner-scoped.
+and only the owner can cancel it. Journey and issue-brief polling, listing, and
+cancellation remain strictly owner-scoped.
 
 GitHub connect requires expiring user-to-server OAuth credentials with a refresh token;
 non-expiring or already-expired tokens are rejected.
@@ -323,7 +358,7 @@ remain are limited to the GitHub App installation and OAuth redirect flow.
 origin). Exact origins only, bearer-header auth (`allow_credentials=False`), and
 `expose_headers=["Retry-After"]` so browser JavaScript can read rate-limit headers on
 `429` responses. Token-derived identity is also complete: repository, GitHub, agent,
-search, ingest, and journey routes use only the verified JWT `sub`.
+search, ingest, journey, and brief routes use only the verified JWT `sub`.
 
 The error contract is `HTTPException` → `{"detail": "..."}`; the frontend's shared
 fetch helper surfaces string `detail` values directly in the UI and falls back to the
@@ -332,11 +367,11 @@ HTTP status when the error body is missing, malformed, non-JSON, or uses another
 ### Rate limiting
 
 The authenticated Clerk user ID keys atomic fixed-window counters in the `rate_limits`
-table. Limits apply to `POST /api/v1/agent/ask`,
-`POST /api/v1/repositories/ingest`, `POST /api/v1/repositories/search`, and
-`POST /api/v1/journeys`. Polling, listing, and cancellation routes are not limited.
-Exceeded limits return `429` with `Retry-After`. If the counter store is unavailable,
-protected routes fail closed with `503`.
+table. Limits apply to `POST /api/v1/agent/ask`, repository ingest/search,
+`GET /api/v1/repositories/contribution-target`, journey creation, and issue-brief
+preview/creation. Preview and create share one issue-brief bucket. Polling, listing, and
+cancellation routes are not limited. Exceeded limits return `429` with `Retry-After`.
+If the counter store is unavailable, protected routes fail closed with `503`.
 
 The limiter intentionally uses a short transaction that commits before the route
 handler starts its own database work. Thus, an allowed protected request performs two
@@ -423,12 +458,14 @@ recommended command is still only `uv run pytest`; no manual test-database setup
 is needed.
 
 Current focused coverage includes retrieval/search tests, agent smoke helpers,
-staged-generation ingestion and archive limits, shared job enqueue/deduplication/
-cancellation, structural tour validation, cooperative tour cancellation, journey and
-repository-ingestion route tests,
-CORS origin/preflight/`Retry-After` exposure, fixed-window rate-limit behavior, Clerk
+ref-aware staged-generation ingestion and archive limits, contribution-target and live
+repository-access checks, shared job enqueue/deduplication/cancellation, structural tour
+validation, issue-brief generation, cooperative cancellation, journey, brief, and
+repository-ingestion route tests, CORS origin/preflight/`Retry-After` exposure,
+fixed-window rate-limit behavior, Clerk
 JWT validation, token-derived query scoping, and rejection of legacy `userId`
-paths/body fields. Startup coverage verifies current table/index/view provisioning.
+paths/body fields. Startup coverage verifies current table/index/view provisioning and
+fails active legacy briefs that lack an issue-repository identity.
 Account-deletion tests cover full and shared-installation
 cleanup, idempotent webhook replay, rollback, retryable failures, and signature rejection.
 GitHub installation tests cover set-based cleanup, idempotent replay, rollback,

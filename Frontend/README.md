@@ -7,8 +7,9 @@ install and OAuth redirect flow.
 **What works:** sign-in, account deletion through Clerk's UserButton, GitHub connection
 management, queued repo ingest/reprocess with progress and cancellation,
 processed-repo status, ask-the-codebase on `/explore`, and guided-tour generation from
-the home page through `/generate` and `/tours/{id}`. Costly backend POST routes are
-protected by per-user rate limits.
+the home page through `/generate` and `/tours/{id}`. `/briefs` also previews GitHub
+issue contribution signals and generates grounded implementation briefs. Costly API
+operations are protected by per-user rate limits.
 
 **Tour flow:** select a repo, make sure it has been processed, enter a topic, and click
 **Generate tour**. The app creates a journey through FastAPI, polls progress on
@@ -22,10 +23,19 @@ cancelled and failed jobs, polling timeouts, and other backend errors, so users 
 actionable message instead of one generic failure. The tours library also retains
 cancelled jobs with a distinct status badge.
 
+**Issue brief flow:** paste a full GitHub issue URL on `/briefs`. The preview shows the
+issue state, labels, assignment/discussion/open-PR warnings, resolved upstream, target
+branch evidence, and measurable fork drift. The branch can be overridden before
+generation. The reader polls a durable brief job, shows when it is waiting on a required
+repository refresh, supports cancellation, and renders the grounded summary, setup
+recipe, code-reading steps, test guidance, checklist, freshness, and confidence notes.
+
 **Repository processing:** both the home-page repository dialog and `/explore` enqueue
 an ingestion job, poll it every two seconds, and show its queue/running state. Polling
 times out after ten minutes without cancelling the backend job. **Stop** sends a
-server-side cancellation request before stopping browser polling.
+server-side cancellation request before stopping browser polling. Processing and reads
+are ref-aware: the UI discovers a contribution target when needed and carries the
+selected indexed ref into Explore, tour, and brief requests.
 
 **Account deletion:** open Clerk's UserButton, select **Security**, and choose
 **Delete account**. Clerk requires the user to type `Delete account`, deletes the Clerk
@@ -49,7 +59,7 @@ npm run dev        # http://localhost:3000
 ```
 
 The backend must be running on port 8000, and a shared job worker must be running for
-repository processing and tour generation (see
+repository processing, tour generation, and issue-brief generation (see
 [Backend/README.md](../Backend/README.md)). Start it with
 `uv run python -m app.worker` from `Backend/`, or use
 `docker compose --profile worker up -d worker` from the repository root. Without a
@@ -100,8 +110,8 @@ the Fargate backend is deployed:
   falling back to localhost.
 
 After deploying both the API and worker, smoke-test the complete browser flow: sign in,
-connect GitHub, list and ingest a repository, ask a question, generate a tour, and poll
-it to completion.
+connect GitHub, list and ingest a repository, ask a question, generate a tour, generate
+an issue brief, and poll both jobs to completion.
 
 ---
 
@@ -115,7 +125,20 @@ it to completion.
 | `/generate` | live | Poll, time out, resume, or cancel generation; redirect on completion |
 | `/tours` | live | Library with queued, generating, ready, failed, and cancelled statuses |
 | `/tours/{id}` | live | Guided tour reader with TOC, explanations, why callouts, and snippets |
+| `/briefs` | live | Preview a GitHub issue, verify/override its target branch, and list recent briefs |
+| `/briefs/{id}` | live | Poll/cancel generation and read the grounded contribution brief |
 | `/settings` | live | GitHub connection status plus install/manage-repositories entry point |
+
+---
+
+## Visual system
+
+The interface uses the dark Glyph design across every route: an orange accent on a
+near-black token palette, Doto display type, Space Grotesk body type, JetBrains Mono for
+technical labels, console-style cards, ledger rows, and compact uppercase navigation.
+The shared tokens and component classes live in `src/app/globals.css`; font loading and
+Clerk appearance variables live in `src/app/layout.tsx`. Focus-visible outlines,
+disabled cursors, and reduced-motion overrides are defined globally.
 
 ---
 
@@ -150,6 +173,10 @@ Clerk token on every request, reports `pending`, `running`, `complete`, `failed`
 `/generate` page follows the same two-second/ten-minute polling cadence for journeys
 and cancels through `POST /api/v1/journeys/{id}/cancel`.
 
+`src/lib/contribution-target.ts` resolves the target branch used when an ingest omits an
+explicit ref. `src/lib/briefs.ts` previews issue metadata and branch/fork signals, then
+creates, lists, polls, and cancels issue-brief jobs through `/api/v1/briefs/*`.
+
 Completed tour artifacts render directly from the backend `TourArtifact` shape:
 `title`, `topic`, `repo_name`, and ordered `steps` with file paths, line ranges,
 snippets, explanations, and optional "why" notes.
@@ -168,3 +195,5 @@ npm run lint
 POST bodies, FastAPI `detail` errors, unexpected error shapes, and non-JSON responses.
 `src/lib/repository-ingestion.test.ts` covers enqueue/cancel requests, status updates,
 terminal states, token refresh, polling timeouts, and abort behavior.
+`src/lib/contribution-target.test.ts` covers target discovery responses, and
+`src/lib/briefs.test.ts` covers authenticated preview, create, and read requests.
