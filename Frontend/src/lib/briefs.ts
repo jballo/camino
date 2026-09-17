@@ -5,7 +5,6 @@ import type { BriefPreview, BriefResponse, BriefSummary } from "../types/brief";
 export type TokenGetter = () => Promise<string | null>;
 
 const DEFAULT_POLL_INTERVAL_MS = 2000;
-const DEFAULT_POLL_TIMEOUT_MS = 10 * 60 * 1000;
 
 type PollIssueBriefOptions = {
   intervalMs?: number;
@@ -116,15 +115,18 @@ export async function pollIssueBrief(
 ): Promise<BriefResponse> {
   const {
     intervalMs = DEFAULT_POLL_INTERVAL_MS,
-    timeoutMs = DEFAULT_POLL_TIMEOUT_MS,
+    timeoutMs,
     signal,
     onUpdate,
   } = options;
-  const deadline = Date.now() + timeoutMs;
+  const deadline =
+    timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
 
   while (true) {
     if (signal?.aborted) throw abortError();
-    if (Date.now() >= deadline) throw new BriefPollingTimeoutError();
+    if (deadline !== undefined && Date.now() >= deadline) {
+      throw new BriefPollingTimeoutError();
+    }
 
     const brief = await getIssueBrief(id, getToken, signal);
     onUpdate?.(brief);
@@ -135,6 +137,11 @@ export async function pollIssueBrief(
       brief.status === "cancelled"
     ) {
       return brief;
+    }
+
+    if (deadline === undefined) {
+      await wait(intervalMs, signal);
+      continue;
     }
 
     const remainingMs = deadline - Date.now();

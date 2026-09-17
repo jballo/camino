@@ -8,7 +8,10 @@ import {
   previewIssueBrief,
 } from "./briefs";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("issue brief client", () => {
   it("previews an issue with an optional branch override", async () => {
@@ -88,5 +91,37 @@ describe("issue brief client", () => {
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(getToken).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps polling beyond ten minutes when no timeout is requested", async () => {
+    vi.useFakeTimers();
+    const pending = { id: 9, status: "pending", phase: "queued" };
+    const complete = { id: 9, status: "complete", phase: "complete" };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue(pending),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue(complete),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const polling = pollIssueBrief(
+      9,
+      vi.fn().mockResolvedValue("token"),
+      { intervalMs: 10 * 60 * 1000 + 1 },
+    );
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1);
+
+    await expect(polling).resolves.toEqual(complete);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
