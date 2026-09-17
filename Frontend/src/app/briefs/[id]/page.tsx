@@ -15,11 +15,13 @@ import { use, useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 
 import { ApiError } from "@/lib/api";
-import { cancelIssueBrief, getIssueBrief } from "@/lib/briefs";
+import {
+  cancelIssueBrief,
+  isAbortError,
+  pollIssueBrief,
+} from "@/lib/briefs";
 import type { BriefArtifact, BriefResponse } from "@/types/brief";
 import type { TourStep } from "@/types/tour";
-
-const POLL_MS = 2000;
 
 export default function BriefReader({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -29,27 +31,22 @@ export default function BriefReader({ params }: { params: Promise<{ id: string }
   const [stopping, setStopping] = useState(false);
 
   useEffect(() => {
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    const controller = new AbortController();
     async function poll() {
       try {
-        const result = await getIssueBrief(id, getToken);
-        if (disposed) return;
+        const result = await pollIssueBrief(id, getToken, {
+          signal: controller.signal,
+          onUpdate: setBrief,
+        });
+        if (controller.signal.aborted) return;
         setBrief(result);
-        if (result.status === "pending" || result.status === "running" || result.status === "generating") {
-          timer = setTimeout(poll, POLL_MS);
-        }
       } catch (caught) {
-        if (!disposed) {
-          setError(caught instanceof ApiError ? caught.message : "Failed to load this brief.");
-        }
+        if (isAbortError(caught)) return;
+        setError(caught instanceof ApiError ? caught.message : "Failed to load this brief.");
       }
     }
     void poll();
-    return () => {
-      disposed = true;
-      if (timer) clearTimeout(timer);
-    };
+    return () => controller.abort();
   }, [getToken, id]);
 
   async function stop() {
