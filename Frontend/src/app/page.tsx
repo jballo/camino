@@ -58,12 +58,18 @@ export default function Home() {
   const [briefs, setBriefs] = useState<BriefSummary[]>([]);
   const [briefsLoading, setBriefsLoading] = useState(true);
   const [briefsError, setBriefsError] = useState<string>();
-  const [selectedId, setSelectedId] = useState<number>();
+  const [selectedId, setSelectedIdState] = useState<number>();
   const [selectionVersion, setSelectionVersion] = useState(0);
   const [selectedBrief, setSelectedBrief] = useState<BriefResponse>();
   const [paneLoading, setPaneLoading] = useState(false);
   const [paneError, setPaneError] = useState<string>();
   const paneAbortRef = useRef<AbortController | undefined>(undefined);
+  const selectedIdRef = useRef<number | undefined>(undefined);
+
+  const setSelectedId = useCallback((id: number) => {
+    selectedIdRef.current = id;
+    setSelectedIdState(id);
+  }, []);
 
   const loadBriefs = useCallback(
     async (signal?: AbortSignal) => {
@@ -71,7 +77,11 @@ export default function Home() {
         const result = await listIssueBriefs(getToken, signal);
         setBriefs(result);
         setBriefsError(undefined);
-        setSelectedId((current) => current ?? result[0]?.id);
+        setSelectedIdState((current) => {
+          const next = current ?? result[0]?.id;
+          selectedIdRef.current = next;
+          return next;
+        });
       } catch (caught) {
         if (isAbortError(caught)) return;
         setBriefsError(briefListErrorMessage(caught));
@@ -208,9 +218,10 @@ export default function Home() {
     setPaneError(undefined);
     try {
       const result = await cancelIssueBrief(brief.id, getToken);
-      setSelectedBrief(result);
+      if (selectedIdRef.current === brief.id) setSelectedBrief(result);
       await loadBriefs();
     } catch (caught) {
+      if (selectedIdRef.current !== brief.id) return;
       setPaneError(
         caught instanceof ApiError
           ? caught.message
@@ -414,6 +425,7 @@ export default function Home() {
               onSelect={setSelectedId}
             />
             <BriefPane
+              key={selectedId}
               brief={selectedBrief}
               createdAt={selectedSummary?.createdAt}
               loading={paneLoading}
