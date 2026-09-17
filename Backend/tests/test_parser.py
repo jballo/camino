@@ -1,4 +1,4 @@
-from app.services.parser import parse_file
+from app.services.parser import parse_file, source_skip_reason
 
 PY_SOURCE = b'''\
 class Greeter:
@@ -58,3 +58,17 @@ def test_unsupported_extension_returns_empty():
 
 def test_skipped_directory_returns_empty():
     assert parse_file("node_modules/lib/index.js", JS_SOURCE) == []
+
+
+def test_nul_bytes_returns_empty():
+    assert parse_file("evil.py", b"def evil():\n    return '\x00'\n") == []
+
+
+def test_invalid_utf8_returns_empty():
+    assert parse_file("evil.py", b"def evil():\n    return '\xff'\n") == []
+
+
+def test_source_skip_reason():
+    assert source_skip_reason(b"\xff\x00") == "binary (NUL bytes)"
+    assert source_skip_reason(b"\xff") == "invalid UTF-8"
+    assert source_skip_reason(b"def valid():\n    return True\n") is None

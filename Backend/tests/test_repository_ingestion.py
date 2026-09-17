@@ -10,12 +10,13 @@ from requests.exceptions import Timeout
 
 from app.config import settings
 from app.services.embeddings import EmbeddingError
-from app.services.parser import MAX_FILE_BYTES
+from app.services.parser import CodeChunk, MAX_FILE_BYTES
 from app.services.repository_ingestion import (
     IngestionCancelledError,
     PermanentRepositoryIngestionError,
     TransientRepositoryIngestionError,
     _extract_tarball,
+    _persist_wave,
     ingest_repository,
 )
 
@@ -73,6 +74,21 @@ def _repository_installation(repo_name: str = "org/repo"):
     return installation
 
 
+def _chunk(file_path: str, *, source_code: str = "def example():\n    pass"):
+    return CodeChunk(
+        file_path=file_path,
+        symbol_name="example",
+        symbol_type="function",
+        language="py",
+        start_line=1,
+        end_line=2,
+        source_code=source_code,
+        signature="def example()",
+        docstring=None,
+        parent_class=None,
+    )
+
+
 async def test_ingestion_stages_publishes_and_returns_counts():
     session = MagicMock()
     ensure_owned = MagicMock()
@@ -116,7 +132,11 @@ async def test_ingestion_stages_publishes_and_returns_counts():
             finalize_publication=finalize_publication,
         )
 
-    assert result == {"chunks_inserted": 1, "embeddings_created": 1}
+    assert result == {
+        "chunks_inserted": 1,
+        "embeddings_created": 1,
+        "files_skipped": 0,
+    }
     chunk_models = session.add_all.call_args_list[0].args[0]
     assert [chunk.file_path for chunk in chunk_models] == ["src/example.py"]
     assert [chunk.repo_name for chunk in chunk_models] == ["org/repo"]
@@ -171,10 +191,14 @@ async def test_failed_job_finalization_rolls_back_publication():
         )
 
     # Cleanup and search vectors committed; publication did not.
-    assert session.commit.call_count == 2
+    assert session.commit.call_count == 3
     finalize_publication.assert_called_once_with(
         session,
-        {"chunks_inserted": 0, "embeddings_created": 0},
+        {
+            "chunks_inserted": 0,
+            "embeddings_created": 0,
+            "files_skipped": 0,
+        },
     )
     session.rollback.assert_called_once_with()
 
@@ -252,9 +276,222 @@ async def test_walk_filters_skipped_unsupported_and_oversized_files():
             ref="main",
         )
 
-    assert result == {"chunks_inserted": 1, "embeddings_created": 1}
+    assert result == {
+        "chunks_inserted": 1,
+        "embeddings_created": 1,
+        "files_skipped": 0,
+    }
     chunk_models = session.add_all.call_args_list[0].args[0]
     assert [chunk.file_path for chunk in chunk_models] == ["src/keep.py"]
+
+
+async def test_nul_file_is_skipped_and_rest_ingested(caplog):
+    session = MagicMock()
+    github_patch, _ = _github(_repository_installation())
+    response = _StreamingResponse(
+        _tarball(
+            {
+                "src/keep.py": b"def keep():\n    return True\n",
+                "src/evil.py": b"def evil():\n    return '\x00'\n",
+            }
+        )
+    )
+
+    with (
+        github_patch,
+        patch(
+            "app.services.repository_ingestion.requests.get",
+            return_value=response,
+        ),
+        patch(
+            "app.services.repository_ingestion.embed_all",
+            new_callable=AsyncMock,
+            return_value=[[0.25]],
+        ) as embed,
+        caplog.at_level("WARNING", logger="app.services.repository_ingestion"),
+    ):
+        result = await ingest_repository(
+            session,
+            repo_name="org/repo",
+            installation_id=123,
+            ref="main",
+        )
+
+    assert result == {
+        "chunks_inserted": 1,
+        "embeddings_created": 1,
+        "files_skipped": 1,
+    }
+    embed.assert_awaited_once()
+    chunk_models = session.add_all.call_args_list[0].args[0]
+    assert [chunk.file_path for chunk in chunk_models] == ["src/keep.py"]
+    assert "src/evil.py" in caplog.text
+    assert "binary (NUL bytes)" in caplog.text
+
+
+async def test_invalid_utf8_file_is_skipped(caplog):
+    session = MagicMock()
+    github_patch, _ = _github(_repository_installation())
+    response = _StreamingResponse(
+        _tarball(
+            {
+                "src/keep.py": b"def keep():\n    return True\n",
+                "src/evil.py": b"def evil():\n    return '\xff'\n",
+            }
+        )
+    )
+
+    with (
+        github_patch,
+        patch(
+            "app.services.repository_ingestion.requests.get",
+            return_value=response,
+        ),
+        patch(
+            "app.services.repository_ingestion.embed_all",
+            new_callable=AsyncMock,
+            return_value=[[0.25]],
+        ),
+        caplog.at_level("WARNING", logger="app.services.repository_ingestion"),
+    ):
+        result = await ingest_repository(
+            session,
+            repo_name="org/repo",
+            installation_id=123,
+            ref="main",
+        )
+
+    assert result["files_skipped"] == 1
+    chunk_models = session.add_all.call_args_list[0].args[0]
+    assert [chunk.file_path for chunk in chunk_models] == ["src/keep.py"]
+    assert "src/evil.py" in caplog.text
+    assert "invalid UTF-8" in caplog.text
+
+
+async def test_vendored_and_nested_repo_dirs_are_pruned():
+    session = MagicMock()
+    github_patch, _ = _github(_repository_installation())
+    response = _StreamingResponse(
+        _tarball(
+            {
+                ".repos/x/src/a.py": b"def nested():\n    return 1\n",
+                "vendor/b.py": b"def vendored():\n    return 2\n",
+                "src/keep.py": b"def keep():\n    return 3\n",
+            }
+        )
+    )
+
+    with (
+        github_patch,
+        patch(
+            "app.services.repository_ingestion.requests.get",
+            return_value=response,
+        ),
+        patch(
+            "app.services.repository_ingestion.embed_all",
+            new_callable=AsyncMock,
+            return_value=[[0.25]],
+        ),
+    ):
+        result = await ingest_repository(
+            session,
+            repo_name="org/repo",
+            installation_id=123,
+            ref="main",
+        )
+
+    assert result == {
+        "chunks_inserted": 1,
+        "embeddings_created": 1,
+        "files_skipped": 0,
+    }
+    chunk_models = session.add_all.call_args_list[0].args[0]
+    assert [chunk.file_path for chunk in chunk_models] == ["src/keep.py"]
+
+
+async def test_persist_wave_drops_nul_chunks_before_embedding(caplog):
+    session = MagicMock()
+    chunks = [
+        _chunk("src/keep.py"),
+        _chunk("src/evil.py", source_code="def evil():\n    return '\x00'"),
+    ]
+
+    with (
+        patch(
+            "app.services.repository_ingestion.embed_all",
+            new_callable=AsyncMock,
+            return_value=[[0.25]],
+        ) as embed,
+        caplog.at_level("WARNING", logger="app.services.repository_ingestion"),
+    ):
+        persisted = await _persist_wave(
+            session,
+            chunks,
+            repo_name="org/repo",
+            ref="main",
+            generation="generation-1",
+        )
+
+    assert persisted == 1
+    assert len(embed.await_args.args[0]) == 1
+    chunk_models = session.add_all.call_args_list[0].args[0]
+    assert [chunk.file_path for chunk in chunk_models] == ["src/keep.py"]
+    assert "src/evil.py" in caplog.text
+    assert "field=source_code" in caplog.text
+
+
+async def test_persist_wave_all_chunks_dropped_returns_zero(caplog):
+    session = MagicMock()
+
+    with (
+        patch(
+            "app.services.repository_ingestion.embed_all",
+            new_callable=AsyncMock,
+        ) as embed,
+        caplog.at_level("WARNING", logger="app.services.repository_ingestion"),
+    ):
+        persisted = await _persist_wave(
+            session,
+            [_chunk("src/evil.py\x00")],
+            repo_name="org/repo",
+            ref="main",
+            generation="generation-1",
+        )
+
+    assert persisted == 0
+    embed.assert_not_awaited()
+    session.add_all.assert_not_called()
+    session.commit.assert_not_called()
+    assert "src/evil.py" in caplog.text
+    assert "field=file_path" in caplog.text
+
+
+async def test_flush_valueerror_is_permanent_with_file_context():
+    session = MagicMock()
+    session.flush.side_effect = ValueError(
+        "A string literal cannot contain NUL (0x00) characters"
+    )
+
+    with (
+        patch(
+            "app.services.repository_ingestion.embed_all",
+            new_callable=AsyncMock,
+            return_value=[[0.25]],
+        ),
+        pytest.raises(
+            PermanentRepositoryIngestionError,
+            match="src/example.py",
+        ),
+    ):
+        await _persist_wave(
+            session,
+            [_chunk("src/example.py")],
+            repo_name="org/repo",
+            ref="main",
+            generation="generation-1",
+        )
+
+    session.commit.assert_not_called()
 
 
 async def test_download_failure_is_transient():
@@ -519,7 +756,11 @@ async def test_ingestion_commits_multiple_bounded_waves():
             ref="main",
         )
 
-    assert result == {"chunks_inserted": 3, "embeddings_created": 3}
+    assert result == {
+        "chunks_inserted": 3,
+        "embeddings_created": 3,
+        "files_skipped": 0,
+    }
     assert [len(call.args[0]) for call in embed.await_args_list] == [2, 1]
     # Cleanup + two wave commits + search vectors + swap.
     assert session.commit.call_count == 5
@@ -557,11 +798,15 @@ async def test_single_file_chunks_are_split_into_bounded_waves():
             ref="main",
         )
 
-    assert result == {"chunks_inserted": 5, "embeddings_created": 5}
+    assert result == {
+        "chunks_inserted": 5,
+        "embeddings_created": 5,
+        "files_skipped": 0,
+    }
     assert wave_sizes == [2, 2, 1]
 
 
-async def test_chunk_cap_fails_permanently_without_publishing():
+async def test_permanent_failure_cleans_staged_generation():
     session = MagicMock()
     github_patch, _ = _github(_repository_installation())
     response = _StreamingResponse(
@@ -599,14 +844,21 @@ async def test_chunk_cap_fails_permanently_without_publishing():
         )
 
     embed.assert_awaited_once()
-    # Cleanup and wave 1 committed, but the registry pointer was never changed.
-    assert session.commit.call_count == 2
+    # Initial cleanup, wave 1, and failed-generation cleanup committed.
+    assert session.commit.call_count == 3
     executed_sql = [" ".join(str(call.args[0]).split()) for call in session.execute.call_args_list]
     assert not any("INSERT INTO repo_index_state" in sql for sql in executed_sql)
+    failed_cleanup_call = session.execute.call_args_list[-1]
+    assert "generation = :generation" in str(failed_cleanup_call.args[0])
+    assert failed_cleanup_call.args[1]["generation"]
+    assert failed_cleanup_call.args[1]["repo_name"] == "org/repo"
+    assert failed_cleanup_call.args[1]["ref"] == "main"
+    chunk_models = session.add_all.call_args_list[0].args[0]
+    assert failed_cleanup_call.args[1]["generation"] == chunk_models[0].generation
     session.rollback.assert_called_once_with()
 
 
-async def test_second_wave_failure_leaves_generation_unpublished():
+async def test_transient_failure_cleans_staged_generation():
     session = MagicMock()
     github_patch, _ = _github(_repository_installation())
     response = _StreamingResponse(
@@ -640,10 +892,84 @@ async def test_second_wave_failure_leaves_generation_unpublished():
         )
 
     assert embed.await_count == 2
-    assert session.commit.call_count == 2
+    assert session.commit.call_count == 3
     executed_sql = [" ".join(str(call.args[0]).split()) for call in session.execute.call_args_list]
     assert not any("INSERT INTO repo_index_state" in sql for sql in executed_sql)
+    failed_cleanup_call = session.execute.call_args_list[-1]
+    assert "generation = :generation" in str(failed_cleanup_call.args[0])
+    chunk_models = session.add_all.call_args_list[0].args[0]
+    assert failed_cleanup_call.args[1]["generation"] == chunk_models[0].generation
     session.rollback.assert_called_once_with()
+
+
+async def test_cleanup_failure_does_not_mask_original_error():
+    session = MagicMock()
+    session.execute.side_effect = [
+        MagicMock(),
+        RuntimeError("cleanup database unavailable"),
+    ]
+    github_patch, _ = _github(_repository_installation())
+    response = _StreamingResponse(
+        _tarball(
+            {
+                "src/a.py": b"def a():\n    return 1\n",
+                "src/b.py": b"def b():\n    return 2\n",
+            }
+        )
+    )
+
+    with (
+        github_patch,
+        patch.object(settings, "ingest_wave_chunks", 1),
+        patch.object(settings, "ingest_max_chunks", 1),
+        patch(
+            "app.services.repository_ingestion.requests.get",
+            return_value=response,
+        ),
+        patch(
+            "app.services.repository_ingestion.embed_all",
+            new_callable=AsyncMock,
+            return_value=[[0.1]],
+        ),
+        pytest.raises(
+            PermanentRepositoryIngestionError,
+            match="Repository exceeds the maximum indexable size",
+        ),
+    ):
+        await ingest_repository(
+            session,
+            repo_name="org/repo",
+            installation_id=123,
+            ref="main",
+        )
+
+    assert session.rollback.call_count == 2
+    assert session.commit.call_count == 2
+
+
+async def test_internal_error_message_includes_phase():
+    session = MagicMock()
+
+    with (
+        patch(
+            "app.services.repository_ingestion._prepare_repository",
+            side_effect=RuntimeError("unexpected"),
+        ),
+        pytest.raises(
+            PermanentRepositoryIngestionError,
+            match=r"Internal ingestion error \(phase=github_auth\)",
+        ),
+    ):
+        await ingest_repository(
+            session,
+            repo_name="org/repo",
+            installation_id=123,
+            ref="main",
+        )
+
+    failed_cleanup_call = session.execute.call_args_list[-1]
+    assert "generation = :generation" in str(failed_cleanup_call.args[0])
+    assert session.commit.call_count == 2
 
 
 async def test_ownership_loss_before_wave_commit_prevents_publication():
@@ -677,7 +1003,7 @@ async def test_ownership_loss_before_wave_commit_prevents_publication():
         )
 
     assert ensure_owned.call_count == 2
-    assert session.commit.call_count == 1
+    assert session.commit.call_count == 2
     executed_sql = [
         " ".join(str(call.args[0]).split())
         for call in session.execute.call_args_list

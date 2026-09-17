@@ -1,3 +1,4 @@
+import logging
 import os
 from dataclasses import dataclass
 
@@ -5,6 +6,8 @@ import tree_sitter_javascript as tsjavascript
 import tree_sitter_python as tspython
 import tree_sitter_typescript as tstypescript
 from tree_sitter import Language, Node, Parser
+
+logger = logging.getLogger(__name__)
 
 LANGUAGES = {
     ".py": Language(tspython.language()),
@@ -20,7 +23,23 @@ TARGET_NODES = {
     ".tsx": {"function_declaration", "class_declaration", "method_definition", "lexical_declaration"},
 }
 
-SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "dist", "build", ".next"}
+# These names conventionally contain vendored or generated code. Repositories
+# that keep first-party source under them intentionally trade coverage for a
+# smaller, more relevant index.
+SKIP_DIRS = {
+    "node_modules",
+    ".git",
+    ".repos",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".tox",
+    "vendor",
+    "third_party",
+    "dist",
+    "build",
+    ".next",
+}
 MAX_FILE_BYTES = 500_000
 
 
@@ -36,6 +55,16 @@ class CodeChunk:
     signature: str              # def/class lines before the body
     docstring: str | None
     parent_class: str | None    # for methods
+
+
+def source_skip_reason(source_bytes: bytes) -> str | None:
+    if b"\x00" in source_bytes:
+        return "binary (NUL bytes)"
+    try:
+        source_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return "invalid UTF-8"
+    return None
 
 
 def get_symbol_type(node: Node) -> str:
@@ -115,6 +144,8 @@ def extract_chunks(source_bytes: bytes, file_path: str) -> list[CodeChunk]:
     if any(part in SKIP_DIRS for part in path_parts):
         return []
     if len(source_bytes) > MAX_FILE_BYTES:
+        return []
+    if source_skip_reason(source_bytes) is not None:
         return []
     language = LANGUAGES[ext]
     parser = Parser(language)
@@ -198,5 +229,5 @@ def parse_file(file_path: str, source: bytes) -> list[CodeChunk]:
     try:
         return extract_chunks(source, file_path)
     except Exception as e:
-        print(f"Failed to parse {file_path}: {e}")
+        logger.warning("parse failed | file=%s error=%s", file_path, e)
         return []
