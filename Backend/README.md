@@ -1,19 +1,21 @@
 # Camino — Backend
 
-FastAPI service: GitHub App connection storage, repo ingest, hybrid code search,
-ask-the-codebase Q&A, guided-tour and GitHub issue-brief generation, per-user API rate
-limiting, and Clerk account-lifecycle and GitHub installation webhook handling.
+FastAPI service behind Camino's open source contribution tool: GitHub issue-brief
+generation first, plus the supporting machinery — GitHub App connection storage, repo
+ingest, hybrid code search, ask-the-codebase Q&A, guided-tour generation, per-user API
+rate limiting, and Clerk account-lifecycle and GitHub installation webhook handling.
 
 **Retrieval loop:** paused at a tuned stack — exp1–5 shipped (hit@5 0.900), plus an
 optional exp6 cross-encoder reranker (BGE blend → 0.950). See
 [eval/EXPERIMENTS.md](eval/EXPERIMENTS.md).
-**Phase 2 status:** the guided-tour backend is wired end-to-end with the frontend.
-The Plan → Retrieve → Draft → Review graph and durable shared Postgres `Job` queue
-back asynchronous repository ingestion and the `/api/v1/journeys` create, poll, list,
-and cancel flow used by `/generate`, `/tours`, and `/tours/{id}`. The same queue now
-supports issue briefs: GitHub issue preflight, fork/upstream and contribution-target
-resolution, ref-aware ingestion dependencies, grounded generation, polling, listing,
-and cancellation through `/api/v1/briefs`.
+**Phase 2 status:** the issue-brief backend — the main product surface — is wired end
+to end with the frontend home page: GitHub issue preflight, fork/upstream and
+contribution-target resolution, ref-aware ingestion dependencies, grounded generation,
+polling, listing, and cancellation through `/api/v1/briefs`, all backed by the durable
+shared Postgres `Job` queue. The same queue backs asynchronous repository ingestion and
+the guided-tour path: the Plan → Retrieve → Draft → Review graph and the
+`/api/v1/journeys` create, poll, list, and cancel flow used by `/generate`, `/tours`,
+and `/tours/{id}`.
 
 ---
 

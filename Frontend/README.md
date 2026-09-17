@@ -1,36 +1,41 @@
 # Camino — Frontend
 
-Next.js web app for Camino. Clerk handles auth, and browser pages call the FastAPI
-backend directly with Clerk session JWTs. Next.js routes remain only for the GitHub App
-install and OAuth redirect flow.
+Next.js web app for Camino, an open source contribution tool. The home page is the
+product: paste a GitHub issue URL and get a grounded implementation brief. Clerk
+handles auth, and browser pages call the FastAPI backend directly with Clerk session
+JWTs. Next.js routes remain only for the GitHub App install and OAuth redirect flow.
 
-**What works:** sign-in, account deletion through Clerk's UserButton, GitHub connection
-management, queued repo ingest/reprocess with progress and cancellation,
-processed-repo status, ask-the-codebase on `/explore`, and guided-tour generation from
-the home page through `/generate` and `/tours/{id}`. `/briefs` also previews GitHub
-issue contribution signals and generates grounded implementation briefs. Costly API
-operations are protected by per-user rate limits.
+**What works:** the issue-brief flow on the home page (`/briefs` redirects to `/`),
+sign-in, account deletion through Clerk's UserButton, GitHub connection management,
+queued repo ingest/reprocess with progress and cancellation, processed-repo status,
+ask-the-codebase on `/explore`, and guided-tour generation from `/tours` through
+`/generate` and `/tours/{id}`. Costly API operations are protected by per-user rate
+limits.
 
-**Tour flow:** select a repo, make sure it has been processed, enter a topic, and click
-**Generate tour**. The app creates a journey through FastAPI, polls progress on
-`/generate?id=...`, then opens the completed reader at `/tours/{id}`. Active jobs can
-be stopped from the progress page. Polling pauses after ten minutes with options to
-start another ten-minute polling window or leave; the server job continues unless the
-user explicitly selects **Stop generating**.
+**Issue brief flow (the main feature):** paste a full GitHub issue URL on the home
+page. The preview shows the issue state, labels, assignment/discussion/open-PR
+warnings, resolved upstream, target branch evidence, and measurable fork drift, and the
+branch can be overridden before generation. The home page is a workbench: a searchable
+rail lists past briefs by status (queued, generating, ready, failed, cancelled), and
+selecting one polls it live in an inline summary pane with regenerate/cancel actions.
+**Open full brief** on the pane routes to `/briefs/{id}`, a full-page reader that polls
+the same durable job, shows when it is waiting on a required repository refresh, and
+renders the grounded summary, setup recipe, code-reading steps, test guidance,
+checklist, freshness, and confidence notes.
+
+**Tour flow (supporting context):** on `/tours`, select a repo, make sure it has been
+processed, enter a topic, and click **Generate tour**. The app creates a journey
+through FastAPI, polls progress on `/generate?id=...`, then opens the completed reader
+at `/tours/{id}`. Active jobs can be stopped from the progress page. Polling pauses
+after ten minutes with options to start another ten-minute polling window or leave; the
+server job continues unless the user explicitly selects **Stop generating**.
 
 Tour pages distinguish an expired Clerk session (401/403), a missing tour (404),
 cancelled and failed jobs, polling timeouts, and other backend errors, so users see an
 actionable message instead of one generic failure. The tours library also retains
 cancelled jobs with a distinct status badge.
 
-**Issue brief flow:** paste a full GitHub issue URL on `/briefs`. The preview shows the
-issue state, labels, assignment/discussion/open-PR warnings, resolved upstream, target
-branch evidence, and measurable fork drift. The branch can be overridden before
-generation. The reader polls a durable brief job, shows when it is waiting on a required
-repository refresh, supports cancellation, and renders the grounded summary, setup
-recipe, code-reading steps, test guidance, checklist, freshness, and confidence notes.
-
-**Repository processing:** both the home-page repository dialog and `/explore` enqueue
+**Repository processing:** both the `/tours` repository dialog and `/explore` enqueue
 an ingestion job, poll it every two seconds, and show its queue/running state. Polling
 times out after ten minutes without cancelling the backend job. **Stop** sends a
 server-side cancellation request before stopping browser polling. Processing and reads
@@ -119,14 +124,14 @@ an issue brief, and poll both jobs to completion.
 
 | Route | Status | Description |
 |---|---|---|
-| `/` | live | Guided tour request form plus queued repository processing dialog |
-| `/explore` | **live** | Select repo → queue/poll/cancel ingest → ask questions with cited sources |
+| `/` | **live** | Home workbench: preview a GitHub issue, verify/override its target branch, generate a brief, and browse/poll past briefs in a rail + inline pane |
+| `/briefs/{id}` | live | Full-page reader: poll/cancel generation and read the grounded contribution brief |
+| `/briefs` | live | Redirects to `/` |
+| `/explore` | live | Select repo → queue/poll/cancel ingest → ask questions with cited sources |
 | `/sign-in` | live | Clerk sign-in |
+| `/tours` | live | Tour generator + repository processing dialog, plus a library with queued, generating, ready, failed, and cancelled statuses |
 | `/generate` | live | Poll, time out, resume, or cancel generation; redirect on completion |
-| `/tours` | live | Library with queued, generating, ready, failed, and cancelled statuses |
 | `/tours/{id}` | live | Guided tour reader with TOC, explanations, why callouts, and snippets |
-| `/briefs` | live | Preview a GitHub issue, verify/override its target branch, and list recent briefs |
-| `/briefs/{id}` | live | Poll/cancel generation and read the grounded contribution brief |
 | `/settings` | live | GitHub connection status plus install/manage-repositories entry point |
 
 ---

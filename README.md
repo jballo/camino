@@ -1,9 +1,13 @@
 # Camino
 
-Turn a GitHub issue into a **grounded implementation brief**. Camino checks contribution
-signals, finds the right branch, and maps the setup, code, tests, and implementation
-steps needed to make a first contribution. Guided code tours remain available when you
-want deeper context on an unfamiliar part of the repository.
+**Solve your first issue.** Camino is an open source contribution tool: paste a GitHub
+issue URL and get a **grounded implementation brief**. It checks contribution signals
+(assignees, open PRs, maintainer instructions), finds the right target branch, and maps
+the setup, code reading, tests, and implementation steps needed to land the change.
+
+Issue orientation is the product and the home page. Two supporting tools help when you
+need more context on the repository behind the issue: ask-the-codebase Q&A on
+`/explore` and guided code tours on `/tours`.
 
 Built for OSS contributors and anyone who's opened an issue and thought, "where do I
 even start?"
@@ -12,22 +16,24 @@ even start?"
 
 ## Where we are
 
-**Phase 2 — Guided tours + issue briefs** · `✅ M6 implemented`
+**Phase 2 — Issue briefs + supporting tours** · `✅ M6 implemented`
 
-The core indexing and hybrid-search pipeline is **built and tuned**. A LangGraph ReAct
-agent can answer natural-language questions about an ingested repo, grounded in retrieved
-code chunks. Phase 2 now has the full guided-tour path: a Plan → Retrieve → Draft →
-Review generator, a durable shared Postgres job queue for ingestion, tours, and briefs,
-polling/cancellation/list APIs, authenticated direct browser calls, the `/generate`
-polling page, the `/tours` library, and the `/tours/{id}` reader UI. The contribution
-flow now discovers a repository's preferred target branch, indexes code by ref, and
-turns a GitHub issue thread into a grounded, cancellable implementation brief.
+The contribution flow is end to end: the home page previews a GitHub issue thread,
+surfaces warnings, discovers the repository's preferred target branch, indexes code by
+ref, and turns the issue into a grounded, cancellable implementation brief. Underneath
+it, the core indexing and hybrid-search pipeline is **built and tuned**, and a durable
+shared Postgres job queue backs ingestion, briefs, and tours with polling, cancellation,
+and list APIs plus authenticated direct browser calls. The supporting context tools are
+also complete: a LangGraph ReAct agent answers natural-language questions about an
+ingested repo on `/explore`, and the Plan → Retrieve → Draft → Review tour generator
+drives the `/tours` library, `/generate` polling page, and `/tours/{id}` reader.
 
 What works today:
 
 
 | Layer                                       | Status                                                    |
 | ------------------------------------------- | --------------------------------------------------------- |
+| GitHub issue briefs                         | ✅ preflight + branch discovery + grounded brief reader    |
 | GitHub App + Clerk auth                     | ✅ wired end-to-end                                        |
 | Repo ingest (snapshot → parse → embed → publish) | ✅ queued, bounded, ref-aware Python/JS/TS/TSX indexing |
 | Hybrid retrieval (pgvector + FTS + RRF)     | ✅ shipped stack (exp1–5)                                  |
@@ -37,7 +43,6 @@ What works today:
 | LLM-as-judge tour eval                      | ✅ faithfulness/relevance/completeness/ordering + baseline |
 | ReAct Q&A agent                             | ✅ `/explore` + `/api/v1/agent/ask`                        |
 | Guided tour generation                      | ✅ backend pipeline + jobs/API + frontend flow             |
-| GitHub issue briefs                         | ✅ preflight + branch discovery + grounded brief reader    |
 | Durable background-job execution            | ✅ shared Postgres queue, leases, retries, and cancellation |
 | Direct browser API access                   | ✅ Clerk JWT calls from React pages to FastAPI              |
 | Per-user API rate limiting                  | ✅ PostgreSQL fixed windows on costly API operations        |
@@ -56,7 +61,7 @@ What works today:
 
 ```mermaid
 flowchart LR
-  P1["Phase 1<br/>Retrieval + Q&A"] --> P2["Phase 2<br/>Tours + issue briefs"]
+  P1["Phase 1<br/>Retrieval + Q&A"] --> P2["Phase 2<br/>Issue briefs + tours"]
   P2 --> P3["Phase 3<br/>Production"]
   P3 --> P4["Phase 4<br/>CLI + PR bot"]
 
@@ -72,12 +77,13 @@ flowchart LR
 | Phase           | Goal                                 | Key deliverables                                                                            |
 | --------------- | ------------------------------------ | ------------------------------------------------------------------------------------------- |
 | **1 — Done**    | Best-in-class retrieval for code Q&A | exp1–5 shipped (0.900 hit@5); optional exp6 BGE reranker (0.950, closes q17); q03 last miss |
-| **2 — Now**     | Guided tours + contribution briefs   | End-to-end tour/brief flows, M5 evals, and M6 durable Postgres queue landed                   |
+| **2 — Now**     | Issue briefs + supporting tours      | End-to-end brief/tour flows, M5 evals, and M6 durable Postgres queue landed                   |
 | **3**           | Ship to users                        | AWS CDK, RDS PostgreSQL + pgvector, ECS Fargate, health checks, and observability             |
-| **4 — Stretch** | Meet devs where they work            | CLI (`onboard generate`), PR reviewer bot                                                   |
+| **4 — Stretch** | Meet contributors where they work    | CLI (`camino brief`), PR reviewer bot                                                       |
 
 
-The north star hasn't changed: **web app first, CLI later, PR reviewer bot eventually.**
+The north star: **the issue-to-brief web app first, CLI later, PR reviewer bot
+eventually.**
 
 ---
 
@@ -240,18 +246,18 @@ development or upgraded with an explicit migration; `SQLModel.metadata.create_al
 does not add, rename, or remove columns on existing tables.
 
 1. Sign in → open **Settings** → connect or manage the GitHub App.
-2. Open **Explore** → select a repo → **Process**. Camino queues ingestion and polls its
-  status; **Stop** cancels an active job. Indexes are scoped to the selected ref, and
-  the repo must be indexed before Q&A or tour generation can use it.
-3. Ask a question in **Explore**, or open **Tours** to generate a tour:
-  select the processed repo, enter a topic such as "authentication flow", and click
-   **Generate tour**.
-4. Camino routes to `/generate?id=...`, polls the job, then opens `/tours/{id}` when
-  the grounded tour is ready.
-5. Open **Home**, paste a GitHub issue URL, review the issue warnings and
-   discovered target branch, then generate a brief. Camino queues the required ref
-   ingestion automatically, if needed, before producing setup steps, grounded reading
-   guidance, tests, and an implementation checklist.
+2. On **Home**, paste a GitHub issue URL, review the issue warnings and discovered
+   target branch, then generate a brief. Camino queues the required ref ingestion
+   automatically, if needed, before producing setup steps, grounded reading guidance,
+   tests, and an implementation checklist.
+3. For more repository context, open **Explore** → select a repo → **Process**. Camino
+   queues ingestion and polls its status; **Stop** cancels an active job. Indexes are
+   scoped to the selected ref, and the repo must be indexed before Q&A or tour
+   generation can use it.
+4. Ask a question in **Explore**, or open **Tours** to generate a tour: select the
+   processed repo, enter a topic such as "authentication flow", and click
+   **Generate tour**. Camino routes to `/generate?id=...`, polls the job, then opens
+   `/tours/{id}` when the grounded tour is ready.
 
 Details: [Backend/README.md](Backend/README.md) · [Frontend/README.md](Frontend/README.md) ·
 [Backend/eval/README.md](Backend/eval/README.md)
@@ -411,7 +417,16 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 
 - [~] Multi-language support — Python + JS/TS/TSX done; Go/Rust not yet
 
-### Tour generation (the agent)
+### Issue briefs (the product)
+
+- [x] GitHub issue preview with state, labels, assignees, open-PR and discussion warnings
+- [x] Fork/upstream resolution, target-branch evidence, and fork-behind status
+- [x] Durable brief jobs that wait for or trigger the required ref-aware index refresh
+- [x] Grounded brief artifact with summary, house rules, setup recipe, code-reading steps,
+  test guidance, implementation checklist, freshness, and confidence questions
+- [x] Brief list/reader UI with polling, cancellation, and Explore follow-up links
+
+### Tour generation (supporting context agent)
 
 - [x] LangGraph Q&A agent — ReAct with `hybrid_search` tool works on `/explore`
 - [x] Tour graph — Plan → Retrieve → Draft → Review with bounded repair loop
@@ -424,23 +439,14 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 
 - [ ] Suggested tour topics auto-generated from repo structure
 
-### Issue briefs (the contributor workflow)
-
-- [x] GitHub issue preview with state, labels, assignees, open-PR and discussion warnings
-- [x] Fork/upstream resolution, target-branch evidence, and fork-behind status
-- [x] Durable brief jobs that wait for or trigger the required ref-aware index refresh
-- [x] Grounded brief artifact with summary, house rules, setup recipe, code-reading steps,
-  test guidance, implementation checklist, freshness, and confidence questions
-- [x] Brief list/reader UI with polling, cancellation, and Explore follow-up links
-
 ### Web app
 
-- [x] Tours library + generator — select repo, enter topic, create journey, route to `/generate`
-- [x] Explore page — repo list, ingest, ask-the-codebase with source citations
-- [x] Tour reader page — TOC, markdown explanations, file paths, line-numbered snippets
-- [x] Generation status / polling page
 - [x] Issue brief home page — GitHub issue preflight, branch override, and recent briefs
 - [x] Issue brief reader — polling, cancellation, and grounded implementation guidance
+- [x] Explore page — repo list, ingest, ask-the-codebase with source citations
+- [x] Tours library + generator — select repo, enter topic, create journey, route to `/generate`
+- [x] Tour reader page — TOC, markdown explanations, file paths, line-numbered snippets
+- [x] Generation status / polling page
 - [x] Settings page — GitHub connection status plus install/manage-repositories entry point
 - [x] Clerk auth (sign-in, session JWT to backend)
 - [x] GitHub App connect + repo listing
@@ -459,10 +465,10 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 
 ### CLI (stretch)
 
-- [ ] `onboard login` — device flow, store token locally (0600 perms)
+- [ ] `camino login` — device flow, store token locally (0600 perms)
 - [ ] Custom CLI token system (cli_tokens table in Postgres)
-- [ ] `onboard generate --repo --topic` — thin client, polls backend
-- [ ] `onboard list --repo`
+- [ ] `camino brief --issue-url` — thin client, polls backend for the grounded brief
+- [ ] `camino list --repo`
 
 ### Infra & deploy (AWS)
 
