@@ -1,7 +1,49 @@
 import { ApiError, backendFetch } from "./api";
+import { isAbortError } from "./repository-ingestion";
 import type { BriefPreview, BriefResponse, BriefSummary } from "../types/brief";
 
 export type TokenGetter = () => Promise<string | null>;
+
+const DEFAULT_POLL_INTERVAL_MS = 2000;
+const DEFAULT_POLL_TIMEOUT_MS = 10 * 60 * 1000;
+
+type PollIssueBriefOptions = {
+  intervalMs?: number;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  onUpdate?: (brief: BriefResponse) => void;
+};
+
+export class BriefPollingTimeoutError extends Error {
+  constructor() {
+    super("Issue brief polling timed out");
+    this.name = "BriefPollingTimeoutError";
+  }
+}
+
+function abortError(): DOMException {
+  return new DOMException("Issue brief polling was cancelled", "AbortError");
+}
+
+function wait(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError());
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+export { isAbortError };
 
 async function tokenOrThrow(getToken: TokenGetter): Promise<string> {
   const token = await getToken();
@@ -38,10 +80,12 @@ export async function createIssueBrief(
 export async function getIssueBrief(
   id: number | string,
   getToken: TokenGetter,
+  signal?: AbortSignal,
 ): Promise<BriefResponse> {
   return backendFetch(
     `/api/v1/briefs/${encodeURIComponent(id)}`,
     await tokenOrThrow(getToken),
+    { signal },
   );
 }
 
@@ -58,6 +102,43 @@ export async function cancelIssueBrief(
 
 export async function listIssueBriefs(
   getToken: TokenGetter,
+  signal?: AbortSignal,
 ): Promise<BriefSummary[]> {
-  return backendFetch("/api/v1/briefs", await tokenOrThrow(getToken));
+  return backendFetch("/api/v1/briefs", await tokenOrThrow(getToken), {
+    signal,
+  });
+}
+
+export async function pollIssueBrief(
+  id: number | string,
+  getToken: TokenGetter,
+  options: PollIssueBriefOptions = {},
+): Promise<BriefResponse> {
+  const {
+    intervalMs = DEFAULT_POLL_INTERVAL_MS,
+    timeoutMs = DEFAULT_POLL_TIMEOUT_MS,
+    signal,
+    onUpdate,
+  } = options;
+  const deadline = Date.now() + timeoutMs;
+
+  while (true) {
+    if (signal?.aborted) throw abortError();
+    if (Date.now() >= deadline) throw new BriefPollingTimeoutError();
+
+    const brief = await getIssueBrief(id, getToken, signal);
+    onUpdate?.(brief);
+
+    if (
+      brief.status === "complete" ||
+      brief.status === "failed" ||
+      brief.status === "cancelled"
+    ) {
+      return brief;
+    }
+
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new BriefPollingTimeoutError();
+    await wait(Math.min(intervalMs, remainingMs), signal);
+  }
 }
