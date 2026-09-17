@@ -8,6 +8,7 @@ import {
   ExternalLink,
   Link as LinkIcon,
   Loader2,
+  RefreshCw,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -34,6 +35,18 @@ function createErrorMessage(caught: unknown, fallback: string) {
   return caught instanceof Error ? caught.message : fallback;
 }
 
+function briefListErrorMessage(caught: unknown) {
+  if (
+    caught instanceof ApiError &&
+    (caught.status === 401 || caught.status === 403)
+  ) {
+    return "We couldn't load your briefs because your session is unavailable. Sign in again, then retry.";
+  }
+  return caught instanceof ApiError
+    ? `We couldn't load your briefs: ${caught.message}`
+    : "We couldn't load your briefs. Check your connection and try again.";
+}
+
 export default function Home() {
   const { getToken } = useAuth();
   const [issueUrl, setIssueUrl] = useState("");
@@ -44,6 +57,7 @@ export default function Home() {
   const [error, setError] = useState<string>();
   const [briefs, setBriefs] = useState<BriefSummary[]>([]);
   const [briefsLoading, setBriefsLoading] = useState(true);
+  const [briefsError, setBriefsError] = useState<string>();
   const [selectedId, setSelectedId] = useState<number>();
   const [selectionVersion, setSelectionVersion] = useState(0);
   const [selectedBrief, setSelectedBrief] = useState<BriefResponse>();
@@ -56,9 +70,11 @@ export default function Home() {
       try {
         const result = await listIssueBriefs(getToken, signal);
         setBriefs(result);
+        setBriefsError(undefined);
         setSelectedId((current) => current ?? result[0]?.id);
       } catch (caught) {
         if (isAbortError(caught)) return;
+        setBriefsError(briefListErrorMessage(caught));
       } finally {
         if (!signal?.aborted) setBriefsLoading(false);
       }
@@ -153,6 +169,12 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function retryBriefs() {
+    setBriefsError(undefined);
+    setBriefsLoading(true);
+    void loadBriefs();
   }
 
   async function selectCreatedBrief(id: number) {
@@ -367,11 +389,17 @@ export default function Home() {
           </span>
         </div>
 
-        {briefsLoading ? (
+        {briefsError && briefs.length > 0 && (
+          <BriefListError message={briefsError} onRetry={retryBriefs} />
+        )}
+
+        {briefsLoading && briefs.length === 0 ? (
           <div className="console console-cell flex min-h-40 items-center justify-center gap-3 text-sm text-muted-foreground">
             <Loader2 aria-hidden="true" className="size-5 animate-spin" />
             Loading your briefs
           </div>
+        ) : briefsError && briefs.length === 0 ? (
+          <BriefListError message={briefsError} onRetry={retryBriefs} />
         ) : briefs.length === 0 ? (
           <div className="console console-cell min-h-32">
             <p className="text-sm text-muted-foreground">
@@ -396,6 +424,33 @@ export default function Home() {
           </div>
         )}
       </section>
+    </div>
+  );
+}
+
+function BriefListError({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="console console-cell flex min-h-32 flex-col items-start justify-center gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <div role="alert" className="flex items-start gap-3">
+        <AlertTriangle
+          aria-hidden="true"
+          className="mt-0.5 size-5 shrink-0 text-destructive"
+        />
+        <div className="flex flex-col gap-1">
+          <p className="text-sm font-medium">Your briefs are unavailable</p>
+          <p className="max-w-2xl text-sm text-muted-foreground">{message}</p>
+        </div>
+      </div>
+      <Button onClick={onRetry} className="button-ghost shrink-0">
+        <RefreshCw aria-hidden="true" className="size-4" />
+        Retry
+      </Button>
     </div>
   );
 }
