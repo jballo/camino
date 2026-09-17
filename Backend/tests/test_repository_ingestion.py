@@ -858,7 +858,7 @@ async def test_permanent_failure_cleans_staged_generation():
     session.rollback.assert_called_once_with()
 
 
-async def test_transient_failure_does_not_clean_staged_generation():
+async def test_transient_failure_cleans_staged_generation():
     session = MagicMock()
     github_patch, _ = _github(_repository_installation())
     response = _StreamingResponse(
@@ -892,10 +892,13 @@ async def test_transient_failure_does_not_clean_staged_generation():
         )
 
     assert embed.await_count == 2
-    assert session.commit.call_count == 2
+    assert session.commit.call_count == 3
     executed_sql = [" ".join(str(call.args[0]).split()) for call in session.execute.call_args_list]
     assert not any("INSERT INTO repo_index_state" in sql for sql in executed_sql)
-    assert not any("generation = :generation" in sql for sql in executed_sql)
+    failed_cleanup_call = session.execute.call_args_list[-1]
+    assert "generation = :generation" in str(failed_cleanup_call.args[0])
+    chunk_models = session.add_all.call_args_list[0].args[0]
+    assert failed_cleanup_call.args[1]["generation"] == chunk_models[0].generation
     session.rollback.assert_called_once_with()
 
 

@@ -590,12 +590,9 @@ async def ingest_repository(
             time.monotonic() - started,
         )
         return result
-    except RepositoryIngestionError as error:
+    except RepositoryIngestionError:
         session.rollback()
-        if generation is not None and not isinstance(
-            error,
-            TransientRepositoryIngestionError,
-        ):
+        if generation is not None:
             _cleanup_failed_generation(
                 session,
                 repo_name=repo_name,
@@ -605,6 +602,13 @@ async def ingest_repository(
         raise
     except RequestException as error:
         session.rollback()
+        if generation is not None:
+            _cleanup_failed_generation(
+                session,
+                repo_name=repo_name,
+                ref=ref,
+                generation=generation,
+            )
         logger.warning(
             "transient ingest failure | phase=%s repo=%r error_type=%s",
             phase,
@@ -616,6 +620,13 @@ async def ingest_repository(
         ) from error
     except (tarfile.TarError, EmbeddingError, exc.OperationalError) as error:
         session.rollback()
+        if generation is not None:
+            _cleanup_failed_generation(
+                session,
+                repo_name=repo_name,
+                ref=ref,
+                generation=generation,
+            )
         logger.warning(
             "transient ingest failure | phase=%s repo=%r error=%s",
             phase,
@@ -625,10 +636,6 @@ async def ingest_repository(
         raise TransientRepositoryIngestionError(str(error)) from error
     except GithubException as error:
         session.rollback()
-        status = getattr(error, "status", None)
-        message = f"GitHub request failed with status {status}"
-        if status in _RETRYABLE_GH_STATUS:
-            raise TransientRepositoryIngestionError(message) from error
         if generation is not None:
             _cleanup_failed_generation(
                 session,
@@ -636,6 +643,10 @@ async def ingest_repository(
                 ref=ref,
                 generation=generation,
             )
+        status = getattr(error, "status", None)
+        message = f"GitHub request failed with status {status}"
+        if status in _RETRYABLE_GH_STATUS:
+            raise TransientRepositoryIngestionError(message) from error
         raise PermanentRepositoryIngestionError(message) from error
     except exc.IntegrityError as error:
         session.rollback()
@@ -651,6 +662,13 @@ async def ingest_repository(
         ) from error
     except exc.SQLAlchemyError as error:
         session.rollback()
+        if generation is not None:
+            _cleanup_failed_generation(
+                session,
+                repo_name=repo_name,
+                ref=ref,
+                generation=generation,
+            )
         raise TransientRepositoryIngestionError(
             "Database error during ingestion"
         ) from error
