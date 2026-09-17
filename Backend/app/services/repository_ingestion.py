@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 import logging
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 import tarfile
 import tempfile
@@ -35,6 +35,7 @@ from app.services.parser import (
     SKIP_DIRS,
     CodeChunk,
     parse_file,
+    source_skip_reason,
 )
 from app.services.search_index import populate_search_vector_sql
 
@@ -43,6 +44,15 @@ logger = logging.getLogger(__name__)
 _RETRYABLE_GH_STATUS = {408, 429, 500, 502, 503, 504}
 _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 _DOWNLOAD_TIMEOUT_SECONDS = (10, 120)
+_MAX_SKIPPED_FILES_RECORDED = 20
+_CHUNK_TEXT_FIELDS = (
+    "file_path",
+    "symbol_name",
+    "signature",
+    "docstring",
+    "parent_class",
+    "source_code",
+)
 
 _CLEANUP_STAGED_SQL = text("""
     DELETE FROM code_chunks AS c
@@ -55,6 +65,13 @@ _CLEANUP_STAGED_SQL = text("""
             AND s.ref = c.ref
             AND s.active_generation = c.generation
       )
+""")
+
+_CLEANUP_FAILED_GENERATION_SQL = text("""
+    DELETE FROM code_chunks
+    WHERE repo_name = :repo_name
+      AND ref = :ref
+      AND generation = :generation
 """)
 
 _PUBLISH_GENERATION_SQL = text("""
@@ -104,6 +121,8 @@ class _RepositoryWalkStats:
     files_seen: int
     files_parsed: int
     dirs_walked: int
+    files_skipped: int = 0
+    skipped_files: list[tuple[str, str]] = field(default_factory=list)
 
 
 def _download_tarball(
@@ -209,6 +228,17 @@ def _iter_file_chunks(
                 continue
 
             relative_path = full_path.relative_to(root).as_posix()
+            skip_reason = source_skip_reason(source_bytes)
+            if skip_reason is not None:
+                walk_stats.files_skipped += 1
+                if len(walk_stats.skipped_files) < _MAX_SKIPPED_FILES_RECORDED:
+                    walk_stats.skipped_files.append((relative_path, skip_reason))
+                logger.warning(
+                    "ingest skip file | path=%s reason=%s",
+                    relative_path,
+                    skip_reason,
+                )
+                continue
             chunks = parse_file(relative_path, source_bytes)
             walk_stats.files_parsed += 1
             yield chunks
@@ -262,6 +292,77 @@ def _prepare_repository(
     return repo_root, commit_sha, visibility
 
 
+def _drop_nul_chunks(
+    chunks: list[CodeChunk],
+    *,
+    repo_name: str,
+) -> list[CodeChunk]:
+    safe_chunks: list[CodeChunk] = []
+    for chunk in chunks:
+        nul_fields = [
+            field_name
+            for field_name in _CHUNK_TEXT_FIELDS
+            if "\x00" in (getattr(chunk, field_name) or "")
+        ]
+        if not nul_fields:
+            safe_chunks.append(chunk)
+            continue
+        for field_name in nul_fields:
+            logger.warning(
+                "ingest drop chunk | repo=%r file=%s field=%s reason=NUL byte",
+                repo_name,
+                chunk.file_path,
+                field_name,
+            )
+    return safe_chunks
+
+
+def _cleanup_failed_generation(
+    session: Session,
+    *,
+    repo_name: str,
+    ref: str,
+    generation: str,
+) -> None:
+    try:
+        result = session.execute(
+            _CLEANUP_FAILED_GENERATION_SQL,
+            {
+                "repo_name": repo_name,
+                "ref": ref,
+                "generation": generation,
+            },
+        )
+        session.commit()
+        logger.info(
+            "ingest failed generation cleaned | repo=%r ref=%r generation=%s rows=%s",
+            repo_name,
+            ref,
+            generation,
+            getattr(result, "rowcount", None),
+        )
+    except Exception as error:
+        logger.warning(
+            "ingest failed generation cleanup failed | repo=%r ref=%r "
+            "generation=%s error=%s",
+            repo_name,
+            ref,
+            generation,
+            error,
+        )
+        try:
+            session.rollback()
+        except Exception:
+            logger.warning(
+                "ingest failed generation cleanup rollback failed | "
+                "repo=%r ref=%r generation=%s",
+                repo_name,
+                ref,
+                generation,
+                exc_info=True,
+            )
+
+
 async def _persist_wave(
     session: Session,
     chunks: list[CodeChunk],
@@ -272,6 +373,9 @@ async def _persist_wave(
     ensure_owned: Callable[[Session], None] | None = None,
 ) -> int:
     """Embed and commit one bounded wave, returning its row count."""
+    chunks = _drop_nul_chunks(chunks, repo_name=repo_name)
+    if not chunks:
+        return 0
     vectors = await embed_all([build_embedding_text(chunk) for chunk in chunks])
     if ensure_owned is not None:
         ensure_owned(session)
@@ -284,8 +388,14 @@ async def _persist_wave(
         )
         for chunk in chunks
     ]
-    session.add_all(chunk_models)
-    session.flush()
+    try:
+        session.add_all(chunk_models)
+        session.flush()
+    except ValueError as error:
+        files = sorted({chunk.file_path for chunk in chunks})[:5]
+        raise PermanentRepositoryIngestionError(
+            f"Chunk text is incompatible with the database (files: {files})"
+        ) from error
     session.add_all(
         [
             CodeChunkEmbedding(
@@ -316,13 +426,14 @@ async def ingest_repository(
     repo_name = normalize_repository_name(repo_name)
     phase = "init"
     stats = _RepositoryWalkStats(0, 0, 0)
-    generation = uuid4().hex
+    generation: str | None = None
     chunks_inserted = 0
     embeddings_created = 0
     wave_number = 0
     started = time.monotonic()
 
     try:
+        generation = uuid4().hex
         logger.info(
             "ingest start | repo=%r ref=%r installation=%s generation=%s",
             repo_name,
@@ -426,10 +537,12 @@ async def ingest_repository(
 
         logger.info(
             "ingest walk complete | repo=%r files_seen=%d files_parsed=%d "
-            "dirs_walked=%d chunks=%d commit_sha=%s elapsed=%.2fs",
+            "files_skipped=%d dirs_walked=%d chunks=%d commit_sha=%s "
+            "elapsed=%.2fs",
             repo_name,
             stats.files_seen,
             stats.files_parsed,
+            stats.files_skipped,
             stats.dirs_walked,
             chunks_inserted,
             commit_sha,
@@ -451,6 +564,7 @@ async def ingest_repository(
         result = {
             "chunks_inserted": chunks_inserted,
             "embeddings_created": embeddings_created,
+            "files_skipped": stats.files_skipped,
         }
         phase = "swap"
         if ensure_owned is not None:
@@ -476,8 +590,18 @@ async def ingest_repository(
             time.monotonic() - started,
         )
         return result
-    except RepositoryIngestionError:
+    except RepositoryIngestionError as error:
         session.rollback()
+        if generation is not None and not isinstance(
+            error,
+            TransientRepositoryIngestionError,
+        ):
+            _cleanup_failed_generation(
+                session,
+                repo_name=repo_name,
+                ref=ref,
+                generation=generation,
+            )
         raise
     except RequestException as error:
         session.rollback()
@@ -505,9 +629,23 @@ async def ingest_repository(
         message = f"GitHub request failed with status {status}"
         if status in _RETRYABLE_GH_STATUS:
             raise TransientRepositoryIngestionError(message) from error
+        if generation is not None:
+            _cleanup_failed_generation(
+                session,
+                repo_name=repo_name,
+                ref=ref,
+                generation=generation,
+            )
         raise PermanentRepositoryIngestionError(message) from error
     except exc.IntegrityError as error:
         session.rollback()
+        if generation is not None:
+            _cleanup_failed_generation(
+                session,
+                repo_name=repo_name,
+                ref=ref,
+                generation=generation,
+            )
         raise PermanentRepositoryIngestionError(
             "Database integrity error during ingestion"
         ) from error
@@ -518,6 +656,13 @@ async def ingest_repository(
         ) from error
     except Exception as error:
         session.rollback()
+        if generation is not None:
+            _cleanup_failed_generation(
+                session,
+                repo_name=repo_name,
+                ref=ref,
+                generation=generation,
+            )
         logger.exception(
             "unexpected ingest failure | phase=%s repo=%r files_seen=%d "
             "elapsed=%.2fs",
@@ -527,5 +672,5 @@ async def ingest_repository(
             time.monotonic() - started,
         )
         raise PermanentRepositoryIngestionError(
-            "Internal ingestion error"
+            f"Internal ingestion error (phase={phase})"
         ) from error
