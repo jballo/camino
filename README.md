@@ -292,6 +292,10 @@ cancellation, and error behavior, plus contribution-target and issue-brief clien
 
 ## AWS deployment plan
 
+> **Database decision (2026-09-17):** the storage capacity ceiling, the halfvec
+> embedding shrink, and the move to RDS `db.t4g.micro` are planned in
+> [docs/storage-capacity-plan.md](docs/storage-capacity-plan.md).
+
 **Decision:** provision Camino's AWS infrastructure with **AWS CDK in TypeScript**.
 Keep the infrastructure in an `Infrastructure/` CDK app with two independently
 deployable stacks:
