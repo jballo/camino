@@ -4,7 +4,10 @@
 
 The t4g.small load test ([t4g-loadtest.md](t4g-loadtest.md)) settled compute: RAM is
 flat at ~290 MiB/worker and the box is CPU-bound. The binding capacity constraint is
-elsewhere — **database storage** — and this doc records the plan to lift it.
+elsewhere — **database storage** — and this doc records the plan to lift it. (The
+conditions under which the RAM verdict *would* expire — in-worker concurrency, wave
+size, local model weights — are listed in t4g-loadtest.md § "When the RAM verdict
+expires".)
 
 ## Problem
 

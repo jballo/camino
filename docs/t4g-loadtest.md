@@ -65,6 +65,32 @@ Launch on t4g.small with `--scale worker=3` and `WORKER_MEM=490m`
 ~800 MiB real headroom). Revisit only if job volume grows past what a 15-min full-queue
 drain supports — and then via in-worker concurrency first (finding 2).
 
+## When the RAM verdict expires
+
+The ~290 MiB/worker peak is baseline (Python + libraries) plus a bounded working set
+(one 256-chunk wave, one file being parsed). Repo size never enters it — the streaming
+design guarantees that permanently. Per-worker RAM grows only if we change the design.
+Deliberate changes that would require rerunning this test:
+
+1. **In-process job concurrency** (finding 2's throughput fix): a worker running N
+   jobs holds N wave buffers, N parse states, N in-flight API payloads. Per-worker RAM
+   scales with in-process concurrency — the current 1-job-per-process design is why it
+   doesn't. Rerun the matrix before shipping this.
+2. **Raising `INGEST_WAVE_CHUNKS`**: the direct memory knob. 256 is why RAM stays
+   flat; bigger waves hold proportionally more chunks + embedding responses per commit.
+3. **Local model weights in the worker** (e.g. the exp6 BGE reranker from
+   `Backend/eval/EXPERIMENTS.md`): hundreds of MB resident per process, multiplied by
+   worker count. This alone would reshape the t4g.small budget.
+
+Changes that could sneak up on us:
+
+4. **Raising the max-file-size guard**: chunks append per-file *before* the wave-size
+   check, and tree-sitter holds the file's source + AST while parsing — so peak RAM
+   tracks the largest single file, not the repo.
+5. **New job stages holding more state**: briefs/tours run in the same workers. A
+   future stage that assembles many retrieved chunks into one large context grows the
+   per-job working set in a way ingestion never did.
+
 ## Gotchas for whoever reruns this
 
 - `psycopg2` cannot build in slim uv images (no `pg_config`); the project now depends on
