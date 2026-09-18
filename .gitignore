@@ -49,3 +49,6 @@ __pycache__
 # vscode
 .vscode
 
+# t4g load-test output
+/loadtest-results/
+
