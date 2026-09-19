@@ -1,0 +1,48 @@
+# t4g.small dress rehearsal: run api + workers under the instance's limits
+# (2 vCPU / 2 GB / no swap) against the real Neon database.
+#
+#   export DATABASE_URL="postgresql://...neon.tech/...?sslmode=require"
+#   docker compose -f docker-compose.yml -f docker-compose.t4g.yml \
+#     --profile worker up --scale worker=2
+#
+# memswap_limit equals mem_limit because the box has no swap: breaching RAM
+# must OOM-kill here the same way it would there. The local db container still
+# starts (worker depends on it) but nothing connects to it during the test.
+#
+# Knobs, defaulting to the planned launch config (api + 2 workers <= 2 GB):
+#   WORKER_CPUS=0.4   burst credits exhausted, sustained t4g baseline
+#   WORKER_MEM=490m   fit a 3-worker run inside the 2 GB budget
+services:
+  api:
+    image: ghcr.io/astral-sh/uv:python3.14-bookworm-slim
+    working_dir: /app
+    command: ["uv", "run", "--frozen", "fastapi", "run", "app/main.py", "--port", "8000"]
+    init: true
+    restart: always
+    ports:
+      # host 8001: 8000 is often taken by the local dev server, and probing
+      # the wrong one would silently invalidate the latency numbers
+      - "8001:8000"
+    env_file:
+      - ./Backend/.env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?export your Neon connection string first}
+      RUN_WORKER: "false"
+      UV_PROJECT_ENVIRONMENT: /opt/venv
+    volumes:
+      - ./Backend:/app:ro
+      - api-venv:/opt/venv
+      - uv-cache:/root/.cache/uv
+    mem_limit: ${API_MEM:-512m}
+    memswap_limit: ${API_MEM:-512m}
+    cpus: ${API_CPUS:-0.5}
+
+  worker:
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?export your Neon connection string first}
+    mem_limit: ${WORKER_MEM:-640m}
+    memswap_limit: ${WORKER_MEM:-640m}
+    cpus: ${WORKER_CPUS:-0.75}
+
+volumes:
+  api-venv:
