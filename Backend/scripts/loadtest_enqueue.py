@@ -95,18 +95,24 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # Resolve every ref before enqueueing anything: enqueue_job commits per
+    # job, so failing mid-loop would leave committed jobs missing from JOB_IDS.
+    targets: list[tuple[str, str]] = []
+    for spec in args.repos:
+        repo_name, _, ref = spec.partition("@")
+        if not ref:
+            ref = resolve_target_branch(repo_name, args.installation_id).branch
+            if not ref:
+                print(f"could not resolve ref for {repo_name}", file=sys.stderr)
+                return 1
+        targets.append((repo_name, ref))
+
     job_ids: list[int] = []
     with Session(engine) as session:
         ensure_installation_connection(
             session, user_id=args.user_id, installation_id=args.installation_id
         )
-        for spec in args.repos:
-            repo_name, _, ref = spec.partition("@")
-            if not ref:
-                ref = resolve_target_branch(repo_name, args.installation_id).branch
-                if not ref:
-                    print(f"could not resolve ref for {repo_name}", file=sys.stderr)
-                    return 1
+        for repo_name, ref in targets:
             job, created = enqueue_job(
                 session,
                 user_id=args.user_id,

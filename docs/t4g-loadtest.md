@@ -268,6 +268,35 @@ CPU throttling**. Job ids starting at 1 confirm the fresh volume; the api
 re-created the schema and the enqueue script re-seeded the placeholder
 connection row automatically. The gate result is reproducible, not a lucky run.
 
+### Varied-matrix run (2026-09-22, run `20260922-125136`)
+
+A fourth run swapped the two small repos for two more mid-size ones —
+`fastapi/fastapi@master` and `pallets/flask@main` replacing tailwind-starter and
+camino — exercising both the pinned-ref path and a heavier mix (four
+substantial repos instead of two). It also validated the hardened enqueue
+script, which now resolves all refs up front before committing any job (a
+mid-loop resolution failure previously left already-enqueued jobs missing from
+the machine-readable `JOB_IDS` line).
+
+| Metric | Result |
+|---|---|
+| Jobs | 5/5 complete, peak concurrent running: 3 |
+| Total drain | **242 s** |
+| Queue waits | 0.8–57.7 s (worst: firecrawl) |
+| Job run times | 18.8–204.8 s (longest: deepeval) |
+| Aggregate RAM peak | 1608 MiB (90% of cap), zero OOM events/kills |
+| Worker RAM peaks | 286 / 314 / 296 MiB (vs 400 MiB limits) |
+| Aggregate CPU | avg 0.19 cores; 4 throttle periods, 0.1 s total |
+| API probe | 119 samples, p95 10 ms, max 26 ms, **0 failures** |
+| testdb (outside cgroup) | peaked 472 MiB / 201% CPU |
+
+The heavier mix held every gate: worker peaks stayed on the ~290 MiB invariant
+(worst 314 MiB), aggregate RAM sat at 90% with zero OOMs, and the API stayed
+sub-11 ms at p95. The worst queue wait grew from 13.9 s to 57.7 s — expected,
+not a regression: with four long jobs on three workers, the fifth job waits for
+a worker to free up, consistent with the finding that worker count drives queue
+wait. Drain (242 s vs 159 s) is not comparable across matrices.
+
 ### Remaining caveat before launch
 
 A Neon-targeted confirmation run would pin the real drain time, but the free tier
