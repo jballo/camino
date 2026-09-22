@@ -13,7 +13,10 @@ export async function GET(req: NextRequest) {
   }
 
   const state = crypto.randomBytes(32).toString("hex");
-  const ghUrl = `https://github.com/apps/camino-onboarder/installations/new?state=${state}`;
+
+  const ghAppSlug = process.env.GITHUB_APP_SLUG;
+  if (!ghAppSlug) throw new Error("GITHUB_APP_SLUG is not set");
+  const ghUrl = `https://github.com/apps/${ghAppSlug}/installations/new?state=${state}`;
 
   const response = NextResponse.redirect(ghUrl);
   response.cookies.set("gh_oauth_state", state, {

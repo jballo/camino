@@ -2,12 +2,14 @@
 
 **Date:** 2026-09-17 · **Status: proposed — phase 1 gated on the retrieval eval.**
 
-The t4g.small load test ([t4g-loadtest.md](t4g-loadtest.md)) settled compute: RAM is
-flat at ~290 MiB/worker and the box is CPU-bound. The binding capacity constraint is
-elsewhere — **database storage** — and this doc records the plan to lift it. (The
-conditions under which the RAM verdict *would* expire — in-worker concurrency, wave
-size, local model weights — are listed in t4g-loadtest.md § "When the RAM verdict
-expires".)
+The t4g.small load test ([t4g-loadtest.md](t4g-loadtest.md)) has settled compute under
+the shared CPU/memory budget: workers hold ~290 MiB, and the RAM and API-latency gates
+pass reproducibly across repeated full-ingestion runs. The one open compute caveat is
+drain time against Neon, which is bounded (159 s to the historical 15–17 min) but not
+yet measured. The binding capacity constraint is elsewhere — **database storage** is
+already demonstrated, and this doc records the plan to lift it. (Changes that would
+invalidate the per-worker RAM observation — in-worker concurrency, wave size, and local
+model weights — are listed in t4g-loadtest.md § "When the RAM verdict expires".)
 
 ## Problem
 

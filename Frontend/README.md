@@ -80,9 +80,8 @@ For the local GitHub App flow, configure:
 - Setup URL: `http://localhost:3000/api/github/setup`, with **Redirect on update**
   enabled
 
-The install route currently redirects to the `camino-onboarder` GitHub App. Use that App
-for local development or change `src/app/api/github/install/route.ts` until
-`GITHUB_APP_SLUG` is implemented.
+The install route redirects to the GitHub App named by the required `GITHUB_APP_SLUG`
+environment variable (e.g. `camino-onboarder` for local development).
 
 ### Environment variables
 
@@ -93,6 +92,7 @@ for local development or change `src/app/api/github/install/route.ts` until
 | `BACKEND_URL` | Server-side FastAPI base URL used by the GitHub OAuth callback |
 | `NEXT_PUBLIC_BACKEND_URL` | Browser-visible FastAPI base URL (default `http://127.0.0.1:8000`) |
 | `NEXT_PUBLIC_APP_URL` | Public app URL for GitHub OAuth callback (default `http://localhost:3000`) |
+| `GITHUB_APP_SLUG` | Slug of the GitHub App the install route redirects to (required) |
 
 ---
 
@@ -108,9 +108,8 @@ the Fargate backend is deployed:
 - Configure the production frontend URL in Clerk's allowed redirect/origin settings.
 - Configure GitHub App setup/callback URLs to use the production frontend routes and
   webhook URLs to use the production backend.
-- Replace the hardcoded `camino-onboarder` installation URL in
-  `src/app/api/github/install/route.ts` with a required server-side
-  `GITHUB_APP_SLUG` environment variable.
+- Set `GITHUB_APP_SLUG` to the production GitHub App's slug; the install route fails
+  fast when it is absent.
 - Make production builds fail when required URLs or credentials are absent instead of
   falling back to localhost.
 
