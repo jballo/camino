@@ -2,12 +2,12 @@
 
 **Date:** 2026-09-17 · **Status: proposed — phase 1 gated on the retrieval eval.**
 
-The t4g.small load test ([t4g-loadtest.md](t4g-loadtest.md)) settled compute: RAM is
-flat at ~290 MiB/worker and the box is CPU-bound. The binding capacity constraint is
-elsewhere — **database storage** — and this doc records the plan to lift it. (The
-conditions under which the RAM verdict *would* expire — in-worker concurrency, wave
-size, local model weights — are listed in t4g-loadtest.md § "When the RAM verdict
-expires".)
+The historical t4g.small load test ([t4g-loadtest.md](t4g-loadtest.md)) observed RAM
+flat at ~290 MiB/worker, but its compute verdict is pending a rerun under the new shared
+CPU and memory limits. Independently, **database storage** is already a demonstrated
+capacity constraint, and this doc records the plan to lift it. (Changes that would
+invalidate the per-worker RAM observation — in-worker concurrency, wave size, and local
+model weights — are listed in t4g-loadtest.md § "When the RAM verdict expires".)
 
 ## Problem
 
