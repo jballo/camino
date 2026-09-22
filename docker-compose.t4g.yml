@@ -1,18 +1,69 @@
-# t4g.small dress rehearsal: run api + workers under the instance's limits
-# (2 vCPU / 2 GB / no swap) against the real Neon database.
+# t4g.small dress rehearsal: run api + workers under one shared cgroup that
+# models the instance's 2 vCPU / 2 GiB / no-swap envelope against Neon.
 #
-#   export DATABASE_URL="postgresql://...neon.tech/...?sslmode=require"
-#   docker compose -f docker-compose.yml -f docker-compose.t4g.yml \
-#     --profile worker up --scale worker=2
+# Environment comes from Doppler — there are no .env files. Launch with:
 #
-# memswap_limit equals mem_limit because the box has no swap: breaching RAM
-# must OOM-kill here the same way it would there. The local db container still
-# starts (worker depends on it) but nothing connects to it during the test.
+#   doppler run -- docker compose -f docker-compose.yml -f docker-compose.t4g.yml \
+#     --profile worker up -d --scale worker=2
 #
-# Knobs, defaulting to the planned launch config (api + 2 workers <= 2 GB):
-#   WORKER_CPUS=0.4   burst credits exhausted, sustained t4g baseline
-#   WORKER_MEM=490m   fit a 3-worker run inside the 2 GB budget
+# Secret safety: secrets are passed through by NAME only (list entries with no
+# value take their value from the shell environment Doppler provides). No env
+# value appears in this file. Never run `docker compose config` — it prints the
+# resolved container environment; use `docker compose config --no-interpolate`
+# if you must debug the merged file.
+#
+# The parent cgroup reserves 0.2 CPU and 256 MiB for the host and Docker, leaving
+# 1.8 CPU / 1.75 GiB (1792 MiB) for the complete application stack. Per-container
+# memory limits must SUM to at most the parent cap so an aggregate OOM can never
+# be reached before some container's own limit — run_t4g_test.sh enforces this.
+# Default RAM budget (3-worker candidate config):
+#
+#   api 384 + db 192 + 3 x worker 400 = 1776 MiB <= 1792 MiB parent cap
+#
+# The unused local db still starts because the base worker depends on it, so it
+# joins the parent (capped) and makes the rehearsal conservative; the real
+# instance talks to Neon and has no local db, so workers could get ~448 MiB
+# each there. CPU may oversubscribe (it throttles rather than kills).
+#
+# Knobs:
+#   T4G_CPU_MAX="180000 100000"  shared CPU quota (quota/period)
+#   T4G_MEMORY_MAX=1879048192     shared bytes (1.75 GiB)
+#   API_MEM=384m API_CPUS=0.5     api ceilings
+#   DB_MEM=192m                   idle local postgres ceiling
+#   WORKER_CPUS=0.75              per-worker CPU ceiling
+#   WORKER_MEM=400m               per-worker RAM ceiling
 services:
+  resource_governor:
+    image: alpine:3.22
+    privileged: true
+    cgroup: host
+    cgroup_parent: /camino-t4g
+    restart: "no"
+    environment:
+      T4G_CPU_MAX: ${T4G_CPU_MAX:-180000 100000}
+      T4G_MEMORY_MAX: ${T4G_MEMORY_MAX:-1879048192}
+    volumes:
+      - /sys/fs/cgroup:/host-cgroup
+    command:
+      - /bin/sh
+      - -euc
+      - |
+        test -f /host-cgroup/cgroup.controllers || {
+          echo "t4g rehearsal requires a cgroup v2 Docker engine" >&2
+          exit 1
+        }
+        printf '%s\n' "$${T4G_CPU_MAX}" > /host-cgroup/camino-t4g/cpu.max
+        printf '%s\n' "$${T4G_MEMORY_MAX}" > /host-cgroup/camino-t4g/memory.max
+        printf '0\n' > /host-cgroup/camino-t4g/memory.swap.max
+
+  db:
+    cgroup_parent: /camino-t4g
+    mem_limit: ${DB_MEM:-192m}
+    memswap_limit: ${DB_MEM:-192m}
+    depends_on:
+      resource_governor:
+        condition: service_completed_successfully
+
   api:
     image: ghcr.io/astral-sh/uv:python3.14-bookworm-slim
     working_dir: /app
@@ -23,25 +74,44 @@ services:
       # host 8001: 8000 is often taken by the local dev server, and probing
       # the wrong one would silently invalidate the latency numbers
       - "8001:8000"
-    env_file:
-      - ./Backend/.env
     environment:
-      DATABASE_URL: ${DATABASE_URL:?export your Neon connection string first}
-      RUN_WORKER: "false"
-      UV_PROJECT_ENVIRONMENT: /opt/venv
+      # value-less entries pass through from the Doppler-provided shell env
+      - DATABASE_URL=${DATABASE_URL:?run under doppler so the Neon URL is set}
+      - RUN_WORKER=false
+      - UV_PROJECT_ENVIRONMENT=/opt/venv
+      - CLERK_WH_KEY
+      - CLERK_SECRET_KEY
+      - CLERK_JWT_KEY
+      - GH_APP_ID
+      - GH_APP_CLIENT_ID
+      - GH_APP_SECRET
+      - GH_APP_PRIVATE_KEY
+      - ENCRYPTION_KEY
+      - GH_WEBHOOK_SECRET
+      - OPENAI_API_KEY
+      - AGENT_MODEL
+      - CORS_ORIGINS
     volumes:
       - ./Backend:/app:ro
       - api-venv:/opt/venv
       - uv-cache:/root/.cache/uv
-    mem_limit: ${API_MEM:-512m}
-    memswap_limit: ${API_MEM:-512m}
+    cgroup_parent: /camino-t4g
+    depends_on:
+      resource_governor:
+        condition: service_completed_successfully
+    mem_limit: ${API_MEM:-384m}
+    memswap_limit: ${API_MEM:-384m}
     cpus: ${API_CPUS:-0.5}
 
   worker:
+    depends_on:
+      resource_governor:
+        condition: service_completed_successfully
     environment:
-      DATABASE_URL: ${DATABASE_URL:?export your Neon connection string first}
-    mem_limit: ${WORKER_MEM:-640m}
-    memswap_limit: ${WORKER_MEM:-640m}
+      DATABASE_URL: ${DATABASE_URL:?run under doppler so the Neon URL is set}
+    cgroup_parent: /camino-t4g
+    mem_limit: ${WORKER_MEM:-400m}
+    memswap_limit: ${WORKER_MEM:-400m}
     cpus: ${WORKER_CPUS:-0.75}
 
 volumes:

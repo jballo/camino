@@ -1,8 +1,9 @@
 """Watch load-test jobs until they all finish, then print a timing summary.
 
-Run from ``Backend/`` (Settings loads .env for the database URL):
+Run from ``Backend/`` under Doppler so the database URL is in the environment
+(there are no .env files):
 
-    uv run python -m scripts.loadtest_watch 12 13 14 15 16
+    doppler run -- uv run python -m scripts.loadtest_watch 12 13 14 15 16
 
 Polls the jobs table directly, logs every status transition as it happens,
 and reports per-job queue-wait and run duration plus the peak number of

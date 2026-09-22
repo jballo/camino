@@ -1,9 +1,10 @@
 """Enqueue repository-ingest jobs directly, bypassing the API.
 
 Load-test helper: creates the same rows ``POST /repositories/ingest`` would,
-without needing a Clerk session. Run from ``Backend/`` so Settings finds .env:
+without needing a Clerk session. Run from ``Backend/`` under Doppler so
+Settings finds the environment (there are no .env files):
 
-    uv run python -m scripts.loadtest_enqueue \
+    doppler run -- uv run python -m scripts.loadtest_enqueue \
         --user-id user_xxx --installation-id 12345 \
         --repo owner/name --repo owner/other@main
 
@@ -15,14 +16,65 @@ The last line of output is machine-readable: ``JOB_IDS=<id> <id> ...``.
 """
 
 import argparse
+import datetime as dt
 import sys
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.db import engine
+from app.models.github_connection import GithubConnections
 from app.models.job import JobType
 from app.services.jobs import enqueue_job, repository_ingest_dedupe_key
 from app.services.target_branch import resolve_target_branch
+
+
+def ensure_installation_connection(
+    session: Session, *, user_id: str, installation_id: int
+) -> None:
+    """Seed the githubconnections row the worker's ownership guard requires.
+
+    Workers refuse to commit ingestion for an installation with no
+    ``githubconnections`` row (``worker._ensure_ingestion_owned``) — they
+    abandon the job as cancelled while it still reads ``running``. Production
+    rows come from the GitHub-app connect flow; a throwaway load-test database
+    has none, so seed a placeholder. Ingestion mints installation tokens from
+    the app credentials and never reads this row's token fields.
+    """
+    if session.exec(
+        select(GithubConnections).where(
+            GithubConnections.installationId == installation_id
+        )
+    ).first():
+        return
+    conflict = session.exec(
+        select(GithubConnections).where(GithubConnections.userId == user_id)
+    ).first()
+    if conflict:
+        print(
+            f"user {user_id} is connected to installation "
+            f"{conflict.installationId}, not {installation_id}; workers would "
+            "abandon these jobs — fix --installation-id",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    now = dt.datetime.now(dt.UTC)
+    session.add(
+        GithubConnections(
+            userId=user_id,
+            githubUsername="loadtest-placeholder",
+            githubUserId=0,
+            installationId=installation_id,
+            encryptedAccessToken="loadtest-placeholder",
+            encryptedRefreshToken="loadtest-placeholder",
+            tokenExpiresAt=now + dt.timedelta(days=1),
+            refreshTokenExpiresAt=now + dt.timedelta(days=1),
+        )
+    )
+    session.commit()
+    print(
+        f"seeded placeholder githubconnections row for installation "
+        f"{installation_id}"
+    )
 
 
 def main() -> int:
@@ -45,6 +97,9 @@ def main() -> int:
 
     job_ids: list[int] = []
     with Session(engine) as session:
+        ensure_installation_connection(
+            session, user_id=args.user_id, installation_id=args.installation_id
+        )
         for spec in args.repos:
             repo_name, _, ref = spec.partition("@")
             if not ref:

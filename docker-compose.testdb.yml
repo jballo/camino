@@ -1,0 +1,54 @@
+# Local throwaway test database for load tests. Keeps full-ingestion runs off
+# Neon (0.5 GB free-tier cap, ~450 MB already used) and makes cleanup a
+# one-line truncate or a volume delete. Add this file as a THIRD -f overlay:
+#
+#   doppler run -- docker compose -f docker-compose.yml -f docker-compose.t4g.yml \
+#     -f docker-compose.testdb.yml --profile worker up -d --scale worker=3
+#
+# then run the test with the matching flag:
+#
+#   doppler run -- ./run_t4g_test.sh --local-db --workers 3 ...
+#
+# Deliberately OUTSIDE the /camino-t4g cgroup: on the real instance the
+# database is Neon — external, consuming none of the box's CPU/RAM — so the
+# test db must not eat the rehearsal budget either. Its absence of a memory
+# limit is intentional for the same reason (run_t4g_test.sh skips it in the
+# budget preflight).
+#
+# The api creates the schema on first boot (pgvector extension, tables, HNSW/
+# GIN indexes), so a fresh volume needs no manual setup. The credentials below
+# are local-only throwaways, not secrets.
+#
+# Cleanup between runs (host port 5433):
+#   psql postgresql://loadtest:loadtest@localhost:5433/loadtest \
+#     -c 'TRUNCATE jobs, code_chunks, code_chunk_embeddings, repo_index_state'
+# Full reset (next boot re-creates the schema):
+#   docker compose ... down testdb && docker volume rm camino_testdb-data
+services:
+  testdb:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5433:5432"  # host access for loadtest_enqueue/watch and psql cleanup
+    environment:
+      POSTGRES_USER: loadtest
+      POSTGRES_PASSWORD: loadtest
+      POSTGRES_DB: loadtest
+    volumes:
+      - testdb-data:/var/lib/postgresql/data
+
+  api:
+    environment:
+      - DATABASE_URL=postgresql://loadtest:loadtest@testdb:5432/loadtest
+    depends_on:
+      testdb:
+        condition: service_started
+
+  worker:
+    environment:
+      DATABASE_URL: postgresql://loadtest:loadtest@testdb:5432/loadtest
+    depends_on:
+      testdb:
+        condition: service_started
+
+volumes:
+  testdb-data:
