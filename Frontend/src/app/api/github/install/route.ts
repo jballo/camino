@@ -13,7 +13,11 @@ export async function GET(req: NextRequest) {
   }
 
   const state = crypto.randomBytes(32).toString("hex");
-  const ghUrl = `https://github.com/apps/camino-onboarder/installations/new?state=${state}`;
+
+  
+  const ghAppName = process.env.GH_APP_NAME;
+  if (!ghAppName) throw new Error("GH_APP_NAME is not set");
+  const ghUrl = `https://github.com/apps/${ghAppName}/installations/new?state=${state}`;
 
   const response = NextResponse.redirect(ghUrl);
   response.cookies.set("gh_oauth_state", state, {
