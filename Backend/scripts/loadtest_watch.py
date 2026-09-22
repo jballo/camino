@@ -55,14 +55,22 @@ def main() -> int:
                 last_status[job_id] = status
         running = sum(1 for j in jobs if j.status == JobStatus.RUNNING)
         peak_running = max(peak_running, running)
-        if jobs and all(j.status in TERMINAL for j in jobs):
+        # a job deleted mid-watch (e.g. a between-run TRUNCATE) counts as
+        # terminal, or the watcher would poll forever waiting for it
+        if all(
+            job_id not in by_id or by_id[job_id].status in TERMINAL
+            for job_id in args.job_ids
+        ):
             break
         time.sleep(args.interval)
 
     print(f"\npeak concurrent running: {peak_running}")
     print(f"{'job':>5} {'status':<10} {'queue wait':>10} {'run time':>10}  repo")
     for job_id in args.job_ids:
-        job = by_id[job_id]
+        job = by_id.get(job_id)
+        if job is None:
+            print(f"{job_id:>5} {'missing':<10} {_fmt(None)} {_fmt(None)}")
+            continue
         claimed_at = job.claimed_at or claimed.get(job_id)
         wait = (
             (claimed_at - job.createdAt).total_seconds() if claimed_at else None
