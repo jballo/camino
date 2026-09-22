@@ -236,8 +236,9 @@ at `http://127.0.0.1:3000` or another origin, add that exact value to the backen
   profiles from the first two and runs account cleanup on the third)
 
 Clerk and GitHub cannot reach localhost webhooks directly; use a tunnel such as ngrok
-or Cloudflare Tunnel when testing deletion flows locally. The install route currently
-targets the `camino-onboarder` GitHub App slug until `GITHUB_APP_SLUG` is configurable.
+or Cloudflare Tunnel when testing deletion flows locally. The install route targets the
+GitHub App slug configured via the required `GITHUB_APP_SLUG` environment variable
+(e.g. `camino-onboarder`).
 
 Startup creates missing tables and provisions pgvector, custom indexes, and the
 `live_code_chunks` view, but it does not migrate an older schema. A database created

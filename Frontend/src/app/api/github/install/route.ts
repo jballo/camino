@@ -14,10 +14,9 @@ export async function GET(req: NextRequest) {
 
   const state = crypto.randomBytes(32).toString("hex");
 
-  
-  const ghAppName = process.env.GH_APP_NAME;
-  if (!ghAppName) throw new Error("GH_APP_NAME is not set");
-  const ghUrl = `https://github.com/apps/${ghAppName}/installations/new?state=${state}`;
+  const ghAppSlug = process.env.GITHUB_APP_SLUG;
+  if (!ghAppSlug) throw new Error("GITHUB_APP_SLUG is not set");
+  const ghUrl = `https://github.com/apps/${ghAppSlug}/installations/new?state=${state}`;
 
   const response = NextResponse.redirect(ghUrl);
   response.cookies.set("gh_oauth_state", state, {
