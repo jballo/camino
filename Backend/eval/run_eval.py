@@ -30,7 +30,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -127,7 +126,9 @@ def _resolve_relevant_ids(
           AND  ref = :ref
     """)
     rows = session.execute(sql, {"repo_name": repo_name, "ref": ref}).all()
-    out: dict[tuple[str, str], list[int]] = defaultdict(list)
+    # Keep absent labels in the mapping so the preflight can distinguish a
+    # complete fixture from one that was only partially ingested.
+    out: dict[tuple[str, str], list[int]] = {key: [] for key in wanted}
     for r in rows:
         key = (r.file_path, r.symbol_name)
         if key in wanted:
@@ -140,9 +141,21 @@ def _require_indexed_labels(
     repo_name: str,
     ref: str,
 ) -> None:
-    """Abort before embedding queries when the requested fixture is absent."""
-    if any(relevant_ids.values()):
+    """Abort before embedding queries unless every golden label is indexed."""
+    missing = sorted(key for key, chunk_ids in relevant_ids.items() if not chunk_ids)
+    if relevant_ids and not missing:
         return
+
+    if missing and len(missing) < len(relevant_ids):
+        preview = ", ".join(f"{file}:{symbol}" for file, symbol in missing[:5])
+        if len(missing) > 5:
+            preview += f", ... (+{len(missing) - 5} more)"
+        raise SystemExit(
+            f"error: {len(missing)} of {len(relevant_ids)} golden-dataset labels "
+            f"are absent from the live index for repo={repo_name!r} ref={ref!r}: "
+            f"{preview}; verify the local testdb fixture before running the eval"
+        )
+
     raise SystemExit(
         f"error: no golden-dataset labels exist in the live index for "
         f"repo={repo_name!r} ref={ref!r}; verify the local testdb fixture "
