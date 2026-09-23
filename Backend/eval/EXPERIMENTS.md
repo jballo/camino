@@ -50,16 +50,19 @@ uv run python -m eval.run_eval --mode ablation
 **Local run artifacts:** `eval/runs/*.json` (gitignored).
 
 **Storage decision (exp7):** V2 (`halfvec(1536)`, no ANN index) selected. Quality
-matches V0, extrapolated 30k-chunk p95 is ~21–32 ms, and footprint falls 553→140 MB.
-Production defaults remain unchanged until the separate cutover.
+matches V0, measured p95 is 16.09 ms at 11,742 chunks (`EXP 8-C`, ~15× under the
+250 ms gate — supersedes the earlier ~21–32 ms extrapolation), and footprint
+falls 553→140 MB. Production defaults remain unchanged until the separate cutover.
 
-**Dimension follow-up (exp8-A):** the full sweep confirms that the hybrid 512
-gain is a fusion effect, not preserved vector quality. Vector-only MRR falls
-0.096 vs 1536 (95% CI −0.192 to −0.017), far beyond the 0.001 hybrid jitter
-floor. No dimension migration is approved. Stage B's two pinned golden sets
-(18 Deepeval + 20 Firecrawl questions) are user-approved; tagged ingests,
-parser-label validation, and the run matrix are next. Full execution handoff:
-`docs/design/exp8-dim-confirmation-plan.md` → “Continue here.”
+**Dimension follow-up (exp8, COMPLETE):** all stages done; final answer is
+`halfvec(1536)`. Stage A's full sweep showed the hybrid 512 gain is a fusion
+effect, not preserved vector quality: vector-only MRR falls 0.096 vs 1536
+(95% CI −0.192 to −0.017), far beyond the 0.001 hybrid jitter floor. Stage B's
+broader sets (18 Deepeval + 20 Firecrawl questions) confirmed it — every 512
+gate failed (`EXP 8-B`), so no dimension migration is approved, Stage D does
+not run, and exp9 (512 migration) is not opened. Stage C (`EXP 8-C`) closed
+the V2 latency extrapolation caveat with direct measurement. Details:
+`docs/design/exp8-dim-confirmation-plan.md` (status: complete).
 
 ---
 
