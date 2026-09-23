@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from sqlalchemy import text
 from sqlmodel import Session
 
-from app.services.embeddings import EMBED_MODEL, embed_batch
+from app.config import settings
+from app.services.embeddings import EMBED_DIMENSIONS, EMBED_MODEL, embed_batch
 from app.services.jobs import normalize_repository_name
 from app.services.rerank import DEFAULT_RERANK_RRF_WEIGHT, DEFAULT_RERANK_TOP_N
 
@@ -74,6 +75,44 @@ def _get_active_generation(
     ).scalar_one_or_none()
 
 
+def _vector_search_sql(
+    *,
+    filter_demo_paths: bool = DEFAULT_FILTER_DEMO_PATHS,
+    vector_dims: int | None = None,
+) -> str:
+    """Build the production vector query for the configured pgvector type."""
+    if vector_dims is not None and not 1 <= vector_dims <= EMBED_DIMENSIONS:
+        raise ValueError(
+            f"vector_dims must be between 1 and {EMBED_DIMENSIONS}, "
+            f"got {vector_dims}"
+        )
+    path_filter = _demo_path_exclusion_sql("c") if filter_demo_paths else ""
+    cast_embedding = (
+        f"CAST(:embedding AS {settings.vector_type}({EMBED_DIMENSIONS}))"
+    )
+    distance = f"e.embedding <=> {cast_embedding}"
+    if vector_dims is not None:
+        distance = (
+            "subvector(e.embedding, 1, :vector_dims) <=> "
+            f"subvector({cast_embedding}, 1, :vector_dims)"
+        )
+    return f"""
+        SELECT e.chunk_id,
+               ROW_NUMBER() OVER (
+                   ORDER BY {distance}, e.chunk_id
+               ) AS rank
+        FROM   code_chunk_embeddings e
+        JOIN   code_chunks c ON c.id = e.chunk_id
+        WHERE  c.repo_name = :repo_name
+          AND  c.ref = :ref
+          AND  c.generation = :generation
+          AND  e.model_name = :model_name
+          {path_filter}
+        ORDER  BY {distance}, e.chunk_id
+        LIMIT  :top_n
+    """
+
+
 def _vector_search(
     session: Session,
     query_embedding: list[float],
@@ -84,35 +123,26 @@ def _vector_search(
     *,
     generation: str,
     filter_demo_paths: bool = DEFAULT_FILTER_DEMO_PATHS,
+    vector_dims: int | None = None,
 ) -> list[tuple[int, int]]:
     """Returns list of (chunk_id, rank) ordered by cosine similarity."""
-    path_filter = _demo_path_exclusion_sql("c") if filter_demo_paths else ""
-    sql = text(f"""
-        SELECT e.chunk_id,
-               ROW_NUMBER() OVER (
-                   ORDER BY e.embedding <=> CAST(:embedding AS vector), e.chunk_id
-               ) AS rank
-        FROM   code_chunk_embeddings e
-        JOIN   code_chunks c ON c.id = e.chunk_id
-        WHERE  c.repo_name = :repo_name
-          AND  c.ref = :ref
-          AND  c.generation = :generation
-          AND  e.model_name = :model_name
-          {path_filter}
-        ORDER  BY e.embedding <=> CAST(:embedding AS vector), e.chunk_id
-        LIMIT  :top_n
-    """)
-    rows = session.execute(
-        sql,
-        {
-            "embedding": str(query_embedding),
-            "repo_name": repo_name,
-            "ref": ref,
-            "generation": generation,
-            "model_name": model_name,
-            "top_n": top_n,
-        },
-    ).all()
+    sql = text(
+        _vector_search_sql(
+            filter_demo_paths=filter_demo_paths,
+            vector_dims=vector_dims,
+        )
+    )
+    params = {
+        "embedding": str(query_embedding),
+        "repo_name": repo_name,
+        "ref": ref,
+        "generation": generation,
+        "model_name": model_name,
+        "top_n": top_n,
+    }
+    if vector_dims is not None:
+        params["vector_dims"] = vector_dims
+    rows = session.execute(sql, params).all()
     return [(r.chunk_id, r.rank) for r in rows]
 
 def _fts_search(
@@ -330,6 +360,7 @@ async def hybrid_search_debug(
     rerank_top_n: int = DEFAULT_RERANK_TOP_N,
     rerank_rrf_weight: float = DEFAULT_RERANK_RRF_WEIGHT,
     rerank_model: str | None = None,
+    vector_dims: int | None = None,
 ) -> tuple[list[SearchResult], RetrievalDebug]:
     """Retrieval core: hydrated results plus per-retriever diagnostics.
 
@@ -363,6 +394,7 @@ async def hybrid_search_debug(
                 top_n,
                 generation=generation,
                 filter_demo_paths=filter_demo_paths,
+                vector_dims=vector_dims,
             )
             if mode in ("hybrid", "vector")
             else []
@@ -503,9 +535,6 @@ async def hybrid_search(
         rerank_model=rerank_model,
     )
     return results
-
-
-
 
 
 

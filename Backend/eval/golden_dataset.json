@@ -1,6 +1,7 @@
 {
   "repo_name": "tiangolo/fastapi",
   "repo_version": "0.115.6",
+  "ref": "0.115.6",
   "installation_id": 999999999,
   "description": "Hand-labeled golden retrieval set for FastAPI. Each question lists the code chunks (file_path + symbol_name) a good retriever should surface. Relevance is judged by matching (file_path, symbol_name) pairs against the retrieved chunks.",
   "questions": [

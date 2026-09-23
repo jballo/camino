@@ -1,0 +1,140 @@
+{
+  "repo_name": "confident-ai/deepeval",
+  "repo_version": "python-v4.2.4",
+  "ref": "python-v4.2.4",
+  "description": "User-approved Stage B golden set for DeepEval Python 4.2.4. The first run must still verify that every label is representable by the production chunker; parser-mismatch labels are corrected, not counted as retrieval misses.",
+  "questions": [
+    {
+      "id": "q01",
+      "question": "How does DeepEval run a collection of test cases and dispatch metric evaluation through its synchronous or asynchronous execution paths?",
+      "relevant": [
+        {"file": "deepeval/evaluate/evaluate.py", "symbol": "evaluate"},
+        {"file": "deepeval/evaluate/execute/e2e.py", "symbol": "execute_test_cases"},
+        {"file": "deepeval/evaluate/execute/e2e.py", "symbol": "a_execute_test_cases"}
+      ]
+    },
+    {
+      "id": "q02",
+      "question": "How does assert_test turn failed metric or classifier results into assertion failures while allowing flaky cases to warn instead?",
+      "relevant": [
+        {"file": "deepeval/evaluate/evaluate.py", "symbol": "assert_test"}
+      ]
+    },
+    {
+      "id": "q03",
+      "question": "Where is a single-turn LLM evaluation case modeled, including input, actual output, retrieval context, tools, and expected output?",
+      "relevant": [
+        {"file": "deepeval/test_case/llm_test_case.py", "symbol": "LLMTestCase"}
+      ]
+    },
+    {
+      "id": "q04",
+      "question": "How are multi-turn conversations and their individual turns represented and validated for conversational evaluation?",
+      "relevant": [
+        {"file": "deepeval/test_case/conversational_test_case.py", "symbol": "ConversationalTestCase"},
+        {"file": "deepeval/test_case/conversational_test_case.py", "symbol": "Turn"}
+      ]
+    },
+    {
+      "id": "q05",
+      "question": "How does an EvaluationDataset keep single-turn and conversational goldens and test cases from being mixed?",
+      "relevant": [
+        {"file": "deepeval/dataset/dataset.py", "symbol": "EvaluationDataset"}
+      ]
+    },
+    {
+      "id": "q06",
+      "question": "Where are dataset goldens converted into executable LLM test cases while preserving their context and expected outputs?",
+      "relevant": [
+        {"file": "deepeval/dataset/utils.py", "symbol": "convert_goldens_to_test_cases"}
+      ]
+    },
+    {
+      "id": "q07",
+      "question": "How is answer relevancy scored by generating statements or verdicts and aggregating them into a metric result?",
+      "relevant": [
+        {"file": "deepeval/metrics/answer_relevancy/answer_relevancy.py", "symbol": "AnswerRelevancyMetric"}
+      ]
+    },
+    {
+      "id": "q08",
+      "question": "How does the faithfulness metric extract claims and truths from retrieval context and judge whether the claims are supported?",
+      "relevant": [
+        {"file": "deepeval/metrics/faithfulness/faithfulness.py", "symbol": "FaithfulnessMetric"}
+      ]
+    },
+    {
+      "id": "q09",
+      "question": "How does GEval turn evaluation criteria or generated steps into an LLM-judged score and reason?",
+      "relevant": [
+        {"file": "deepeval/metrics/g_eval/g_eval.py", "symbol": "GEval"}
+      ]
+    },
+    {
+      "id": "q10",
+      "question": "Where is a decision-graph metric executed and converted from graph verdicts into a final score?",
+      "relevant": [
+        {"file": "deepeval/metrics/dag/dag.py", "symbol": "DAGMetric"}
+      ]
+    },
+    {
+      "id": "q11",
+      "question": "How does contextual precision judge whether relevant retrieval nodes are ranked ahead of irrelevant ones?",
+      "relevant": [
+        {"file": "deepeval/metrics/contextual_precision/contextual_precision.py", "symbol": "ContextualPrecisionMetric"}
+      ]
+    },
+    {
+      "id": "q12",
+      "question": "How does tool correctness compare the tools an agent actually called with the expected tool calls?",
+      "relevant": [
+        {"file": "deepeval/metrics/tool_correctness/tool_correctness.py", "symbol": "ToolCorrectnessMetric"}
+      ]
+    },
+    {
+      "id": "q13",
+      "question": "How does the observe decorator trace synchronous, asynchronous, and generator functions while preserving parent span context?",
+      "relevant": [
+        {"file": "deepeval/tracing/tracing.py", "symbol": "observe"},
+        {"file": "deepeval/tracing/tracing.py", "symbol": "Observer"}
+      ]
+    },
+    {
+      "id": "q14",
+      "question": "Where can code attach input, output, metadata, metrics, and test-case data to the span that is currently being traced?",
+      "relevant": [
+        {"file": "deepeval/tracing/context.py", "symbol": "update_current_span"}
+      ]
+    },
+    {
+      "id": "q15",
+      "question": "How does DeepEval generate synthetic goldens from documents or contexts and apply filtering and evolution settings?",
+      "relevant": [
+        {"file": "deepeval/synthesizer/synthesizer.py", "symbol": "Synthesizer"}
+      ]
+    },
+    {
+      "id": "q16",
+      "question": "How are source documents chunked, embedded, and sampled to construct contexts for synthetic data generation?",
+      "relevant": [
+        {"file": "deepeval/synthesizer/chunking/context_generator.py", "symbol": "ContextGenerator"},
+        {"file": "deepeval/synthesizer/chunking/doc_chunker.py", "symbol": "DocumentChunker"}
+      ]
+    },
+    {
+      "id": "q17",
+      "question": "How does the conversation simulator coordinate simulated user turns, callbacks, and completion of text or voice conversations?",
+      "relevant": [
+        {"file": "deepeval/simulator/conversation_simulator.py", "symbol": "ConversationSimulator"}
+      ]
+    },
+    {
+      "id": "q18",
+      "question": "How does prompt optimization coordinate algorithms, scoring, and candidate prompt configurations to select improved prompts?",
+      "relevant": [
+        {"file": "deepeval/optimizer/prompt_optimizer.py", "symbol": "PromptOptimizer"},
+        {"file": "deepeval/optimizer/policies.py", "symbol": "select_prompt_configuration_pareto"}
+      ]
+    }
+  ]
+}

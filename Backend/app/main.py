@@ -21,6 +21,22 @@ from app.worker import WORKER_SHUTDOWN_TIMEOUT, worker_loop
 logger = logging.getLogger(__name__)
 
 
+def _embedding_index_ddl() -> str | None:
+    """Return the configured ANN index DDL for a freshly provisioned schema."""
+    if settings.vector_index == "none":
+        return None
+    operator_class = (
+        "halfvec_cosine_ops"
+        if settings.vector_type == "halfvec"
+        else "vector_cosine_ops"
+    )
+    return f"""
+        CREATE INDEX IF NOT EXISTS ix_embeddings_hnsw
+        ON code_chunk_embeddings USING hnsw (embedding {operator_class})
+        WITH (m = 16, ef_construction = 64)
+    """
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     with engine.connect() as conn:
@@ -105,11 +121,9 @@ async def lifespan(app: FastAPI):
             ON jobs (dedupe_key)
             WHERE status IN ('pending', 'running') AND dedupe_key IS NOT NULL
         """))
-        conn.execute(text("""
-            CREATE INDEX IF NOT EXISTS ix_embeddings_hnsw
-            ON code_chunk_embeddings USING hnsw (embedding vector_cosine_ops)
-            WITH (m = 16, ef_construction = 64)
-        """))
+        embedding_index_ddl = _embedding_index_ddl()
+        if embedding_index_ddl is not None:
+            conn.execute(text(embedding_index_ddl))
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS ix_chunks_search
             ON code_chunks USING gin (search_vector)

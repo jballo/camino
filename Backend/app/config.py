@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     gh_webhook_secret: str
     openai_api_key: str
     agent_model: str = "gpt-4o-mini"
+    vector_type: Literal["vector", "halfvec"] = "vector"
+    vector_index: Literal["hnsw", "none"] = "hnsw"
     rate_limit_agent_ask_requests: int = 20
     rate_limit_agent_ask_window_seconds: int = 600
     rate_limit_repository_ingest_requests: int = 2

@@ -1,15 +1,17 @@
 # Eval Harnesses
 
-Five eval harnesses live here:
+Six eval harnesses live here:
 
 1. **Retrieval eval** — does hybrid search surface the right chunks? (needs DB + OpenAI)
 2. **Agent smoke eval** — does the live agent answer with structurally valid code citations? (needs DB + OpenAI)
 3. **Structural eval** — does a tour artifact parse, reference real files, and quote matching source? (no LLM, no DB)
 4. **Live tour smoke eval** — can the generation graph produce a grounded tour end to end? (needs DB + OpenAI)
 5. **Tour judge eval** — does an LLM judge score generated tours for faithfulness, relevance, completeness, and ordering? (needs OpenAI; DB only for live generation)
+6. **Vector SQL diagnostic** — does the production vector query use HNSW, and what are its p50/p95 SQL latencies? (needs DB + OpenAI)
 
-Retrieval work is paused at the shipped exp1+3+4+5 stack. Tour evaluation now has
-both deterministic grounding checks and an LLM-as-judge baseline for quality trends.
+Exp7 selected halfvec exact scan (V2); the matrix below remains the reproduction
+procedure. Tour evaluation has both deterministic grounding checks and an
+LLM-as-judge baseline for quality trends.
 Agent smoke eval remains a lightweight end-to-end check over the current ReAct answer
 path.
 
@@ -20,6 +22,7 @@ path.
   text, `search_vector` SQL, generation tags, and active-generation registry. It reads
   from disk and bypasses the GitHub snapshot and shared job queue.
 - `run_eval.py` — runs each question through `hybrid_search` and reports hit rate, recall@k, precision@k, MRR.
+- `explain_vector.py` — embeds one golden query, prints `EXPLAIN (ANALYZE, BUFFERS)` for the production vector SQL, and measures p50/p95 SQL latency. Use `--dataset PATH`, or `--repo NAME --ref REF --query TEXT`, to target a non-FastAPI index.
 - `run_agent_smoke_eval.py` — runs the live LangGraph agent on selected golden questions, parses answer citations, and validates citation paths/line ranges.
 - `run_structural_eval.py` — runs tour JSON fixtures through schema + repo-grounding validators.
 - `run_tour_smoke_eval.py` — generates live tours for smoke topics and validates their grounded artifact shape.
@@ -77,10 +80,114 @@ uv run python -m eval.run_eval --top-n 40 --rrf-k 60   # tune fusion inputs
 uv run python -m eval.run_eval --label exp1 --out eval/runs/exp1.json
 ```
 
-Flags: `--mode {hybrid,vector,fts,ablation}`, `--k`, `--limit`, `--top-n`,
+Flags: `--dataset PATH`, `--mode {hybrid,vector,fts,ablation}`, `--k`, `--limit`, `--top-n`,
 `--rrf-k`, `--vector-weight`, `--fts-weight`, `--path-penalty` (default 0.3),
 `--no-filter-demo-paths`, `--rerank`, `--rerank-top-n`, `--rerank-rrf-weight`,
-`--rerank-model`, `--label`, `--out`, `--json`.
+`--rerank-model`, `--vector-dims`, `--label`, `--out`, `--json`.
+
+## Exp7 halfvec experiment matrix
+
+Run every variant against the local throwaway test database. Start the API once
+against a fresh database before ingesting so startup creates the schema. The
+commands below pin `DATABASE_URL` to the documented local-only credentials so an
+experiment cannot accidentally run against Neon.
+
+```bash
+# From anywhere, first use: create and start the dedicated testdb container.
+docker run --name camino-exp7-testdb \
+  -e POSTGRES_USER=loadtest \
+  -e POSTGRES_PASSWORD=loadtest \
+  -e POSTGRES_DB=loadtest \
+  -p 5433:5432 \
+  -v camino-exp7-testdb-data:/var/lib/postgresql/data \
+  -d pgvector/pgvector:pg16
+
+# On later uses, when that container already exists:
+docker start camino-exp7-testdb
+
+# Proceed once this reports "accepting connections".
+docker exec camino-exp7-testdb pg_isready -U loadtest -d loadtest
+
+# From Backend/: keep every command in this shell pinned to the local testdb.
+export EXP7_DATABASE_URL=postgresql://loadtest:loadtest@localhost:5433/loadtest
+
+# Run commands through Doppler while overriding its database with the local testdb.
+exp7() {
+  doppler run -- env DATABASE_URL="$EXP7_DATABASE_URL" "$@"
+}
+
+# Boot once, wait for startup, then stop it with Ctrl-C.
+exp7 VECTOR_TYPE=vector VECTOR_INDEX=hnsw \
+  uv run fastapi run app/main.py --port 8002
+
+# Confirm the server has pgvector >= 0.7 before continuing.
+psql "$EXP7_DATABASE_URL" \
+  -c "SELECT extversion FROM pg_extension WHERE extname = 'vector';"
+```
+
+```bash
+# V0: fp32 + HNSW baseline
+exp7 VECTOR_TYPE=vector VECTOR_INDEX=hnsw uv run python -m eval.ingest_local
+exp7 VECTOR_TYPE=vector VECTOR_INDEX=hnsw uv run python -m eval.run_eval \
+  --label exp7_v0_fp32_hnsw --out eval/runs/exp7_v0.json
+exp7 VECTOR_TYPE=vector VECTOR_INDEX=hnsw uv run python -m eval.explain_vector
+
+# Optional HNSW candidate-starvation probes (iterative scan needs pgvector 0.8+).
+exp7 VECTOR_TYPE=vector VECTOR_INDEX=hnsw uv run python -m eval.explain_vector \
+  --hnsw-ef-search 100
+exp7 VECTOR_TYPE=vector VECTOR_INDEX=hnsw uv run python -m eval.explain_vector \
+  --hnsw-ef-search 100 --hnsw-relaxed-order
+```
+
+Apply the V1 testdb migration with `psql`:
+
+```bash
+psql "$EXP7_DATABASE_URL" <<'SQL'
+DROP INDEX IF EXISTS ix_embeddings_hnsw;
+ALTER TABLE code_chunk_embeddings
+  ALTER COLUMN embedding TYPE halfvec(1536) USING embedding::halfvec(1536);
+ALTER TABLE code_chunk_embeddings ALTER COLUMN embedding SET STORAGE PLAIN;
+VACUUM FULL code_chunk_embeddings;
+CREATE INDEX ix_embeddings_hnsw ON code_chunk_embeddings
+  USING hnsw (embedding halfvec_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
+SQL
+```
+
+```bash
+# V1: halfvec + HNSW
+exp7 VECTOR_TYPE=halfvec VECTOR_INDEX=hnsw uv run python -m eval.run_eval \
+  --label exp7_v1_halfvec_hnsw --out eval/runs/exp7_v1.json
+exp7 VECTOR_TYPE=halfvec VECTOR_INDEX=hnsw uv run python -m eval.explain_vector
+```
+
+Drop the index for V2, then run:
+
+```bash
+psql "$EXP7_DATABASE_URL" -c "DROP INDEX IF EXISTS ix_embeddings_hnsw;"
+
+# V2: halfvec exact scan
+exp7 VECTOR_TYPE=halfvec VECTOR_INDEX=none uv run python -m eval.run_eval \
+  --label exp7_v2_halfvec_noindex --out eval/runs/exp7_v2.json
+exp7 VECTOR_TYPE=halfvec VECTOR_INDEX=none uv run python -m eval.explain_vector
+
+# V3: query-time truncation (exact scan)
+exp7 VECTOR_TYPE=halfvec VECTOR_INDEX=none uv run python -m eval.run_eval \
+  --vector-dims 768 --label exp7_v3_768 --out eval/runs/exp7_v3_768.json
+exp7 VECTOR_TYPE=halfvec VECTOR_INDEX=none uv run python -m eval.run_eval \
+  --vector-dims 512 --label exp7_v3_512 --out eval/runs/exp7_v3_512.json
+exp7 VECTOR_TYPE=halfvec VECTOR_INDEX=none uv run python -m eval.explain_vector --dims 768
+exp7 VECTOR_TYPE=halfvec VECTOR_INDEX=none uv run python -m eval.explain_vector --dims 512
+```
+
+Record the table size after each schema variant and the index size for V0/V1:
+
+```bash
+psql "$EXP7_DATABASE_URL" \
+  -c "SELECT pg_size_pretty(pg_total_relation_size('code_chunk_embeddings'));"
+psql "$EXP7_DATABASE_URL" \
+  -c "SELECT pg_size_pretty(pg_relation_size('ix_embeddings_hnsw'));"
+```
 
 Diagnostics in the default report:
 

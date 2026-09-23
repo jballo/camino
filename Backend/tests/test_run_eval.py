@@ -1,6 +1,11 @@
 import pytest
 
-from eval.run_eval import RetrievalConfig, _print_report, main
+from eval.run_eval import (
+    RetrievalConfig,
+    _print_report,
+    _require_indexed_labels,
+    main,
+)
 
 
 def test_retrieval_config_defaults_match_cli_experiment_defaults():
@@ -8,6 +13,7 @@ def test_retrieval_config_defaults_match_cli_experiment_defaults():
 
     assert cfg.top_n == 60
     assert cfg.path_penalty == 0.3
+    assert cfg.vector_dims is None
 
 
 def test_print_report_tolerates_legacy_config_without_rerank_keys(capsys):
@@ -54,3 +60,19 @@ def test_main_rejects_out_of_range_rerank_rrf_weight(monkeypatch):
 
     with pytest.raises(SystemExit, match="--rerank-rrf-weight 1.5 is out of range"):
         main()
+
+
+def test_main_rejects_out_of_range_vector_dims(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["run_eval", "--vector-dims", "1537"])
+
+    with pytest.raises(SystemExit, match="--vector-dims must be between 1 and 1536"):
+        main()
+
+
+def test_require_indexed_labels_rejects_missing_fixture():
+    with pytest.raises(SystemExit, match="no golden-dataset labels exist"):
+        _require_indexed_labels({}, "owner/repo", "v1")
+
+
+def test_require_indexed_labels_accepts_any_indexed_label():
+    _require_indexed_labels({("path.py", "symbol"): [1]}, "owner/repo", "v1")
