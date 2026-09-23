@@ -18,6 +18,7 @@ run is fully reproducible from its config block.
 
 Usage:
     uv run python -m eval.run_eval                       # k=5, retrieve 10, hybrid
+    uv run python -m eval.run_eval --dataset eval/golden_dataset.json
     uv run python -m eval.run_eval --mode ablation       # vector vs fts vs hybrid
     uv run python -m eval.run_eval --fts-weight 1.5      # tune a knob
     uv run python -m eval.run_eval --label exp1 --out eval/runs/exp1.json
@@ -29,7 +30,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -37,6 +37,7 @@ from sqlalchemy import text
 from sqlmodel import Session, create_engine
 
 from app.config import settings
+from app.services.embeddings import EMBED_DIMENSIONS
 from app.services.rerank import DEFAULT_RERANK_RRF_WEIGHT, DEFAULT_RERANK_TOP_N
 from app.services.search import RetrievalDebug, SearchResult, hybrid_search_debug
 
@@ -63,6 +64,9 @@ class RetrievalConfig:
     rerank_top_n: int = DEFAULT_RERANK_TOP_N
     rerank_rrf_weight: float = DEFAULT_RERANK_RRF_WEIGHT
     rerank_model: str | None = None
+    vector_dims: int | None = None
+    vector_type: str = settings.vector_type
+    vector_index: str = settings.vector_index
 
 
 def _relevant_ranks(
@@ -103,7 +107,7 @@ def _metrics_for_question(
 def _resolve_relevant_ids(
     session: Session,
     repo_name: str,
-    installation_id: int,
+    ref: str,
     questions: list[dict],
 ) -> dict[tuple[str, str], list[int]]:
     """Map each labeled (file, symbol) -> chunk_ids present in the index.
@@ -119,17 +123,44 @@ def _resolve_relevant_ids(
         SELECT id, file_path, symbol_name
         FROM   live_code_chunks
         WHERE  repo_name = :repo_name
-          AND  installation_id = :installation_id
+          AND  ref = :ref
     """)
-    rows = session.execute(
-        sql, {"repo_name": repo_name, "installation_id": installation_id}
-    ).all()
-    out: dict[tuple[str, str], list[int]] = defaultdict(list)
+    rows = session.execute(sql, {"repo_name": repo_name, "ref": ref}).all()
+    # Keep absent labels in the mapping so the preflight can distinguish a
+    # complete fixture from one that was only partially ingested.
+    out: dict[tuple[str, str], list[int]] = {key: [] for key in wanted}
     for r in rows:
         key = (r.file_path, r.symbol_name)
         if key in wanted:
             out[key].append(r.id)
     return out
+
+
+def _require_indexed_labels(
+    relevant_ids: dict[tuple[str, str], list[int]],
+    repo_name: str,
+    ref: str,
+) -> None:
+    """Abort before embedding queries unless every golden label is indexed."""
+    missing = sorted(key for key, chunk_ids in relevant_ids.items() if not chunk_ids)
+    if relevant_ids and not missing:
+        return
+
+    if missing and len(missing) < len(relevant_ids):
+        preview = ", ".join(f"{file}:{symbol}" for file, symbol in missing[:5])
+        if len(missing) > 5:
+            preview += f", ... (+{len(missing) - 5} more)"
+        raise SystemExit(
+            f"error: {len(missing)} of {len(relevant_ids)} golden-dataset labels "
+            f"are absent from the live index for repo={repo_name!r} ref={ref!r}: "
+            f"{preview}; verify the local testdb fixture before running the eval"
+        )
+
+    raise SystemExit(
+        f"error: no golden-dataset labels exist in the live index for "
+        f"repo={repo_name!r} ref={ref!r}; verify the local testdb fixture "
+        "before running the eval"
+    )
 
 
 def _diagnose(
@@ -171,7 +202,7 @@ def _diagnose(
 
 
 async def run(session: Session, cfg: RetrievalConfig, questions: list[dict],
-              repo_name: str, installation_id: int,
+              repo_name: str, ref: str,
               relevant_ids: dict[tuple[str, str], list[int]]) -> dict:
     rows = []
     for q in questions:
@@ -179,7 +210,7 @@ async def run(session: Session, cfg: RetrievalConfig, questions: list[dict],
             session,
             q["question"],
             repo_name,
-            installation_id=installation_id,
+            ref=ref,
             top_n=cfg.top_n,
             rrf_k=cfg.rrf_k,
             limit=cfg.limit,
@@ -192,6 +223,7 @@ async def run(session: Session, cfg: RetrievalConfig, questions: list[dict],
             rerank_top_n=cfg.rerank_top_n,
             rerank_rrf_weight=cfg.rerank_rrf_weight,
             rerank_model=cfg.rerank_model,
+            vector_dims=cfg.vector_dims,
         )
         m = _metrics_for_question(results, q["relevant"], cfg.k)
         diagnosis = _diagnose(q["relevant"], relevant_ids, debug, results, cfg.k)
@@ -226,7 +258,11 @@ def _print_report(report: dict, label: str | None) -> None:
     k = cfg["k"]
     rows = report["per_question"]
 
-    head = f"\nRetrieval eval | repo=tiangolo/fastapi | mode={cfg['mode']} | k={k} | limit={cfg['limit']}"
+    repo_name = report.get("repo_name", "tiangolo/fastapi")
+    head = (
+        f"\nRetrieval eval | repo={repo_name} | mode={cfg['mode']} "
+        f"| k={k} | limit={cfg['limit']}"
+    )
     if label:
         head += f" | label={label}"
     print(head)
@@ -237,7 +273,10 @@ def _print_report(report: dict, label: str | None) -> None:
         f"rerank={cfg.get('rerank', False)} "
         f"rerank_top_n={cfg.get('rerank_top_n', DEFAULT_RERANK_TOP_N)} "
         f"rerank_rrf_w={cfg.get('rerank_rrf_weight', DEFAULT_RERANK_RRF_WEIGHT)} "
-        f"rerank_model={cfg.get('rerank_model') or 'default'}"
+        f"rerank_model={cfg.get('rerank_model') or 'default'} "
+        f"vector_type={cfg.get('vector_type', 'vector')} "
+        f"vector_index={cfg.get('vector_index', 'hnsw')} "
+        f"vector_dims={cfg.get('vector_dims') or 'full'}"
     )
     print("=" * 78)
     print(f"{'id':<5}{'hit':>4}{'rec':>6}{'prec':>6}{'rr':>6}  question")
@@ -299,7 +338,8 @@ def _print_diagnostics(rows: list[dict], k: int) -> None:
 
 
 def _print_ablation(reports: dict[str, dict], k: int) -> None:
-    print(f"\nABLATION | repo=tiangolo/fastapi | k={k}")
+    repo_name = reports["hybrid"].get("repo_name", "tiangolo/fastapi")
+    print(f"\nABLATION | repo={repo_name} | k={k}")
     print("=" * 60)
     print(f"{'mode':<10}{'hit_rate':>10}{'recall':>10}{'mrr':>10}")
     print("-" * 60)
@@ -333,12 +373,24 @@ def _print_ablation(reports: dict[str, dict], k: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=DATASET_PATH,
+        help=f"golden dataset JSON (default: {DATASET_PATH})",
+    )
     parser.add_argument("--k", type=int, default=5, help="cutoff for @k metrics")
     parser.add_argument(
         "--limit", type=int, default=10, help="chunks retrieved per query"
     )
     parser.add_argument(
         "--top-n", type=int, default=60, help="results per retriever before fusion"
+    )
+    parser.add_argument(
+        "--vector-dims",
+        type=int,
+        default=None,
+        help="compare only the first N embedding dimensions (exact scan)",
     )
     parser.add_argument("--rrf-k", type=int, default=60, help="RRF constant")
     parser.add_argument(
@@ -408,18 +460,21 @@ def main() -> None:
             f"error: --rerank-rrf-weight {args.rerank_rrf_weight} is out of range "
             f"(must be between 0.0 and 1.0)"
         )
-    data = json.loads(DATASET_PATH.read_text())
+    if args.vector_dims is not None and not 1 <= args.vector_dims <= EMBED_DIMENSIONS:
+        raise SystemExit(
+            f"error: --vector-dims must be between 1 and {EMBED_DIMENSIONS}"
+        )
+    data = json.loads(args.dataset.read_text())
     repo_name = data["repo_name"]
-    installation_id = data["installation_id"]
+    ref = data.get("ref", data["repo_version"])
     questions = data["questions"]
 
     engine = create_engine(settings.database_url)
 
     async def _run_all() -> dict:
         with Session(engine) as session:
-            relevant_ids = _resolve_relevant_ids(
-                session, repo_name, installation_id, questions
-            )
+            relevant_ids = _resolve_relevant_ids(session, repo_name, ref, questions)
+            _require_indexed_labels(relevant_ids, repo_name, ref)
             modes = ABLATION_MODES if args.mode == "ablation" else (args.mode,)
             reports = {}
             for mode in modes:
@@ -437,9 +492,17 @@ def main() -> None:
                     rerank_top_n=args.rerank_top_n,
                     rerank_rrf_weight=args.rerank_rrf_weight,
                     rerank_model=args.rerank_model,
+                    vector_dims=args.vector_dims,
                 )
                 reports[mode] = await run(
-                    session, cfg, questions, repo_name, installation_id, relevant_ids
+                    session, cfg, questions, repo_name, ref, relevant_ids
+                )
+                reports[mode].update(
+                    {
+                        "dataset": str(args.dataset),
+                        "repo_name": repo_name,
+                        "ref": ref,
+                    }
                 )
             return reports
 

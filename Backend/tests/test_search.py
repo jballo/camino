@@ -83,6 +83,7 @@ def test_vector_search_returns_ranked_tuples():
     sql = " ".join(str(mock_session.execute.call_args.args[0]).split())
     assert "JOIN code_chunks c" in sql
     assert "c.generation = :generation" in sql
+    assert "CAST(:embedding AS vector(1536))" in sql
     assert mock_session.execute.call_args.args[1]["generation"] == "generation-1"
 
 
@@ -99,6 +100,40 @@ def test_vector_search_empty_result():
         generation="generation-1",
     )
     assert result == []
+
+
+def test_vector_search_uses_halfvec_and_subvector(monkeypatch):
+    monkeypatch.setattr("app.services.search.settings.vector_type", "halfvec")
+    mock_session = MagicMock()
+    mock_session.execute.return_value.all.return_value = []
+
+    _vector_search(
+        mock_session,
+        [0.1] * 1536,
+        "org/repo",
+        "main",
+        20,
+        generation="generation-1",
+        vector_dims=768,
+    )
+
+    sql = " ".join(str(mock_session.execute.call_args.args[0]).split())
+    assert "subvector(e.embedding, 1, :vector_dims)" in sql
+    assert "subvector(CAST(:embedding AS halfvec(1536)), 1, :vector_dims)" in sql
+    assert mock_session.execute.call_args.args[1]["vector_dims"] == 768
+
+
+def test_vector_search_rejects_invalid_dimensions():
+    with pytest.raises(ValueError, match="vector_dims must be between 1 and 1536"):
+        _vector_search(
+            MagicMock(),
+            [0.1] * 1536,
+            "org/repo",
+            "main",
+            20,
+            generation="generation-1",
+            vector_dims=0,
+        )
 
 
 # ── _fts_search ──────────────────────────────────────────────────────
@@ -287,6 +322,29 @@ async def test_hybrid_search_calls_both_retrievers(
     mock_vector.assert_called_once()
     mock_fts.assert_called_once()
     assert len(results) == 1
+
+
+@pytest.mark.asyncio
+@patch("app.services.search._load_chunks", return_value=[])
+@patch("app.services.search._fts_search", return_value=[])
+@patch("app.services.search._vector_search", return_value=[])
+@patch("app.services.search.embed_batch", new_callable=AsyncMock)
+async def test_hybrid_search_debug_passes_vector_dims(
+    mock_embed, mock_vector, _mock_fts, _mock_load
+):
+    mock_embed.return_value = [[0.1] * 1536]
+    mock_session = MagicMock()
+    mock_session.execute.return_value.scalar_one_or_none.return_value = "generation-1"
+
+    await hybrid_search_debug(
+        mock_session,
+        "login",
+        "org/repo",
+        ref="main",
+        vector_dims=768,
+    )
+
+    assert mock_vector.call_args.kwargs["vector_dims"] == 768
 
 
 @pytest.mark.asyncio

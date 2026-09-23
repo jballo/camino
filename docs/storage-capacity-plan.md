@@ -1,6 +1,6 @@
 # Storage capacity plan: halfvec embeddings + RDS migration
 
-**Date:** 2026-09-17 · **Status: proposed — phase 1 gated on the retrieval eval.**
+**Date:** 2026-09-17 · **Status: phase 1 V2 selected — production cutover pending.**
 
 The t4g.small load test ([t4g-loadtest.md](t4g-loadtest.md)) has settled compute under
 the shared CPU/memory budget: workers hold ~290 MiB, and the RAM and API-latency gates
@@ -40,28 +40,53 @@ the 0.5 GB wall is a free-tier artifact, so the plan is: shrink the footprint, t
 move to a small managed instance whose durability protects the half-megabyte that
 matters.
 
-## Phase 1 — halfvec (gated)
+## Phase 1 — halfvec exact scan (selected)
 
-Store embeddings as pgvector `halfvec(1536)` (2-byte floats) instead of
-`vector(1536)`, with an `halfvec_cosine_ops` HNSW index. Roughly halves embedding
-storage → ~10 KB/chunk all-in.
+Exp7 selected **V2: `halfvec(1536)` with no ANN index**. The production-shaped
+filtered query did not use HNSW in either the fp32 or halfvec schema, so exact scan
+preserves retrieval quality while removing pure storage overhead.
 
-**Gate:** the retrieval eval harness (`Backend/eval/run_eval.py`, 20-question FastAPI
-0.115.6 golden set). Shipped-stack baseline: **hit@5 0.900 / recall@5 0.858 /
-MRR 0.766**. Adopt halfvec only if metrics stay within run-to-run jitter (±0.01 MRR)
-with no newly missed questions. Log the run in `eval/EXPERIMENTS.md` as the next
-experiment in the (currently paused) retrieval log.
+V2 exactly matched the V0 local baseline: **hit@5 0.900 / recall@5 0.858 / MRR
+0.766**, with the same q03/q17 misses. SQL latency was **4.24 ms p50 / 5.35 ms
+p95** on the ~5.1k-chunk FastAPI fixture.
 
-Optional second lever, measured in the same experiment: truncating to 768 dimensions
-(`dimensions=768` on the `text-embedding-3-small` call) halves storage again
-(~6 KB/chunk, ~4× total). Higher risk of quality loss than halfvec, so it is adopted
-only if metrics hold within ~0.02 MRR; otherwise ship halfvec alone. Note a dimension
-change invalidates every stored vector — acceptable, the corpus is a cache.
+The former ×4–6 extrapolation is now replaced by direct measurement (exp8
+Stage C, 2026-09-23: 50-iteration production-shaped exact scans on the local
+testdb, eight live repo/refs, 51,059 chunks total):
 
-Implementation notes: `EMBED_DIMENSIONS` and the column type live in
-`Backend/app/services/embeddings.py` and `Backend/app/models/code.py`; the
-pgvector-python SQLAlchemy package provides the `HALFVEC` type. The eval procedure is
-schema variant → `ingest_local.py` re-ingest → `run_eval.py` compare.
+| repo@ref | live chunks | p50 | p95 |
+|---|---:|---:|---:|
+| pallets/flask@main | 1,622 | 2.08 ms | 2.36 ms |
+| firecrawl/firecrawl@v2.11.0 | 4,409 | 8.11 ms | 10.51 ms |
+| jballo/nous-core@main | 4,799 | 10.91 ms | 18.62 ms |
+| tiangolo/fastapi@0.115.6 | 5,129 | 3.31 ms | 4.73 ms |
+| fastapi/fastapi@master | 5,686 | 3.72 ms | 4.87 ms |
+| firecrawl/firecrawl@main | 6,074 | 10.13 ms | 11.46 ms |
+| confident-ai/deepeval@python-v4.2.4 | 11,598 | 15.08 ms | 16.43 ms |
+| confident-ai/deepeval@main | 11,742 | 14.11 ms | 16.09 ms |
+
+The largest single ref — what the repo-filtered gate is about — measures
+**16.09 ms p95 at 11,742 chunks**, ~15× under the 250 ms gate. Scaling is
+roughly linear at ~0.7–2.3 µs/chunk (the spread tracks repo/chunk
+characteristics, not noise), so a vLLM-class 25–30k-chunk repo projects to
+under ~70 ms p95 even at the worst observed per-chunk rate. Production
+telemetry after cutover remains a sanity check, not a blocker.
+
+Measured footprint fell from **553 MB (fp32 + 270 MB HNSW)** to **140 MB**:
+74.7% smaller and 3.95× the capacity. Halfvec + HNSW was 275 MB, confirming that
+the unused halfvec index alone still cost 135 MB.
+
+The 768- and 512-dimension levers are both **conclusively rejected** by exp8
+(Stages A and B, 58 pooled questions across three corpora): 512's apparent
+hybrid gain was a fusion artifact masking a real vector-retriever loss
+(pooled vector-only ΔMRR@5 −0.037, 95% CI [−0.078, −0.004]), and it failed
+every adoption gate. `halfvec(1536)` is the final phase-1 configuration; see
+`Backend/eval/EXPERIMENTS.md` (EXP 8-A/8-B/8-C).
+
+Implementation notes: the code supports the selected settings, but defaults remain
+`vector` + HNSW until the separate production-cutover change. Existing databases are
+never auto-migrated or auto-dropped. The cutover sets `VECTOR_TYPE=halfvec` and
+`VECTOR_INDEX=none`, retypes the column, sets storage `PLAIN`, and drops HNSW.
 
 ## Phase 2 — RDS migration
 

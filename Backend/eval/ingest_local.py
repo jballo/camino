@@ -38,10 +38,6 @@ from app.services.search_index import (
     rebuild_search_vector,
 )
 
-# A sentinel installation id reserved for eval fixtures so it never collides
-# with real GitHub installation ids.
-EVAL_INSTALLATION_ID = 999_999_999
-
 # The eval fixture is checked out (not committed) so it can be reproduced from a
 # fresh clone. Pinned to the version the golden dataset was hand-labeled against;
 # keep this in sync with ``repo_version`` in golden_dataset.json.
@@ -91,7 +87,7 @@ def _iter_source_files(root: Path):
 async def ingest(
     root: Path,
     repo_name: str,
-    installation_id: int = EVAL_INSTALLATION_ID,
+    ref: str = FIXTURE_REPO_VERSION,
 ) -> dict:
     started = time.monotonic()
     engine = create_engine(settings.database_url)
@@ -125,7 +121,7 @@ async def ingest(
         session.exec(
             delete(CodeChunkModel).where(
                 CodeChunkModel.repo_name == repo_name,
-                CodeChunkModel.installation_id == installation_id,
+                CodeChunkModel.ref == ref,
             )
         )
 
@@ -133,7 +129,7 @@ async def ingest(
             CodeChunkModel.from_parsed(
                 c,
                 repo_name=repo_name,
-                installation_id=installation_id,
+                ref=ref,
                 generation=generation,
             )
             for c in all_chunks
@@ -155,23 +151,30 @@ async def ingest(
         session.exec(
             text(populate_search_vector_sql(only_null=True)).bindparams(
                 repo_name=repo_name,
-                installation_id=installation_id,
+                ref=ref,
                 generation=generation,
             )
         )
         session.exec(
             text("""
                 INSERT INTO repo_index_state (
-                    installation_id,
                     repo_name,
-                    active_generation
+                    ref,
+                    visibility,
+                    active_generation,
+                    indexed_sha,
+                    indexed_at
                 )
-                VALUES (:installation_id, :repo_name, :generation)
-                ON CONFLICT (installation_id, repo_name)
-                DO UPDATE SET active_generation = EXCLUDED.active_generation
+                VALUES (:repo_name, :ref, 'public', :generation, NULL, now())
+                ON CONFLICT (repo_name, ref)
+                DO UPDATE SET
+                    visibility = EXCLUDED.visibility,
+                    active_generation = EXCLUDED.active_generation,
+                    indexed_sha = EXCLUDED.indexed_sha,
+                    indexed_at = EXCLUDED.indexed_at
             """).bindparams(
                 repo_name=repo_name,
-                installation_id=installation_id,
+                ref=ref,
                 generation=generation,
             )
         )
@@ -181,7 +184,7 @@ async def ingest(
 
     print(
         f"ingested: chunks={inserted} embeddings={len(embedding_models)} "
-        f"repo={repo_name!r} installation_id={installation_id} "
+        f"repo={repo_name!r} ref={ref!r} "
         f"elapsed={time.monotonic() - started:.1f}s"
     )
     return {"chunks": inserted, "embeddings": len(embedding_models)}
@@ -200,10 +203,9 @@ def main() -> None:
         help="Logical repo_name to store chunks under.",
     )
     parser.add_argument(
-        "--installation-id",
-        type=int,
-        default=EVAL_INSTALLATION_ID,
-        help="Installation id to store chunks under.",
+        "--ref",
+        default=FIXTURE_REPO_VERSION,
+        help="Repository ref used to identify the fixture index.",
     )
     parser.add_argument(
         "--no-clone",
@@ -221,11 +223,8 @@ def main() -> None:
     if args.rebuild_fts:
         engine = create_engine(settings.database_url)
         with Session(engine) as session:
-            rebuild_search_vector(session, args.repo, args.installation_id)
-        print(
-            f"rebuilt search_vector: repo={args.repo!r} "
-            f"installation_id={args.installation_id}"
-        )
+            rebuild_search_vector(session, args.repo, args.ref)
+        print(f"rebuilt search_vector: repo={args.repo!r} ref={args.ref!r}")
         return
 
     root = Path(args.path)
@@ -239,7 +238,7 @@ def main() -> None:
             "(pass without --no-clone to auto-fetch the fixture)"
         )
 
-    asyncio.run(ingest(root, args.repo, args.installation_id))
+    asyncio.run(ingest(root, args.repo, args.ref))
 
 
 if __name__ == "__main__":

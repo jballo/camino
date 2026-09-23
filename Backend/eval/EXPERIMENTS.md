@@ -49,6 +49,21 @@ uv run python -m eval.run_eval --mode ablation
 **Committed reference:** `eval/baseline_results.json` (original baseline, never overwritten).
 **Local run artifacts:** `eval/runs/*.json` (gitignored).
 
+**Storage decision (exp7):** V2 (`halfvec(1536)`, no ANN index) selected. Quality
+matches V0, measured p95 is 16.09 ms at 11,742 chunks (`EXP 8-C`, ~15× under the
+250 ms gate — supersedes the earlier ~21–32 ms extrapolation), and footprint
+falls 553→140 MB. Production defaults remain unchanged until the separate cutover.
+
+**Dimension follow-up (exp8, COMPLETE):** all stages done; final answer is
+`halfvec(1536)`. Stage A's full sweep showed the hybrid 512 gain is a fusion
+effect, not preserved vector quality: vector-only MRR falls 0.096 vs 1536
+(95% CI −0.192 to −0.017), far beyond the 0.001 hybrid jitter floor. Stage B's
+broader sets (18 Deepeval + 20 Firecrawl questions) confirmed it — every 512
+gate failed (`EXP 8-B`), so no dimension migration is approved, Stage D does
+not run, and exp9 (512 migration) is not opened. Stage C (`EXP 8-C`) closed
+the V2 latency extrapolation caveat with direct measurement. Details:
+`docs/design/exp8-dim-confirmation-plan.md` (status: complete).
+
 ---
 
 ## Metrics & caveats
@@ -90,6 +105,12 @@ Stored config: `mode=hybrid top_n=20 rrf_k=60 vector_weight=1.0 fts_weight=1.0`.
 | exp6 | cross-encoder rerank (MiniLM blend rrf_w=0.9) | query | 0.900 | **0.875** | **0.839** | partial | `runs/exp6.json` |
 | **exp6+bge** | **BGE reranker blend rrf_w=0.9** | query | **0.950** | **0.925** | 0.817 | partial | |
 | exp4 (no filter) | exp4 config, filter off (A/B) | query | 0.850 | 0.850 | 0.748 | — | |
+| exp7 V0 | fp32 + HNSW local baseline | schema | 0.900 | 0.858 | 0.766 | baseline | `runs/exp7_v0.json` |
+| exp7 V1 | halfvec + HNSW | schema | 0.900 | 0.858 | 0.766 | fallback | `runs/exp7_v1.json` |
+| **exp7 V2** | **halfvec + exact scan** | schema | **0.900** | **0.858** | **0.766** | **yes (phase-1 winner)** | `runs/exp7_v2.json` |
+| exp7 V3@768 | halfvec + 768-dim exact scan | query | 0.850 | 0.825 | 0.765 | no | `runs/exp7_v3_768.json` |
+| exp7 V3@512 | halfvec + 512-dim exact scan | query | 0.900 | **0.875** | **0.793** | follow-up only | `runs/exp7_v3_512.json` |
+| exp8-A@512 | full sweep; hybrid gain masks vector-only MRR regression | query | 0.900 | **0.875** | **0.793** | no migration; Stage B only | `runs/exp8_sweep_h_512.json` |
 
 **Shipped defaults**: `top_n=60`, `path_penalty=0.3`, `filter_demo_paths=True`,
 equal RRF weights (`search.py`) + enriched `build_embedding_text` (`embeddings.py`).
@@ -98,8 +119,8 @@ Cumulative vs baseline: **hit 0.800→0.900, recall 0.767→0.858, MRR
 
 \*exp1 rebuilds `search_vector` via SQL `UPDATE` only — **no re-embedding**.
 
-`type` = `query` (no re-ingest, cheap, instantly comparable) vs `ingest`
-(mutates the index; A/B under a separate `installation_id` to preserve baseline).
+`type` = `query` (no re-ingest, cheap, instantly comparable) vs `ingest` or
+`schema` (mutates the test database; preserve baselines in a separate testdb/ref).
 
 ### Shipped config snapshot
 
@@ -171,6 +192,34 @@ final rank N (miss). `rec` = recall when <1.0 or notably changed.
 
 **Miss progression:** baseline q02,q03,q05,q10 → exp1+3 adds q05,q10, loses q17 →
 exp5 adds q02; still q03,q17.
+
+### Exp7 per-question outcome matrix
+
+V0/V1/V2 are identical for every question. V3@768 introduces a new q02 miss;
+V3@512 retains the V0 miss set while moving q03 from rank 9 to rank 6.
+
+| q | V0 fp32+HNSW | V1 halfvec+HNSW | V2 halfvec exact | V3@768 | V3@512 |
+|---|---|---|---|---|---|
+| q01 | Y (.67) | Y (.67) | Y (.67) | Y (1.0) | Y (1.0) |
+| q02 | Y | Y | Y | **. new miss (@6)** | Y |
+| q03 | . (@9) | . (@9) | . (@9) | . (@8) | . (@6) |
+| q04 | Y | Y | Y | Y | Y |
+| q05 | Y (.5) | Y (.5) | Y (.5) | Y (.5) | Y (.5) |
+| q06 | Y | Y | Y | Y | Y |
+| q07 | Y | Y | Y | Y | Y |
+| q08 | Y | Y | Y | Y | Y |
+| q09 | Y | Y | Y | Y | Y |
+| q10 | Y | Y | Y | Y | Y |
+| q11 | Y | Y | Y | Y | Y |
+| q12 | Y | Y | Y | Y | Y |
+| q13 | Y | Y | Y | Y | Y |
+| q14 | Y | Y | Y | Y | Y |
+| q15 | Y | Y | Y | Y | Y |
+| q16 | Y | Y | Y | Y | Y |
+| q17 | . (@6) | . (@6) | . (@6) | . (@6) | . (@6) |
+| q18 | Y | Y | Y | Y | Y |
+| q19 | Y | Y | Y | Y | Y |
+| q20 | Y | Y | Y | Y | Y |
 
 ---
 
@@ -412,10 +461,194 @@ in FTS@6 but outside hydrated rerank pool.
 
 **Conclusion:** Exp6 is worth keeping as an **optional** query-time stage.
 Default model should be **BGE** when rerank is enabled (`--rerank-model
-BAAI/bge-reranker-base`). q03 alone may need exp7 (larger limit) or exp8
+BAAI/bge-reranker-base`). q03 alone may need exp9 (larger limit) or exp10
 (chunk boundaries).
 
 **Artifacts:** `runs/exp6.json`.
+
+## EXP 7 — halfvec / exact-scan / dimension matrix (DONE — V2 selected)
+
+**Goal:** reduce embedding storage without regressing the shipped retrieval stack.
+The implementation is config-driven (`VECTOR_TYPE=vector|halfvec`,
+`VECTOR_INDEX=hnsw|none`) and `--vector-dims` evaluates prefix truncation without
+re-embedding. `eval/explain_vector.py` runs the production-shaped SQL under
+`EXPLAIN (ANALYZE, BUFFERS)` and reports p50/p95 database latency.
+
+| variant | hit@5 | recall@5 | MRR | SQL p50 | SQL p95 | table size | index size |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| V0 fp32 + HNSW | 0.900 | 0.858 | 0.766 | 5.58 ms | 7.52 ms | 553 MB | 270 MB |
+| V1 halfvec + HNSW | 0.900 | 0.858 | 0.766 | 3.79 ms | 4.96 ms | 275 MB | 135 MB |
+| **V2 halfvec + exact scan** | **0.900** | **0.858** | **0.766** | **4.24 ms** | **5.35 ms** | **140 MB** | n/a |
+| V3 halfvec + 768 dims | 0.850 | 0.825 | 0.765 | 4.33 ms | 4.74 ms | n/a | n/a |
+| V3 halfvec + 512 dims | 0.900 | 0.875 | 0.793 | 4.47 ms | 6.31 ms | n/a | n/a |
+
+**Headline finding:** `ix_embeddings_hnsw` was not used by the production-shaped
+filtered query in either V0 or V1. All variants used the repo/ref/generation index,
+joined the surviving chunks to embeddings, and sorted exact cosine distances. HNSW
+was therefore storage-only overhead for this workload.
+
+**Decision: V2 wins phase 1.** It exactly matches V0 quality, including the q03/q17
+miss set. Its measured 5.35 ms p95 on the ~5.1k-active-chunk fixture (505 distance
+candidates after the demo-path filter) extrapolates to ~21–32 ms at 25–30k chunks
+using the plan's allowed ×4–6 range, comfortably below the 250 ms gate. This is an
+extrapolated rather than directly measured large-repo result, so production latency
+remains a post-cutover check.
+
+V2 reduces total embedding-relation footprint from 553 MB to 140 MB: **74.7%
+smaller / 3.95× more capacity**. Halfvec alone (V1) halves both total footprint
+and HNSW size, but the unused 135 MB index provides no benefit.
+
+V3@768 is rejected because q02 becomes a new miss, even though aggregate MRR is
+nearly unchanged. V3@512 unexpectedly improves recall/MRR with no new miss, but the
+non-monotonic 768/512 result should be confirmed on a broader set before any
+dimension migration; it does not block or alter the V2 phase-1 choice. (Post-hoc
+note: at 768 the labeled q02 chunk's *vector* rank improved to 4; the miss came from
+RRF fusion with fts_rank 14 pushing final rank to 6 — a fusion/cutoff artifact, not
+a vector-quality regression. Confirmation plan:
+`docs/design/exp8-dim-confirmation-plan.md`.)
+
+**Artifacts:** `runs/exp7_v*.json`, `runs/exp7_v*_explain.txt`, and
+`runs/exp7_v*_sizes.txt`.
+
+## EXP 8-A — dimension-truncation sweep (DONE — adverse for 512)
+
+**Goal:** distinguish the non-monotonic exp7 768/512 result from sampling,
+fusion, and cutoff artifacts by sweeping nine prefix lengths in both hybrid and
+vector-only modes. Metrics below use the normal 10-result hydrate; hit and recall
+are at 5, and MRR is over the hydrated top 10 (the experiment analyzer also
+reports all metrics at both cutoffs).
+
+| dims | hybrid hit@5 | hybrid recall@5 | hybrid MRR | vector hit@5 | vector recall@5 | vector MRR | vector ΔMRR vs 1536 | paired 95% CI |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1536 | 0.900 | 0.858 | 0.765 | 0.950 | 0.917 | 0.758 | — | — |
+| 1280 | 0.900 | 0.875 | 0.775 | 0.950 | 0.933 | 0.771 | +0.013 | [0.000, +0.033] |
+| 1024 | 0.850 | 0.825 | 0.764 | 0.950 | 0.933 | 0.754 | −0.004 | [−0.012, 0.000] |
+| 896 | 0.850 | 0.825 | 0.758 | 0.950 | 0.950 | 0.679 | −0.079 | [−0.158, −0.008] |
+| 768 | 0.850 | 0.825 | 0.765 | 0.950 | 0.933 | 0.708 | −0.050 | [−0.125, 0.000] |
+| 640 | 0.900 | 0.875 | 0.766 | 0.950 | 0.933 | 0.683 | −0.075 | [−0.158, −0.004] |
+| **512** | **0.900** | **0.875** | **0.793** | **0.950** | **0.950** | **0.662** | **−0.096** | **[−0.192, −0.017]** |
+| 384 | 0.900 | 0.850 | 0.758 | 0.950 | 0.950 | 0.640 | −0.118 | [−0.230, −0.023] |
+| 256 | 0.900 | 0.858 | 0.777 | 0.900 | 0.867 | 0.643 | −0.115 | [−0.223, −0.026] |
+
+**Noise floor:** the three 1536 hybrid runs have identical hit@5/recall@5;
+MRR spans only 0.765–0.766. The sole movement is q03 final rank 9↔10, giving a
+measured jitter floor of 0.001 MRR.
+
+**Read-out:** q02 confirms the original fusion/cutoff diagnosis. Its raw vector
+rank is 4 at both 1536 and 768, while its hybrid final rank moves 5→6. The same
+hybrid cutoff miss appears at 1024/896/768 even though raw vector rank stays
+3–4, so it is not evidence of semantic loss at 768.
+
+The vector-only curve, however, is **not flat to 512**. It is effectively flat
+through 1024, then drops sharply at 896 and remains degraded. At 512 the loss is
+distributed across q01, q10, q11, q13, and q15 rather than coming from one
+cutoff question; its −0.096 delta is about two orders of magnitude larger than
+the hybrid jitter floor and its paired CI excludes zero. The hybrid 512 gain
+comes from fusion/rank movements (notably q03 and q07) masking those vector
+demotions. Adjacent 640 and 384 are also materially below the vector baseline,
+so Stage A's stability condition around 512 is not met.
+
+**Decision:** stay at `halfvec(1536)`. 512 is not approved as a migration
+candidate and advances only to the already-planned broader Stage B falsification
+gate. 768 remains out: it does not strictly dominate 512 across hybrid and vector
+metrics. Stage D is forbidden unless every Stage B gate subsequently passes.
+
+**Artifacts:** `runs/exp8_sweep_{h,v}_*.json`, `runs/exp8_jitter_{1,2}.json`.
+
+---
+
+## EXP 8-B — broader-set dimension confirmation (DONE — 512 rejected, stay at 1536)
+
+**Goal:** falsify or confirm the Stage A adverse 512 result on ~3× the
+questions across dissimilar corpora. Two new user-approved golden sets were
+run against pinned tags ingested into the local testdb: `confident-ai/deepeval`
+`python-v4.2.4` (18 q, 11,598 chunks) and `firecrawl/firecrawl` `v2.11.0`
+(20 q, 4,409 chunks — first TypeScript corpus through the eval path). Both
+1536 hybrid validation runs had **zero unindexed labels**, so no label
+corrections were needed. Matrix: dims `{1536, 768, 640, 512, 384}` ×
+`{hybrid, vector}` per repo; pooled analysis pairs per-question rows across
+all three corpora (58 questions) via `eval.analyze_dims`, which now namespaces
+question IDs by `repo@ref` — per-repo aggregates are never averaged.
+
+**Pooled results (58 paired questions):**
+
+| dims | hybrid MRR@5 | hybrid Δ@5 vs 1536 (95% CI) | vector MRR@5 | vector Δ@5 vs 1536 (95% CI) | vector Δ@10 (95% CI) |
+|---:|---:|---:|---:|---:|---:|
+| 1536 | 0.441 | — | 0.468 | — | — |
+| 768 | 0.439 | −0.002 [−0.039, +0.033] | 0.461 | −0.007 [−0.036, +0.016] | −0.012 [−0.040, +0.012] |
+| 640 | 0.442 | +0.001 [−0.036, +0.036] | 0.452 | −0.016 [−0.050, +0.011] | −0.018 [−0.052, +0.010] |
+| **512** | **0.441** | **−0.000 [−0.034, +0.029]** | **0.431** | **−0.037 [−0.078, −0.004]** | **−0.044 [−0.084, −0.011]** |
+| 384 | 0.435 | −0.006 [−0.053, +0.038] | 0.428 | −0.041 [−0.099, +0.016] | −0.041 [−0.100, +0.013] |
+
+**Gate verdicts (512 needed all three):**
+
+1. **Per repo — FAIL.** Deepeval hybrid@512: hit@5 falls 0.444→0.389 and q17
+   is newly missed at k=5 (final rank 5→6, the q02-style cutoff pattern).
+   Firecrawl holds hit@5 (0.500) but q13 becomes a top-10 miss (10→—).
+   FastAPI (Stage A) passes at k=5.
+2. **Pooled — FAIL.** The point delta (−0.000 @5) satisfies ≥ −0.01, but the
+   95% CI [−0.034, +0.029] does not exclude outcomes worse than −0.02.
+3. **Stability — FAIL.** The Stage A vector-only finding replicates when
+   pooled: 512 is −0.037 MRR@5 with a CI excluding zero (and −0.044 @10),
+   while 768/640 are not distinguishable from 1536. Per repo the vector effect
+   is uneven — deepeval slightly *improves* at 512 (+0.014), firecrawl
+   degrades (−0.044 @10, CI excludes zero), FastAPI degrades (−0.096) — so
+   the truncation risk is corpus-dependent, exactly what makes it unsafe.
+
+**Decision:** 512 is **rejected** as a migration candidate. Final answer for
+exp8: **stay at `halfvec(1536)`**. Stage D (truncation ≡ native-512) does not
+run; exp9 (512 migration) is not opened. Revisit only when the retrieval log
+supplies real-query eval data.
+
+**Side observation (not a gate):** absolute retrieval quality on the new
+corpora is far below FastAPI at every dim (hybrid hit@5: deepeval 0.444,
+firecrawl 0.500 vs FastAPI 0.900), with all labels indexed. The FastAPI-tuned
+fusion/limit settings generalize worse to a large Python monorepo and a
+TypeScript monorepo — candidate follow-up alongside exp6 reranking and exp9
+(limit sweep), independent of dimensionality.
+
+**Artifacts:** `runs/exp8_b_{deepeval,firecrawl}_{h,v}_{1536,768,640,512,384}.json`;
+pooled analysis via
+`uv run python -m eval.analyze_dims eval/runs/exp8_sweep_{h,v}_{1536,768,640,512,384}.json eval/runs/exp8_b_*.json`.
+
+---
+
+## EXP 8-C — direct large-corpus V2 latency (DONE — gate passed ~15× under)
+
+**Goal:** replace exp7's ×4–6 latency extrapolation with direct measurement.
+`eval.explain_vector --repo/--ref/--query`, 50 timed production-shaped exact
+scans per ref (`halfvec(1536)`, no index, EXPLAIN confirmed no HNSW), against
+every live ref in the local testdb — eight repo/refs, 51,059 live chunks,
+sizes 1.6k–11.7k. No further ingests were needed: the Stage B tags plus
+existing refs already exceed the planned ~23k t4g corpus.
+
+| repo@ref | live chunks | p50 | p95 |
+|---|---:|---:|---:|
+| pallets/flask@main | 1,622 | 2.08 ms | 2.36 ms |
+| firecrawl/firecrawl@v2.11.0 | 4,409 | 8.11 ms | 10.51 ms |
+| jballo/nous-core@main | 4,799 | 10.91 ms | 18.62 ms |
+| tiangolo/fastapi@0.115.6 | 5,129 | 3.31 ms | 4.73 ms |
+| fastapi/fastapi@master | 5,686 | 3.72 ms | 4.87 ms |
+| firecrawl/firecrawl@main | 6,074 | 10.13 ms | 11.46 ms |
+| confident-ai/deepeval@python-v4.2.4 | 11,598 | 15.08 ms | 16.43 ms |
+| confident-ai/deepeval@main | 11,742 | 14.11 ms | 16.09 ms |
+
+**Gate:** searches are repo-filtered, so the largest single ref is what
+matters: `confident-ai/deepeval@main` at 11,742 chunks measures **16.09 ms
+p95** — ~15× under the 250 ms gate. Scaling across the eight sizes is roughly
+linear at ~0.7–2.3 µs/chunk (per-repo spread is systematic, not noise); a
+25–30k-chunk repo projects under ~70 ms p95 at the worst observed rate. The
+V2 extrapolation caveat in `docs/storage-capacity-plan.md` is closed with
+these measurements.
+
+**Environment correction:** the database serving `localhost:5433` is the
+Compose service **`camino-testdb-1`**, not the stopped-name container
+`camino-exp7-testdb` (which has no host port mapping). All exp7/exp8 runs hit
+`camino-testdb-1`; results are unaffected. Restart with
+`docker compose start testdb` (or `docker start camino-testdb-1`).
+
+**Artifacts:** `runs/exp8_c_latency.txt` (full EXPLAIN ANALYZE plans +
+timings).
 
 ---
 
@@ -444,7 +677,16 @@ noted.
 but does not close q03/q17; BGE blend rrf_w=0.9 fixes q17, leaving only q03. Not
 default in prod.
 
-### Exp 7 — Raise final `limit` / agent context window
+### Exp 8 — Confirm dimension truncation on a broader set (DONE)
+
+All stages complete. Stages A (`EXP 8-A`) and B (`EXP 8-B`) are adverse for
+512 — every gate failed — so the final answer is `halfvec(1536)`; Stage D
+does not run and exp9 (512 migration) is not opened. Stage C (`EXP 8-C`)
+measured V2 exact-scan latency directly: 16.09 ms p95 on the largest ref
+(11,742 chunks), ~15× under the 250 ms gate, closing the extrapolation caveat
+in `docs/storage-capacity-plan.md`.
+
+### Exp 9 — Raise final `limit` / agent context window
 
 **Hypothesis:** relevant chunks are already in fused top 6–9; agent may succeed
 with a larger context even if @5 eval misses.
@@ -454,16 +696,16 @@ report hit@10 alongside hit@5.
 
 **Risk:** inflates latency/cost for production agent; measure before shipping.
 
-### Exp 8 — Class-aware embedding splits (chunk boundaries)
+### Exp 10 — Class-aware embedding splits (chunk boundaries)
 
 **Hypothesis:** `APIRoute` embedding still weak despite NL header; splitting large
 classes into per-method chunks (or embedding method signatures as separate rows)
 improves vector rank for routing questions.
 
-**Approach:** parser change + **re-ingest required**. A/B under separate
-`installation_id` to preserve comparability.
+**Approach:** parser change + **re-ingest required**. A/B under a separate
+testdb/ref to preserve comparability.
 
-### Exp 9 — Import-following second hop
+### Exp 11 — Import-following second hop
 
 **Hypothesis:** some questions need symbols from imported modules not co-located
 with the first hit.
@@ -499,7 +741,7 @@ Measured pairings so far:
   filter for the candidate pool, demotion for edge paths that slip through.
 - **Remaining gap = q03/q17.** q03 has relevant chunks in the pool (vector 20 /
   FTS 6) but not top-5; q17 at final rank 6–7. Exp6 rerank did not close the gap.
-  Larger final `limit` (exp7) or class-aware splits (exp8) are the natural next steps.
+  Larger final `limit` (exp9) or class-aware splits (exp10) are the natural next steps.
 
 Current best (shipped) = **exp1 + exp3 + exp4 + exp5** → **0.900 / 0.858 / 0.766**
 vs baseline 0.800 / 0.767 / 0.649. Remaining misses: **q03, q17**.

@@ -13,9 +13,11 @@ def _normalized_sql(connection: MagicMock) -> list[str]:
     ]
 
 
-async def test_lifespan_provisions_schema_extras():
+async def test_lifespan_provisions_schema_extras(monkeypatch):
     """create_all() cannot express the view or the composite/partial/vector
     indexes, so lifespan must create them explicitly on every startup."""
+    monkeypatch.setattr(settings, "vector_type", "vector")
+    monkeypatch.setattr(settings, "vector_index", "hnsw")
     connection = MagicMock()
     mock_engine = MagicMock()
     mock_engine.connect.return_value.__enter__.return_value = connection
@@ -60,12 +62,29 @@ async def test_lifespan_provisions_schema_extras():
     )
     assert any(
         "CREATE INDEX IF NOT EXISTS ix_embeddings_hnsw" in sql
+        and "embedding vector_cosine_ops" in sql
         for sql in statements
     )
     assert any(
         "CREATE INDEX IF NOT EXISTS ix_chunks_search" in sql
         for sql in statements
     )
+
+
+def test_embedding_index_ddl_uses_halfvec_operator_class(monkeypatch):
+    monkeypatch.setattr(settings, "vector_type", "halfvec")
+    monkeypatch.setattr(settings, "vector_index", "hnsw")
+
+    ddl = main._embedding_index_ddl()
+
+    assert ddl is not None
+    assert "embedding halfvec_cosine_ops" in ddl
+
+
+def test_embedding_index_ddl_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(settings, "vector_index", "none")
+
+    assert main._embedding_index_ddl() is None
 
 
 def test_lifespan_starts_and_stops_worker(monkeypatch):

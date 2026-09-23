@@ -1,6 +1,15 @@
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 
-from eval.run_eval import RetrievalConfig, _print_report, main
+from eval.run_eval import (
+    RetrievalConfig,
+    _print_report,
+    _require_indexed_labels,
+    _resolve_relevant_ids,
+    main,
+)
 
 
 def test_retrieval_config_defaults_match_cli_experiment_defaults():
@@ -8,6 +17,7 @@ def test_retrieval_config_defaults_match_cli_experiment_defaults():
 
     assert cfg.top_n == 60
     assert cfg.path_penalty == 0.3
+    assert cfg.vector_dims is None
 
 
 def test_print_report_tolerates_legacy_config_without_rerank_keys(capsys):
@@ -54,3 +64,52 @@ def test_main_rejects_out_of_range_rerank_rrf_weight(monkeypatch):
 
     with pytest.raises(SystemExit, match="--rerank-rrf-weight 1.5 is out of range"):
         main()
+
+
+def test_main_rejects_out_of_range_vector_dims(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["run_eval", "--vector-dims", "1537"])
+
+    with pytest.raises(SystemExit, match="--vector-dims must be between 1 and 1536"):
+        main()
+
+
+def test_require_indexed_labels_rejects_missing_fixture():
+    with pytest.raises(SystemExit, match="no golden-dataset labels exist"):
+        _require_indexed_labels({}, "owner/repo", "v1")
+
+
+def test_require_indexed_labels_accepts_complete_fixture():
+    _require_indexed_labels({("path.py", "symbol"): [1]}, "owner/repo", "v1")
+
+
+def test_require_indexed_labels_rejects_partial_fixture():
+    relevant_ids = {
+        ("indexed.py", "indexed_symbol"): [1],
+        ("missing.py", "missing_symbol"): [],
+    }
+
+    with pytest.raises(
+        SystemExit,
+        match="1 of 2 golden-dataset labels are absent from the live index",
+    ):
+        _require_indexed_labels(relevant_ids, "owner/repo", "v1")
+
+
+def test_resolve_relevant_ids_preserves_unindexed_labels():
+    session = Mock()
+    session.execute.return_value.all.return_value = [
+        SimpleNamespace(id=1, file_path="indexed.py", symbol_name="indexed_symbol")
+    ]
+    questions = [
+        {
+            "relevant": [
+                {"file": "indexed.py", "symbol": "indexed_symbol"},
+                {"file": "missing.py", "symbol": "missing_symbol"},
+            ]
+        }
+    ]
+
+    assert _resolve_relevant_ids(session, "owner/repo", "v1", questions) == {
+        ("indexed.py", "indexed_symbol"): [1],
+        ("missing.py", "missing_symbol"): [],
+    }

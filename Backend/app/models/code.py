@@ -1,12 +1,21 @@
 import datetime as dt
 from typing import Any
-from pgvector.sqlalchemy import Vector
+from pgvector.sqlalchemy import HALFVEC, Vector
 from sqlmodel import Column, Field, SQLModel
 from sqlalchemy import DateTime, Integer, UniqueConstraint, ForeignKey
 from sqlalchemy.dialects.postgresql import TSVECTOR
 
-from app.services.parser import CodeChunk
+from app.config import settings
 from app.services.embeddings import EMBED_DIMENSIONS
+from app.services.parser import CodeChunk
+
+
+EMBEDDING_COLUMN_TYPE = (
+    HALFVEC(EMBED_DIMENSIONS)
+    if settings.vector_type == "halfvec"
+    else Vector(EMBED_DIMENSIONS)
+)
+
 
 class CodeChunkModel(SQLModel, table=True):
     __tablename__ = "code_chunks"
@@ -108,5 +117,5 @@ class CodeChunkEmbedding(SQLModel, table=True):
     dimension: int
     embedding: Any = Field(
         default=None,
-        sa_column=Column(Vector(EMBED_DIMENSIONS))
+        sa_column=Column(EMBEDDING_COLUMN_TYPE),
     )

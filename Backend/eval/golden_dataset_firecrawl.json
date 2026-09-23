@@ -1,0 +1,160 @@
+{
+  "repo_name": "firecrawl/firecrawl",
+  "repo_version": "v2.11.0",
+  "ref": "v2.11.0",
+  "description": "User-approved Stage B golden set for Firecrawl 2.11.0. The first run must still verify that every label is representable by the production chunker; parser-mismatch labels are corrected, not counted as retrieval misses.",
+  "questions": [
+    {
+      "id": "q01",
+      "question": "How does the API authenticate normal API keys, OAuth tokens, preview traffic, and optionally keyless requests?",
+      "relevant": [
+        {"file": "apps/api/src/controllers/auth.ts", "symbol": "authenticateUser"},
+        {"file": "apps/api/src/controllers/auth.ts", "symbol": "supaAuthenticateUser"}
+      ]
+    },
+    {
+      "id": "q02",
+      "question": "How does a v2 scrape request get validated, permission-checked, assigned a job, and reconciled against keyless credits?",
+      "relevant": [
+        {"file": "apps/api/src/controllers/v2/scrape.ts", "symbol": "scrapeController"}
+      ]
+    },
+    {
+      "id": "q03",
+      "question": "How does the crawl endpoint merge natural-language prompt options with explicitly supplied crawler options before starting work?",
+      "relevant": [
+        {"file": "apps/api/src/controllers/v2/crawl.ts", "symbol": "crawlController"}
+      ]
+    },
+    {
+      "id": "q04",
+      "question": "How is crawl status assembled from queue-group statistics, stored crawl state, billing totals, errors, and paginated documents?",
+      "relevant": [
+        {"file": "apps/api/src/controllers/v2/crawl-status.ts", "symbol": "crawlStatusController"}
+      ]
+    },
+    {
+      "id": "q05",
+      "question": "How does batch scraping validate or ignore invalid URLs, reject blocked sites, and enqueue a group of scrape jobs?",
+      "relevant": [
+        {"file": "apps/api/src/controllers/v2/batch-scrape.ts", "symbol": "batchScrapeController"}
+      ]
+    },
+    {
+      "id": "q06",
+      "question": "How does the parse endpoint classify an uploaded PDF, office document, or HTML file and turn multipart form data into a parse request?",
+      "relevant": [
+        {"file": "apps/api/src/controllers/v2/parse.ts", "symbol": "detectUploadedFileKind"},
+        {"file": "apps/api/src/controllers/v2/parse.ts", "symbol": "parseMultipartPayloadMiddleware"}
+      ]
+    },
+    {
+      "id": "q07",
+      "question": "How does an uploaded parse request select the required engine, reject unsupported scrape options, and process the file?",
+      "relevant": [
+        {"file": "apps/api/src/controllers/v2/parse.ts", "symbol": "getParseForceEngine"},
+        {"file": "apps/api/src/controllers/v2/parse.ts", "symbol": "getUnsupportedParseOptionError"},
+        {"file": "apps/api/src/controllers/v2/parse.ts", "symbol": "parseController"}
+      ]
+    },
+    {
+      "id": "q08",
+      "question": "How does the v2 search endpoint enforce ZDR rules, reserve credits, execute search, and optionally scrape results?",
+      "relevant": [
+        {"file": "apps/api/src/controllers/v2/search.ts", "symbol": "searchController"},
+        {"file": "apps/api/src/search/execute.ts", "symbol": "executeSearch"}
+      ]
+    },
+    {
+      "id": "q09",
+      "question": "Where are web and news search results filtered for blocked URLs, scraped in parallel, and merged back with their content?",
+      "relevant": [
+        {"file": "apps/api/src/search/scrape.ts", "symbol": "getItemsToScrape"},
+        {"file": "apps/api/src/search/scrape.ts", "symbol": "scrapeSearchResults"},
+        {"file": "apps/api/src/search/scrape.ts", "symbol": "mergeScrapedContent"}
+      ]
+    },
+    {
+      "id": "q10",
+      "question": "How does the map endpoint discover links, enforce permissions and timeouts, and fall back when its preferred resolver fails?",
+      "relevant": [
+        {"file": "apps/api/src/controllers/v2/map.ts", "symbol": "mapController"}
+      ]
+    },
+    {
+      "id": "q11",
+      "question": "What happens when the final member of a crawl finishes, including logging totals and sending completion webhooks for v0 versus v1?",
+      "relevant": [
+        {"file": "apps/api/src/services/worker/crawl-logic.ts", "symbol": "finishCrawlSuper"}
+      ]
+    },
+    {
+      "id": "q12",
+      "question": "How are webhook event filters applied, payloads signed, private destinations blocked, and deliveries queued or sent directly?",
+      "relevant": [
+        {"file": "apps/api/src/services/webhook/delivery.ts", "symbol": "webhookEventMatchesFilter"},
+        {"file": "apps/api/src/services/webhook/delivery.ts", "symbol": "WebhookSender"}
+      ]
+    },
+    {
+      "id": "q13",
+      "question": "How does billing track a team's credit use and refund request-scoped credits if the queued billing operation fails?",
+      "relevant": [
+        {"file": "apps/api/src/services/billing/credit_billing.ts", "symbol": "billTeam"}
+      ]
+    },
+    {
+      "id": "q14",
+      "question": "How does Firecrawl decide whether a team has enough credits, including preview teams, bypass flags, and graceful overages?",
+      "relevant": [
+        {"file": "apps/api/src/services/billing/credit_billing.ts", "symbol": "checkTeamCredits"},
+        {"file": "apps/api/src/services/billing/credit_billing.ts", "symbol": "evaluateTeamCredits"}
+      ]
+    },
+    {
+      "id": "q15",
+      "question": "Where are endpoint-specific rate limiters selected and configured for scrape, crawl, search, and status traffic?",
+      "relevant": [
+        {"file": "apps/api/src/services/rate-limiter.ts", "symbol": "getRateLimiter"}
+      ]
+    },
+    {
+      "id": "q16",
+      "question": "How does the NuQ abstraction enqueue, claim, retry, and inspect distributed scrape jobs across its queue backends?",
+      "relevant": [
+        {"file": "apps/api/src/services/worker/nuq.ts", "symbol": "NuQ"}
+      ]
+    },
+    {
+      "id": "q17",
+      "question": "How does the JavaScript SDK poll a crawl until completion, preserve job context on permanent errors, and time out correctly?",
+      "relevant": [
+        {"file": "apps/js-sdk/firecrawl/src/v2/methods/crawl.ts", "symbol": "getCrawlStatus"},
+        {"file": "apps/js-sdk/firecrawl/src/v2/methods/crawl.ts", "symbol": "waitForCrawlCompletion"}
+      ]
+    },
+    {
+      "id": "q18",
+      "question": "How does the JavaScript SDK recognize both Zod v3 and v4 schemas and convert them to JSON Schema with safe fallbacks?",
+      "relevant": [
+        {"file": "apps/js-sdk/firecrawl/src/utils/zodSchemaToJson.ts", "symbol": "isZodSchema"},
+        {"file": "apps/js-sdk/firecrawl/src/utils/zodSchemaToJson.ts", "symbol": "zodSchemaToJsonSchema"}
+      ]
+    },
+    {
+      "id": "q19",
+      "question": "Where is the typed Firecrawl v2 client assembled from API key and transport options and exposed as scrape, parse, search, and crawl methods?",
+      "relevant": [
+        {"file": "apps/js-sdk/firecrawl/src/v2/client.ts", "symbol": "FirecrawlClient"}
+      ]
+    },
+    {
+      "id": "q20",
+      "question": "How does the main web-scraper pipeline initialize a scraper, execute it, and return a normalized document and cost tracking data?",
+      "relevant": [
+        {"file": "apps/api/src/main/runWebScraper.ts", "symbol": "startWebScraperPipeline"},
+        {"file": "apps/api/src/main/runWebScraper.ts", "symbol": "runWebScraper"}
+      ]
+    }
+  ]
+}
