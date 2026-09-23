@@ -55,7 +55,15 @@ def _minimum_rank(values: Iterable[int | None]) -> int | None:
 def _parse_questions(report: dict, path: Path) -> tuple[QuestionRanks, ...]:
     questions = []
     indexed_labels = 0
+    seen_question_ids: set[str] = set()
     for row in report.get("per_question", []):
+        question_id = str(row["id"])
+        if question_id in seen_question_ids:
+            raise ValueError(
+                f"{path}: duplicate question id {question_id!r} in per_question"
+            )
+        seen_question_ids.add(question_id)
+
         diagnosis = row.get("diagnosis")
         if not isinstance(diagnosis, list) or not diagnosis:
             raise ValueError(
@@ -66,7 +74,7 @@ def _parse_questions(report: dict, path: Path) -> tuple[QuestionRanks, ...]:
         relevant_ranks = tuple(item.get("final_rank") for item in diagnosis)
         questions.append(
             QuestionRanks(
-                question_id=str(row["id"]),
+                question_id=question_id,
                 question=str(row.get("question", "")),
                 final_rank=row.get("first_rank", _minimum_rank(relevant_ranks)),
                 vector_rank=_minimum_rank(

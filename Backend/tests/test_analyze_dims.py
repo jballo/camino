@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -178,4 +179,32 @@ def test_load_runs_rejects_all_unindexed_report(tmp_path):
     )
 
     with pytest.raises(ValueError, match="all golden labels are unindexed"):
+        load_runs([path])
+
+
+def test_load_runs_rejects_duplicate_question_ids(tmp_path):
+    path = tmp_path / "duplicate.json"
+    question = {
+        "id": "q01",
+        "question": "question",
+        "first_rank": 1,
+        "diagnosis": [
+            {
+                "indexed": True,
+                "vector_rank": 1,
+                "final_rank": 1,
+            }
+        ],
+    }
+    path.write_text(
+        json.dumps(
+            {
+                "label": "duplicate",
+                "config": {"mode": "hybrid", "limit": 10, "vector_dims": 1536},
+                "per_question": [question, question],
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="duplicate question id 'q01'"):
         load_runs([path])
