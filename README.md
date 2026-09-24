@@ -414,7 +414,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [x] Contribution-target discovery from repository guidance, branch metadata, and the
   default branch, with issue-thread and user overrides for briefs
 - [x] tree-sitter parsing → symbol-level chunks (path, name, type, lines, source, signature/docstring)
-- [x] Postgres + pgvector: chunks table (HNSW embedding col + tsvector col)
+- [x] Postgres + pgvector: chunks table (halfvec embedding col, exact scan + tsvector col)
 - [x] Embedding pipeline (OpenAI `text-embedding-3-small`, enriched NL headers)
 - [x] Full-text search pipeline (identifier tokenization + OR query)
 - [x] Hybrid retrieval via Reciprocal Rank Fusion (exp1–5 shipped)

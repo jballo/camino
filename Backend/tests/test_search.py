@@ -83,7 +83,7 @@ def test_vector_search_returns_ranked_tuples():
     sql = " ".join(str(mock_session.execute.call_args.args[0]).split())
     assert "JOIN code_chunks c" in sql
     assert "c.generation = :generation" in sql
-    assert "CAST(:embedding AS vector(1536))" in sql
+    assert "CAST(:embedding AS halfvec(1536))" in sql
     assert mock_session.execute.call_args.args[1]["generation"] == "generation-1"
 
 

@@ -25,11 +25,13 @@ async def test_lifespan_provisions_schema_extras(monkeypatch):
     with (
         patch.object(main, "engine", mock_engine),
         patch.object(main.SQLModel.metadata, "create_all") as create_all,
+        patch.object(main, "verify_embedding_schema") as verify_schema,
     ):
         async with main.lifespan(main.app):
             pass
 
     create_all.assert_called_once_with(mock_engine)
+    verify_schema.assert_called_once_with(connection)
     statements = _normalized_sql(connection)
     assert "CREATE EXTENSION IF NOT EXISTS vector" in statements
     assert "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS ref VARCHAR" in statements
@@ -69,6 +71,11 @@ async def test_lifespan_provisions_schema_extras(monkeypatch):
         "CREATE INDEX IF NOT EXISTS ix_chunks_search" in sql
         for sql in statements
     )
+    assert (
+        "ALTER TABLE code_chunk_embeddings "
+        "ALTER COLUMN embedding SET STORAGE PLAIN"
+        in statements
+    )
 
 
 def test_embedding_index_ddl_uses_halfvec_operator_class(monkeypatch):
@@ -100,6 +107,7 @@ def test_lifespan_starts_and_stops_worker(monkeypatch):
         patch.object(main, "engine", mock_engine),
         patch.object(main.SQLModel.metadata, "create_all"),
         patch.object(main, "worker_loop", fake_loop),
+        patch.object(main, "verify_embedding_schema"),
     ):
         with TestClient(main.app) as _client:
             task = main.app.state.worker_task
@@ -117,6 +125,7 @@ def test_lifespan_skips_worker_when_disabled(monkeypatch):
     with (
         patch.object(main, "engine", mock_engine),
         patch.object(main.SQLModel.metadata, "create_all"),
+        patch.object(main, "verify_embedding_schema"),
     ):
         with TestClient(main.app) as _client:
             assert main.app.state.worker_task is None

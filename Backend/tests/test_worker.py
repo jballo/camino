@@ -17,6 +17,7 @@ from app.services.repository_ingestion import (
 )
 from app.tour import TourGenerationCancelledError, TourGenerationError
 from app.worker import (
+    _run_standalone,
     _ensure_ingestion_owned,
     _requeue_or_fail,
     _stage_owned_ingestion_completion,
@@ -25,6 +26,24 @@ from app.worker import (
 )
 
 WORKER_ID = "test-host:1:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+
+async def test_standalone_worker_verifies_embedding_schema():
+    connection = MagicMock()
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value.__enter__.return_value = connection
+    loop = asyncio.get_running_loop()
+
+    with (
+        patch("app.worker.engine", mock_engine),
+        patch("app.worker.verify_embedding_schema") as verify_schema,
+        patch("app.worker.worker_loop", new=AsyncMock()) as loop_worker,
+        patch.object(loop, "add_signal_handler"),
+    ):
+        await _run_standalone()
+
+    verify_schema.assert_called_once_with(connection)
+    loop_worker.assert_awaited_once()
 
 
 def _artifact() -> TourArtifact:

@@ -133,16 +133,30 @@ stack boundaries and deployment order.
 ### RDS and migrations
 
 The current lifespan hook in `app/main.py` runs `CREATE EXTENSION`,
-`SQLModel.metadata.create_all()`, and the custom composite, partial, HNSW, and GIN
-indexes plus `live_code_chunks`. It intentionally does not perform compatibility
-migrations. `create_all()` creates missing tables but does not alter existing ones, so
-a database created before the shared `jobs` table or generation-based chunk schema must
-be recreated for local development or upgraded explicitly before startup.
+`SQLModel.metadata.create_all()`, and the custom composite, partial, and GIN indexes
+plus `live_code_chunks` and `PLAIN` embedding storage. It intentionally does not
+perform compatibility migrations. `create_all()` creates missing tables but does not
+alter existing ones, so a database created before the shared `jobs` table or
+generation-based chunk schema must be recreated for local development or upgraded
+explicitly before startup.
+
+#### Local DB created before 2026-09
+
+The default embedding schema is now `halfvec(1536)` with exact scans. Recreate an old
+local volume, or convert an fp32 volume once before startup:
+
+```sql
+DROP INDEX IF EXISTS ix_embeddings_hnsw;
+ALTER TABLE code_chunk_embeddings
+  ALTER COLUMN embedding TYPE halfvec(1536) USING embedding::halfvec(1536),
+  ALTER COLUMN embedding SET STORAGE PLAIN;
+ANALYZE code_chunk_embeddings;
+```
 
 Before connecting ECS to RDS:
 
 1. Add Alembic and create an initial migration for all SQLModel tables, the `vector`
-   extension, HNSW index, and GIN index.
+   extension, `halfvec(1536)` embedding column with `PLAIN` storage, and GIN index.
 2. Keep schema migration permission separate from the runtime application's normal
    database access where practical.
 3. Package migrations in the backend image and execute them as a one-off ECS task before

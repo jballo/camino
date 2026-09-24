@@ -38,6 +38,11 @@ from app.services.search_index import (
     rebuild_search_vector,
 )
 
+# Retained for eval harnesses that exercise API paths requiring an installation
+# identity. Local fixture ingestion itself is now keyed by repository and ref.
+EVAL_INSTALLATION_ID = 999_999_999
+EMBEDDING_INSERT_BATCH_SIZE = 128
+
 # The eval fixture is checked out (not committed) so it can be reproduced from a
 # fresh clone. Pinned to the version the golden dataset was hand-labeled against;
 # keep this in sync with ``repo_version`` in golden_dataset.json.
@@ -137,16 +142,23 @@ async def ingest(
         session.add_all(chunk_models)
         session.flush()
 
-        embedding_models = [
-            CodeChunkEmbedding(
-                chunk_id=chunk.id,
-                model_name=EMBED_MODEL,
-                dimension=EMBED_DIMENSIONS,
-                embedding=vector,
-            )
-            for chunk, vector in zip(chunk_models, vectors)
-        ]
-        session.add_all(embedding_models)
+        embedding_count = 0
+        for start in range(0, len(chunk_models), EMBEDDING_INSERT_BATCH_SIZE):
+            embedding_models = [
+                CodeChunkEmbedding(
+                    chunk_id=chunk.id,
+                    model_name=EMBED_MODEL,
+                    dimension=EMBED_DIMENSIONS,
+                    embedding=vector,
+                )
+                for chunk, vector in zip(
+                    chunk_models[start:start + EMBEDDING_INSERT_BATCH_SIZE],
+                    vectors[start:start + EMBEDDING_INSERT_BATCH_SIZE],
+                )
+            ]
+            session.add_all(embedding_models)
+            session.flush()
+            embedding_count += len(embedding_models)
 
         session.exec(
             text(populate_search_vector_sql(only_null=True)).bindparams(
@@ -183,11 +195,11 @@ async def ingest(
         inserted = len(chunk_models)
 
     print(
-        f"ingested: chunks={inserted} embeddings={len(embedding_models)} "
+        f"ingested: chunks={inserted} embeddings={embedding_count} "
         f"repo={repo_name!r} ref={ref!r} "
         f"elapsed={time.monotonic() - started:.1f}s"
     )
-    return {"chunks": inserted, "embeddings": len(embedding_models)}
+    return {"chunks": inserted, "embeddings": embedding_count}
 
 
 def main() -> None:

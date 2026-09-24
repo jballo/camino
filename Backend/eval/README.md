@@ -9,8 +9,9 @@ Six eval harnesses live here:
 5. **Tour judge eval** — does an LLM judge score generated tours for faithfulness, relevance, completeness, and ordering? (needs OpenAI; DB only for live generation)
 6. **Vector SQL diagnostic** — does the production vector query use HNSW, and what are its p50/p95 SQL latencies? (needs DB + OpenAI)
 
-Exp7 selected halfvec exact scan (V2); the matrix below remains the reproduction
-procedure. Tour evaluation has both deterministic grounding checks and an
+Exp7 selected halfvec exact scan (V2), and the application defaults now match that
+variant; the matrix below remains the reproduction procedure. Tour evaluation has
+both deterministic grounding checks and an
 LLM-as-judge baseline for quality trends.
 Agent smoke eval remains a lightweight end-to-end check over the current ReAct answer
 path.
@@ -54,8 +55,9 @@ Eval preflight checks and retrieval read through `live_code_chunks`, so only the
 generation published by `ingest_local.py` is visible to the harnesses.
 Unlike production ingestion, which bounds memory with `INGEST_WAVE_CHUNKS` and commits
 staged waves, the fixture ingester builds the fixture in memory and replaces/publishes
-it in one transaction. It exercises generation-scoped search, but not worker leases,
-wave retries, or cancellation.
+it in one transaction. Embedding rows are flushed in small batches within that
+transaction to avoid oversized SQL statements. It exercises generation-scoped search,
+but not worker leases, wave retries, or cancellation.
 
 Use `--no-clone` to ingest an already-present path only. To re-fetch a clean
 fixture, delete `eval/.data/` and re-run.

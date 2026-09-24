@@ -9,6 +9,7 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.db import engine
+from app.db_schema import verify_embedding_schema
 
 from app.api import agent, briefs, github, journeys, repositories
 from app.webhooks import clerk, github as github_webhook
@@ -62,8 +63,9 @@ async def lifespan(app: FastAPI):
     SQLModel.metadata.create_all(engine)
 
     with engine.connect() as conn:
-        # create_all() cannot express these: the composite, partial, HNSW, and
-        # GIN indexes, and the view that exposes only live index generations.
+        # create_all() cannot express these: column storage, the composite,
+        # partial, HNSW, and GIN indexes, and the view that exposes only live
+        # index generations.
         # It also cannot add columns to tables created by older releases.
         conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS ref VARCHAR"))
         conn.execute(text(
@@ -125,10 +127,15 @@ async def lifespan(app: FastAPI):
         if embedding_index_ddl is not None:
             conn.execute(text(embedding_index_ddl))
         conn.execute(text("""
+            ALTER TABLE code_chunk_embeddings
+            ALTER COLUMN embedding SET STORAGE PLAIN
+        """))
+        conn.execute(text("""
             CREATE INDEX IF NOT EXISTS ix_chunks_search
             ON code_chunks USING gin (search_vector)
         """))
         conn.commit()
+        verify_embedding_schema(conn)
 
     stop_event = asyncio.Event()
     worker_task = None
