@@ -39,5 +39,9 @@ if [[ "${ready}" != "true" ]]; then
 fi
 
 cd "${backend_dir}"
+# The disposable container is isolated from the application database. Mask the
+# caller's database identity so a coincidental name match cannot trip the
+# integration fixture's deliberately conservative safety check.
+DATABASE_URL="postgresql://localhost/camino_application_sentinel" \
 TEST_DATABASE_URL="postgresql://test_runner@127.0.0.1:${host_port}/testdb" \
   uv run pytest "$@"
