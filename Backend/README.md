@@ -480,6 +480,8 @@ Before merging any backend PR, run the complete suite:
 
 On first use, the script shallow-clones the pinned FastAPI `0.115.6` fixture into
 the gitignored `eval/.data/fastapi` directory, so network access is required once.
+If an earlier clone was interrupted, the script preserves that incomplete directory
+with an `.incomplete.<timestamp>.<pid>` suffix and installs a fresh clone automatically.
 It then starts an isolated PostgreSQL 16 + pgvector container on loopback, waits
 for it, runs pytest with a passwordless `TEST_DATABASE_URL`, and removes the
 container on exit. The complete run should report **zero skipped tests**. Docker

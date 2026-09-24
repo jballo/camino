@@ -5,19 +5,44 @@ backend_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 container_name="camino-pytest-db-$$"
 container_id=""
 fixture_dir="${backend_dir}/eval/.data/fastapi"
+fixture_parent="$(dirname -- "${fixture_dir}")"
+fixture_temp_dir=""
 host_port="${CAMINO_PYTEST_DB_PORT:-55432}"
 
 cleanup() {
   if [[ -n "${container_id}" ]]; then
     docker stop "${container_id}" >/dev/null 2>&1 || true
   fi
+  if [[ -n "${fixture_temp_dir}" ]]; then
+    case "${fixture_temp_dir}" in
+      "${fixture_parent}"/.fastapi.tmp.*)
+        rm -rf -- "${fixture_temp_dir}"
+        ;;
+      *)
+        echo "Refusing to remove unexpected fixture temp path: ${fixture_temp_dir}" >&2
+        ;;
+    esac
+  fi
 }
 trap cleanup EXIT
 
 if [[ ! -f "${fixture_dir}/fastapi/applications.py" ]]; then
-  mkdir -p "$(dirname -- "${fixture_dir}")"
+  mkdir -p "${fixture_parent}"
+  fixture_temp_dir="$(mktemp -d "${fixture_parent}/.fastapi.tmp.XXXXXX")"
   git clone --depth 1 --branch 0.115.6 \
-    https://github.com/fastapi/fastapi.git "${fixture_dir}"
+    https://github.com/fastapi/fastapi.git "${fixture_temp_dir}"
+
+  if [[ -f "${fixture_dir}/fastapi/applications.py" ]]; then
+    : # Another invocation completed the fixture while this one cloned.
+  else
+    if [[ -e "${fixture_dir}" ]]; then
+      incomplete_dir="${fixture_dir}.incomplete.$(date +%s).$$"
+      mv -- "${fixture_dir}" "${incomplete_dir}"
+      echo "Preserved incomplete FastAPI fixture at ${incomplete_dir}" >&2
+    fi
+    mv -- "${fixture_temp_dir}" "${fixture_dir}"
+    fixture_temp_dir=""
+  fi
 fi
 
 container_id="$(docker run --rm \
