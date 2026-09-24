@@ -3,15 +3,19 @@ import os
 
 import pytest
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
 
-configured_database_url = os.environ.get("DATABASE_URL")
-configured_database_name = (
-    make_url(configured_database_url).database
-    if configured_database_url
-    else None
-)
-del configured_database_url
+def _database_name_or_none(database_url: str | None) -> str | None:
+    if not database_url:
+        return None
+    try:
+        return make_url(database_url).database
+    except ArgumentError:
+        return None
+
+
+configured_database_name = _database_name_or_none(os.environ.get("DATABASE_URL"))
 
 os.environ["DATABASE_URL"] = "postgresql://localhost/camino_test"
 os.environ["CLERK_WH_KEY"] = "SYNTHETIC_TEST_VALUE"

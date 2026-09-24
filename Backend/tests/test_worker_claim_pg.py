@@ -14,9 +14,12 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import os
+import subprocess
+import sys
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -49,6 +52,28 @@ SCRATCH_DB_PREFIX = "camino_worker_test"
 
 WORKER_A = "host-a:1:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 WORKER_B = "host-b:2:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+
+def test_invalid_application_database_url_does_not_block_test_collection():
+    environment = os.environ.copy()
+    environment["DATABASE_URL"] = "not a database URL"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            "tests/test_db_schema.py",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def _test_database_url(
