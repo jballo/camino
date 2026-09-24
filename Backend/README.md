@@ -461,20 +461,33 @@ See [eval/README.md](eval/README.md) and [eval/EXPERIMENTS.md](eval/EXPERIMENTS.
 
 ## Tests
 
+Use the secret-free suite for quick feedback while developing:
+
 ```bash
 uv run pytest
 ```
 
-Postgres claim/recovery tests in `tests/test_worker_claim_pg.py` need a real
-database for `FOR UPDATE SKIP LOCKED`. With the docker-compose Postgres running
-they are included in a plain `uv run pytest`: the fixture creates a scratch
-database with a unique `camino_worker_test_*` name on the `DATABASE_URL` server
-and drops it after the run. It never drops a pre-existing database. If Postgres
-is down, the module skips. Set `TEST_DATABASE_URL` to target an existing database
-instead (it gets `jobs` truncated); the fixture refuses to run if its database
-name matches `DATABASE_URL`, including through a different host alias. The normal,
-recommended command is still only `uv run pytest`; no manual test-database setup
-is needed.
+This command never uses Doppler or application credentials. Most tests run, while
+the real-PostgreSQL claim/recovery cases skip when `TEST_DATABASE_URL` is absent.
+Use `-rs` to display skip reasons.
+
+Before merging any backend PR, run the complete suite:
+
+```bash
+./scripts/test_all.sh
+```
+
+The script starts an isolated PostgreSQL 16 + pgvector container on loopback,
+waits for it, runs pytest with a passwordless `TEST_DATABASE_URL`, and removes the
+container on exit. The complete run should report **zero skipped tests**. Docker
+must be running; set `CAMINO_PYTEST_DB_PORT` only if the default host port `55432`
+is occupied. Pytest arguments pass through, for example
+`./scripts/test_all.sh -q`.
+
+Never point `TEST_DATABASE_URL` at the development or eval database. The integration
+fixture truncates `jobs` and `repo_index_state`. CI may provide its own dedicated
+throwaway database through `TEST_DATABASE_URL`; the fixture rejects a database name
+that matches the application database captured before test settings are sanitized.
 
 Current focused coverage includes retrieval/search tests, agent smoke helpers,
 ref-aware staged-generation ingestion and archive limits, contribution-target and live

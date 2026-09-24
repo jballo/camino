@@ -268,9 +268,12 @@ Details: [Backend/README.md](Backend/README.md) · [Frontend/README.md](Frontend
 ## Tests
 
 ```bash
-# Backend
+# Backend: quick, secret-free feedback (Postgres integration tests may skip)
 cd Backend
 uv run pytest
+
+# Backend: complete pre-merge suite (Docker required; zero skips expected)
+./scripts/test_all.sh
 
 # Frontend
 cd ../Frontend
@@ -280,14 +283,13 @@ npm run lint
 
 Backend coverage includes API/auth behavior, webhook cleanup, rate limiting, retrieval,
 ref-aware staged ingestion, tour and issue-brief generation/cancellation, contribution
-target discovery, shared-job lifecycle, and startup schema provisioning. When the
-docker-compose Postgres is available, the same command automatically creates and
-drops a uniquely named `camino_worker_test_*` scratch database for real concurrent
-claim/recovery tests without deleting a pre-existing database; it never truncates
-`onboarding_agent`, and rejects a `TEST_DATABASE_URL` whose database name matches
-`DATABASE_URL` (even through a different host alias). Frontend Vitest coverage exercises
-the shared direct-to-FastAPI client plus queued-ingestion polling, timeout,
-cancellation, and error behavior, plus contribution-target and issue-brief clients.
+target discovery, shared-job lifecycle, and startup schema provisioning. The complete
+backend command provisions and removes an isolated pgvector database for real concurrent
+claim/recovery tests; never point `TEST_DATABASE_URL` at the development or eval
+database because those tests truncate tables. See [Backend testing](Backend/README.md#tests)
+for the workflow and manual CI configuration. Frontend Vitest coverage exercises the
+shared direct-to-FastAPI client plus queued-ingestion polling, timeout, cancellation,
+and error behavior, plus contribution-target and issue-brief clients.
 
 ---
 
