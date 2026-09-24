@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import DEFAULT, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -19,13 +19,27 @@ async def test_lifespan_provisions_schema_extras(monkeypatch):
     monkeypatch.setattr(settings, "vector_type", "vector")
     monkeypatch.setattr(settings, "vector_index", "hnsw")
     connection = MagicMock()
+    schema_events: list[str] = []
+
+    def record_execute(statement):
+        schema_events.append(" ".join(str(statement).split()))
+        return DEFAULT
+
+    def record_verification(_connection):
+        schema_events.append("VERIFY_EMBEDDING_SCHEMA")
+
+    connection.execute.side_effect = record_execute
     mock_engine = MagicMock()
     mock_engine.connect.return_value.__enter__.return_value = connection
 
     with (
         patch.object(main, "engine", mock_engine),
         patch.object(main.SQLModel.metadata, "create_all") as create_all,
-        patch.object(main, "verify_embedding_schema") as verify_schema,
+        patch.object(
+            main,
+            "verify_embedding_schema",
+            side_effect=record_verification,
+        ) as verify_schema,
     ):
         async with main.lifespan(main.app):
             pass
@@ -67,6 +81,12 @@ async def test_lifespan_provisions_schema_extras(monkeypatch):
         and "embedding vector_cosine_ops" in sql
         for sql in statements
     )
+    hnsw_position = next(
+        index
+        for index, event in enumerate(schema_events)
+        if "CREATE INDEX IF NOT EXISTS ix_embeddings_hnsw" in event
+    )
+    assert schema_events.index("VERIFY_EMBEDDING_SCHEMA") < hnsw_position
     assert any(
         "CREATE INDEX IF NOT EXISTS ix_chunks_search" in sql
         for sql in statements

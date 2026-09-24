@@ -123,6 +123,10 @@ async def lifespan(app: FastAPI):
             ON jobs (dedupe_key)
             WHERE status IN ('pending', 'running') AND dedupe_key IS NOT NULL
         """))
+        # Validate the configured type before issuing type-dependent index DDL,
+        # so mismatches fail with actionable migration guidance rather than an
+        # operator-class error from Postgres.
+        verify_embedding_schema(conn)
         embedding_index_ddl = _embedding_index_ddl()
         if embedding_index_ddl is not None:
             conn.execute(text(embedding_index_ddl))
@@ -135,7 +139,6 @@ async def lifespan(app: FastAPI):
             ON code_chunks USING gin (search_vector)
         """))
         conn.commit()
-        verify_embedding_schema(conn)
 
     stop_event = asyncio.Event()
     worker_task = None
