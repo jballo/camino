@@ -5,8 +5,8 @@ mocked). By default a uniquely named ``camino_worker_test_*`` scratch database
 is created on the same server as ``DATABASE_URL`` and dropped afterwards; if
 Postgres is unreachable the module skips. Set ``TEST_DATABASE_URL`` to use an
 existing database instead (it will have ``jobs`` truncated); as a safety
-net the fixture fails fast if it resolves to the same database as
-``DATABASE_URL``.
+net the fixture fails fast if it resolves to the database that was configured
+by ``DATABASE_URL`` before the test environment was sanitized.
 """
 
 from __future__ import annotations
@@ -51,24 +51,48 @@ WORKER_A = "host-a:1:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 WORKER_B = "host-b:2:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
 
+def _test_database_url(
+    override: str,
+    application_database_name: str | None,
+):
+    url = make_url(override)
+    # Database names identify databases within a Postgres cluster. Rejecting
+    # the application name unconditionally is deliberately conservative and
+    # also covers host aliases such as localhost vs 127.0.0.1.
+    if (
+        application_database_name is not None
+        and url.database == application_database_name
+    ):
+        raise ValueError(
+            "TEST_DATABASE_URL points at the application database "
+            f"({application_database_name!r}); these tests TRUNCATE jobs. "
+            "Use a dedicated test database or unset TEST_DATABASE_URL "
+            "to auto-provision a scratch one."
+        )
+    return url
+
+
+def test_test_database_url_rejects_pre_sanitization_application_database():
+    with pytest.raises(
+        ValueError,
+        match="TEST_DATABASE_URL points at the application database",
+    ):
+        _test_database_url(
+            "postgresql://localhost/onboarding_agent",
+            "onboarding_agent",
+        )
+
+
 @pytest.fixture(scope="session")
-def pg_engine():
+def pg_engine(application_database_name):
     override = os.environ.get("TEST_DATABASE_URL")
     admin_engine = None
     scratch_db_name = None
     if override:
-        url = make_url(override)
-        app_url = make_url(settings.database_url)
-        # Database names identify databases within a Postgres cluster. Rejecting
-        # the application name unconditionally is deliberately conservative and
-        # also covers host aliases such as localhost vs 127.0.0.1.
-        if url.database == app_url.database:
-            pytest.fail(
-                "TEST_DATABASE_URL points at the application database "
-                f"({app_url.database!r}); these tests TRUNCATE jobs. "
-                "Use a dedicated test database or unset TEST_DATABASE_URL "
-                "to auto-provision a scratch one."
-            )
+        try:
+            url = _test_database_url(override, application_database_name)
+        except ValueError as exc:
+            pytest.fail(str(exc))
     else:
         # Auto-provision a uniquely named scratch DB on the same server as
         # DATABASE_URL. Never drop a pre-existing database: if the extremely
