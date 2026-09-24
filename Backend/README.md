@@ -469,7 +469,8 @@ uv run pytest
 
 This command never uses Doppler or application credentials. Most tests run, while
 the real-PostgreSQL claim/recovery cases skip when `TEST_DATABASE_URL` is absent.
-Use `-rs` to display skip reasons.
+On a fresh checkout, the structural check against the untracked FastAPI fixture also
+skips. Use `-rs` to display skip reasons.
 
 Before merging any backend PR, run the complete suite:
 
@@ -477,12 +478,13 @@ Before merging any backend PR, run the complete suite:
 ./scripts/test_all.sh
 ```
 
-The script starts an isolated PostgreSQL 16 + pgvector container on loopback,
-waits for it, runs pytest with a passwordless `TEST_DATABASE_URL`, and removes the
+On first use, the script shallow-clones the pinned FastAPI `0.115.6` fixture into
+the gitignored `eval/.data/fastapi` directory, so network access is required once.
+It then starts an isolated PostgreSQL 16 + pgvector container on loopback, waits
+for it, runs pytest with a passwordless `TEST_DATABASE_URL`, and removes the
 container on exit. The complete run should report **zero skipped tests**. Docker
 must be running; set `CAMINO_PYTEST_DB_PORT` only if the default host port `55432`
-is occupied. Pytest arguments pass through, for example
-`./scripts/test_all.sh -q`.
+is occupied. Pytest arguments pass through, for example `./scripts/test_all.sh -q`.
 
 Never point `TEST_DATABASE_URL` at the development or eval database. The integration
 fixture truncates `jobs` and `repo_index_state`. CI may provide its own dedicated

@@ -4,6 +4,7 @@ set -euo pipefail
 backend_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 container_name="camino-pytest-db-$$"
 container_id=""
+fixture_dir="${backend_dir}/eval/.data/fastapi"
 host_port="${CAMINO_PYTEST_DB_PORT:-55432}"
 
 cleanup() {
@@ -12,6 +13,12 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+if [[ ! -f "${fixture_dir}/fastapi/applications.py" ]]; then
+  mkdir -p "$(dirname -- "${fixture_dir}")"
+  git clone --depth 1 --branch 0.115.6 \
+    https://github.com/fastapi/fastapi.git "${fixture_dir}"
+fi
 
 container_id="$(docker run --rm \
   --name "${container_name}" \
