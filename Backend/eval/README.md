@@ -7,7 +7,7 @@ Six eval harnesses live here:
 3. **Structural eval** — does a tour artifact parse, reference real files, and quote matching source? (no LLM, no DB)
 4. **Live tour smoke eval** — can the generation graph produce a grounded tour end to end? (needs DB + OpenAI)
 5. **Tour judge eval** — does an LLM judge score generated tours for faithfulness, relevance, completeness, and ordering? (needs OpenAI; DB only for live generation)
-6. **Vector SQL diagnostic** — does the production vector query use HNSW, and what are its p50/p95 SQL latencies? (needs DB + OpenAI)
+6. **Vector SQL diagnostic** — which scan plan does the production vector query use, and what are its p50/p95 SQL latencies? (needs DB + OpenAI)
 
 Exp7 selected halfvec exact scan (V2), and the application defaults now match that
 variant; the matrix below remains the reproduction procedure. Tour evaluation has
@@ -41,8 +41,9 @@ The FastAPI source is not committed. `ingest_local.py` auto-clones the pinned
 version into `.data/` (gitignored) on first run, so reproduction is two commands:
 
 Start the API once against a fresh database before running the harnesses so startup
-creates `repo_index_state`, `live_code_chunks`, and the required indexes. The API does
-not need to remain running during eval commands.
+creates `repo_index_state`, `live_code_chunks`, and the required schema objects. With
+the application defaults this creates a `halfvec(1536)` embedding column with `PLAIN`
+storage and no HNSW index. The API does not need to remain running during eval commands.
 
 ```bash
 cd Backend
@@ -91,8 +92,9 @@ Flags: `--dataset PATH`, `--mode {hybrid,vector,fts,ablation}`, `--k`, `--limit`
 
 Run every variant against the local throwaway test database. Start the API once
 against a fresh database before ingesting so startup creates the schema. The
-commands below pin `DATABASE_URL` to the documented local-only credentials so an
-experiment cannot accidentally run against Neon.
+commands below pin `DATABASE_URL` to the documented local-only credentials and set
+`VECTOR_TYPE`/`VECTOR_INDEX` explicitly for every variant, so schema validation catches
+an accidental mismatch before an experiment runs.
 
 ```bash
 # From anywhere, first use: create and start the dedicated testdb container.

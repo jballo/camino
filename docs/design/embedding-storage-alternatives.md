@@ -1,6 +1,11 @@
 # Alternatives to halfvec(1536) — research for storage-capacity-plan phase 1
 
-**Date:** 2026-09-22 · **Status: research complete; recommendation at the end.**
+**Date:** 2026-09-22 · **Status: research complete; option B selected and implemented.**
+
+> **Outcome (2026-09-24):** Exp7 selected `halfvec(1536)` with no ANN index, exp8
+> confirmed the quality and latency gates, and the application now ships that
+> configuration by default. The option descriptions and estimates below are retained
+> as the pre-decision research record.
 
 Deep-dive requested before implementing phase 1 of
 [storage-capacity-plan.md](../storage-capacity-plan.md): what else could we do instead
@@ -112,15 +117,15 @@ Split-across-free-tiers hack (2nd Neon project for vectors): within ToS, but cap
 
 | Option | All-in | Per chunk | Quality risk | Effort | Neon/RDS |
 |---|---|---|---|---|---|
-| Today: fp32 + HNSW | 370 MB | 15.9 KB | — | — | ✅/✅ |
+| Historical baseline: fp32 + HNSW | 370 MB | 15.9 KB | — | — | ✅/✅ |
 | **A. halfvec + HNSW (plan)** | ~165 MB | 7 KB | ~none (published parity) | Low | ✅/✅ |
-| **B. halfvec, no index (exact scan)** | ~72 MB | 3.1 KB | none (recall 1.0); latency unknown on t4g | Low | ✅/✅ |
+| **B. halfvec, no index (exact scan)** | ~72 MB | 3.1 KB | none (recall 1.0); latency gate later passed | Low | ✅/✅ |
 | C. halfvec + BQ expr. index + rerank | ~83 MB | 3.6 KB | needs eval (proxy: 92–99% w/ rerank) | Medium | ✅/✅ |
 | D. 3-small@512 + halfvec (+B) | ~40 MB | ~1.7 KB | needs eval; testable offline free | Low | ✅/✅ |
 | E. voyage-code-4@1024 bit + rescore | ~55 MB | ~2.4 KB | needs eval; plausibly *better* | Medium + vendor | ✅/✅ |
 | F. S3 fp16 shards + numpy | ~0 in PG | ~$0.03/mo/GB | none (exact) | 1–2 days | n/a (kills RDS need) |
 
-## Recommendation
+## Original recommendation and outcome
 
 1. **Proceed with phase 1 halfvec — the research validates it.** Best
    evidence-to-risk ratio, and every other option composes with it rather than
@@ -135,16 +140,17 @@ Split-across-free-tiers hack (2nd Neon project for vectors): within ToS, but cap
    - The 768-dim lever already in the plan can be evaluated **without re-ingesting**:
      truncate + renormalize stored 1536-d vectors offline (equivalent to the API
      `dimensions` param). Score 512 while at it.
-3. **Re-decide phase 2 after phase 1 lands.** If B holds, Neon free carries ~140k
-   chunks (≈5 vLLM-class repos); with 512-d, ~400k. That defers RDS. And option F
-   (S3 shards) should be weighed against RDS *before* committing to the $14/mo
-   migration — it is the strongest long-term answer for a rebuildable per-repo cache.
+3. **Re-decide phase 2 after phase 1 lands.** This was the original next step. Option B
+   passed; 512 dimensions failed the follow-up quality gates; Neon was retired; and the
+   current phase-2 target remains a fresh RDS database. Option F stays a future
+   alternative if exact-scan heap residency becomes the limiting cost.
 4. **Park voyage-code-4** as the quality-upgrade experiment for when the retrieval
    log unpauses — gated on our eval, not vendor benchmarks.
 
-**Flagged unverified:** exact-scan latency on Graviton2 (extrapolated); all Voyage
-cross-vendor deltas (vendor-run); BQ/truncation numbers are ada-002/3-large proxies,
-not 3-small; OpenAI per-dim MTEB rows (announcement unreachable).
+**Follow-up resolution:** exact-scan latency was directly measured in exp8-C at
+16.09 ms p95 for the largest 11,742-chunk ref, comfortably inside the 250 ms gate.
+Still unverified: Graviton2-specific performance; all Voyage cross-vendor deltas
+(vendor-run); BQ proxy numbers; and OpenAI per-dimension MTEB rows.
 
 Key sources: [Katz — pgvector quantization benchmarks](https://jkatz05.com/post/postgres/pgvector-scalar-binary-quantization/) ·
 [pgvector README](https://github.com/pgvector/pgvector) ·

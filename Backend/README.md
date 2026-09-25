@@ -21,7 +21,7 @@ and `/tours/{id}`.
 
 ## Stack
 
-- **FastAPI** + SQLModel + Postgres with **pgvector**
+- **FastAPI** + SQLModel + Postgres with **pgvector** (`halfvec(1536)` exact scans by default)
 - **tree-sitter** — Python, JavaScript, TypeScript/TSX symbol extraction
 - **OpenAI** — embeddings (`text-embedding-3-small`) + chat (`gpt-4o-mini` default)
 - **LangGraph** — ReAct Q&A agent plus structured tour and issue-brief graphs
@@ -60,6 +60,10 @@ docker compose --profile worker up -d worker
 The Compose worker uses `restart: always`, connects to the Compose Postgres
 service, and runs the same `python -m app.worker` entrypoint.
 
+On a fresh database, start the API once before the standalone worker so the API can
+install pgvector and create the schema. Both entrypoints validate the embedding column
+type before accepting work; the worker does not create or migrate schema.
+
 Clerk user sync and GitHub App uninstall cleanup arrive via webhooks, which need a
 publicly reachable backend. To exercise them locally, expose port 8000 with a tunnel and
 configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
@@ -74,6 +78,8 @@ configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
 | `DATABASE_MAX_OVERFLOW` | Temporary overflow connections per backend process (default `10`) |
 | `OPENAI_API_KEY` | Embeddings + agent chat |
 | `AGENT_MODEL` | Chat model (default `gpt-4o-mini`) |
+| `VECTOR_TYPE` | pgvector embedding column/query type: `halfvec` (default) or `vector`; must match the existing database column |
+| `VECTOR_INDEX` | ANN index mode: `none` (default, exact scan) or `hnsw`; the API creates the configured HNSW index on startup but never drops one automatically |
 | `CORS_ORIGINS` | Allowed browser origins, comma-separated (default `http://localhost:3000`) |
 | `CLERK_SECRET_KEY` | Clerk backend API |
 | `CLERK_WH_KEY` | Clerk webhook signing secret |
@@ -152,6 +158,11 @@ ALTER TABLE code_chunk_embeddings
   ALTER COLUMN embedding SET STORAGE PLAIN;
 ANALYZE code_chunk_embeddings;
 ```
+
+The API and standalone worker fail fast when `VECTOR_TYPE` disagrees with the database
+column, with this migration as the recovery path. `VECTOR_INDEX=none` does not drop an
+existing `ix_embeddings_hnsw`; startup logs a warning because that index consumes
+storage but is not used by the configured exact-scan path.
 
 Before connecting ECS to RDS:
 
@@ -255,6 +266,7 @@ worker processes—safe.
 ```
 app/
 ├── main.py              # FastAPI app, local DB/table initialization, indexes and view
+├── db_schema.py         # embedding type validation and stale-index warning
 ├── worker.py            # Postgres-backed shared job claim/dispatch loop
 ├── rate_limit.py        # PostgreSQL fixed-window limiter dependencies
 ├── api/
@@ -468,9 +480,10 @@ uv run pytest
 ```
 
 This command never uses Doppler or application credentials. Most tests run, while
-the real-PostgreSQL claim/recovery cases skip when `TEST_DATABASE_URL` is absent.
-On a fresh checkout, the structural check against the untracked FastAPI fixture also
-skips. Use `-rs` to display skip reasons.
+the real-PostgreSQL claim/recovery cases use a uniquely named scratch database if the
+sanitized local PostgreSQL endpoint is reachable and otherwise skip. On a fresh
+checkout, the structural check against the untracked FastAPI fixture also skips. Use
+`-rs` to display skip reasons.
 
 Before merging any backend PR, run the complete suite:
 

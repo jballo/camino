@@ -1,17 +1,16 @@
 # Storage capacity plan: halfvec embeddings + RDS migration
 
-**Date:** 2026-09-17 · **Status: phase 1 implemented: `halfvec(1536)` with no ANN index is the default.**
+**Date:** 2026-09-17 · **Status: phase 1 implemented; phase 2 RDS work pending.**
 
 > **Historical note (2026-09-24):** The Neon capacity problem and cutover framing
 > below describe the system before Neon was retired on 2026-09-23. Development now
 > uses local Postgres, and the future RDS database will start fresh.
 
-The t4g.small load test ([t4g-loadtest.md](t4g-loadtest.md)) has settled compute under
-the shared CPU/memory budget: workers hold ~290 MiB, and the RAM and API-latency gates
-pass reproducibly across repeated full-ingestion runs. The one open compute caveat is
-drain time against Neon, which is bounded (159 s to the historical 15–17 min) but not
-yet measured. The binding capacity constraint is elsewhere — **database storage** is
-already demonstrated, and this doc records the plan to lift it. (Changes that would
+The t4g.small load test ([t4g-loadtest.md](t4g-loadtest.md)) settled compute under
+the shared CPU/memory budget: workers held ~290 MiB, and the RAM and API-latency gates
+passed reproducibly across repeated full-ingestion runs. Its unmeasured Neon drain-time
+caveat is now historical because Neon was retired. The binding capacity constraint that
+motivated this plan was **database storage**. (Changes that would
 invalidate the per-worker RAM observation — in-worker concurrency, wave size, and local
 model weights — are listed in t4g-loadtest.md § "When the RAM verdict expires".)
 
@@ -44,7 +43,7 @@ the 0.5 GB wall is a free-tier artifact, so the plan is: shrink the footprint, t
 move to a small managed instance whose durability protects the half-megabyte that
 matters.
 
-## Phase 1 — halfvec exact scan (selected)
+## Phase 1 — halfvec exact scan (implemented)
 
 Exp7 selected **V2: `halfvec(1536)` with no ANN index**. The production-shaped
 filtered query did not use HNSW in either the fp32 or halfvec schema, so exact scan
@@ -74,7 +73,7 @@ The largest single ref — what the repo-filtered gate is about — measures
 roughly linear at ~0.7–2.3 µs/chunk (the spread tracks repo/chunk
 characteristics, not noise), so a vLLM-class 25–30k-chunk repo projects to
 under ~70 ms p95 even at the worst observed per-chunk rate. Production
-telemetry after cutover remains a sanity check, not a blocker.
+telemetry after the future RDS deployment remains a sanity check, not a blocker.
 
 Measured footprint fell from **553 MB (fp32 + 270 MB HNSW)** to **140 MB**:
 74.7% smaller and 3.95× the capacity. Halfvec + HNSW was 275 MB, confirming that
@@ -121,9 +120,11 @@ cold pages pay disk latency on first query. Upgrade trigger is observed search
 latency, not storage; next step would be `db.t4g.small` (~$26/month) or Supabase Pro
 ($25 flat, 8 GB) if leaving AWS is acceptable.
 
-RDS will start fresh rather than receive a vector migration. On first boot the app
-creates the `vector` extension and phase-1 schema; then point the deployment at RDS
-and re-ingest followed repos (a few dollars total).
+RDS will start fresh rather than receive a vector migration. The production target is
+to apply the `vector` extension and phase-1 schema through the planned one-off migration
+task before starting the service; the current local app startup creates the equivalent
+schema. Then point the deployment at RDS and re-ingest followed repos (a few dollars
+total).
 
 ## Unlocked follow-ups
 

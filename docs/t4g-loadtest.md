@@ -1,8 +1,12 @@
 # t4g.small load test: findings and deploy decision
 
-**Date:** 2026-09-21 · **Status: full-ingestion run under the shared budget passed —
-RAM and API-latency gates clear. Drain time on Neon is estimated, not measured;
-see "Second shared-budget run" for the verdict and the one remaining caveat.**
+**Date:** 2026-09-21 · **Status: shared-budget full-ingestion run passed; RAM and
+API-latency gates are clear. The former Neon drain-time caveat was retired when Neon
+was removed on 2026-09-23.**
+
+> **Current environment note (2026-09-24):** Keep the historical Neon measurements
+> below as evidence about slow remote-database behavior. Active development and this
+> runbook use the local throwaway test database; the future production target is RDS.
 
 Before deploying to a single EC2 t4g.small (2 vCPU / 2 GB / no swap, ~$19/mo) running
 API + job workers via Docker Compose, we simulated the instance locally to answer:
@@ -10,9 +14,8 @@ can ~5 users submit ingestion jobs simultaneously without OOMing or bottleneckin
 
 > **Validity note:** The four historical runs below used only per-container limits.
 > Their combined CPU ceilings exceeded 2 vCPU with three workers, and they had no
-> aggregate memory ceiling. They are useful workload observations, but they do not
-> establish that t4g.small passes. The harness now enforces a shared budget; the
-> deployment gate remains open until the matrix is repeated with that version.
+> aggregate memory ceiling. They remain useful workload observations, but the passing
+> shared-budget run—not those earlier runs—is what cleared the t4g.small gate.
 
 ## How to run (runbook)
 
@@ -297,14 +300,12 @@ not a regression: with four long jobs on three workers, the fifth job waits for
 a worker to free up, consistent with the finding that worker count drives queue
 wait. Drain (242 s vs 159 s) is not comparable across matrices.
 
-### Remaining caveat before launch
+### Retired Neon caveat
 
-A Neon-targeted confirmation run would pin the real drain time, but the free tier
-(~450 MB of 0.5 GB used) likely cannot hold this matrix's ~140 MB of embeddings
-plus chunk text — see `docs/storage-capacity-plan.md` (halfvec) before attempting
-it. Acceptable alternative: launch on the candidate config and watch the first
-real ingestions, since every failure mode tested (OOM, API stall, queue collapse)
-passed under both fast-DB (this run) and slow-DB (historical Neon) conditions.
+The original plan left a Neon-targeted drain-time confirmation open. Neon was retired
+before that run, so it is no longer a launch gate. The local shared-budget run covers
+OOM, API-stall, and queue-collapse behavior; database latency should be measured again
+after the future RDS deployment.
 
 ## Observations from the historical runs
 
@@ -330,10 +331,10 @@ counts): the candidate configuration `--scale worker=3` with `WORKER_MEM=400m`
 (490m was dropped: 3 × 490 + api + db oversubscribed the parent cap; workers peak
 ~290 MiB, so 400m keeps ~110 MiB headroom each) finished the 5-repo matrix with no
 aggregate OOM, p95 API latency of 8 ms with zero failed probes, and queue waits
-under 14 s. The only unmeasured quantity is drain time against Neon (bounded at
-159 s – 17 min; see the caveat above). On the real instance — which has no local
-db container — workers could be raised to ~448 MiB each within the same envelope
-if headroom is ever wanted.
+under 14 s. The former unmeasured Neon drain time is no longer relevant to the active
+environment; RDS latency remains a deployment-time observation. On a production
+instance with an external database, workers could be raised to ~448 MiB each within
+the same envelope if headroom is ever wanted.
 
 ## Phase 2 test matrix (planned)
 
@@ -458,10 +459,10 @@ Changes that could sneak up on us:
   code_chunks, code_chunk_embeddings, repo_index_state'` — or delete the
   `camino_testdb-data` volume for a full reset (the api re-creates the schema on
   next boot). No Neon storage is consumed either way.
-- Stop host dev servers before a run: any Doppler-run process (worker *or* `fastapi
-  dev`) talks to the same Neon queue and steals or interferes with test jobs. The
-  preflight checks for these and for out-of-stack containers, but it can only see this
-  machine — nothing running the app elsewhere may point at the same Neon branch.
+- Stop host dev servers before a run so they do not consume the shared CPU/memory
+  budget or accidentally target the load-test database. The preflight checks this
+  machine for stray processes and out-of-stack containers; the testdb overlay keeps
+  normal local development data separate.
 - An empty database silently wedges every ingestion job: the worker's ownership guard
   (`worker._ensure_ingestion_owned`) requires a `githubconnections` row for the job's
   installation id and otherwise abandons the job as cancelled *while it still reads
@@ -470,8 +471,9 @@ Changes that could sneak up on us:
   `loadtest_enqueue.py` now seeds a placeholder row when one is missing (ingestion
   mints tokens from the app credentials, so the row's token fields are never read);
   note the between-runs TRUNCATE deliberately leaves `githubconnections` alone.
-- Never SIGKILL a worker mid-job: it leaves an `idle in transaction` session on Neon that
-  blocks `TRUNCATE` until `pg_terminate_backend()`. Stop containers gracefully.
+- Never SIGKILL a worker mid-job: it can leave an `idle in transaction` database
+  session that blocks `TRUNCATE` until the session is terminated. Stop containers
+  gracefully.
 - The worker nulls `claimed_at` when releasing a finished job; `loadtest_watch.py`
   snapshots it mid-run to compute the timing table.
 - To rerun the matrix: follow the "How to run (runbook)" section at the top of this

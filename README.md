@@ -36,7 +36,7 @@ What works today:
 | GitHub issue briefs                         | ✅ preflight + branch discovery + grounded brief reader    |
 | GitHub App + Clerk auth                     | ✅ wired end-to-end                                        |
 | Repo ingest (snapshot → parse → embed → publish) | ✅ queued, bounded, ref-aware Python/JS/TS/TSX indexing |
-| Hybrid retrieval (pgvector + FTS + RRF)     | ✅ shipped stack (exp1–5)                                  |
+| Hybrid retrieval (halfvec exact scan + FTS + RRF) | ✅ shipped stack (exp1–5, exp7/8 storage validation) |
 | Retrieval eval harness                      | ✅ 20-question FastAPI golden set                          |
 | Agent smoke eval                            | ✅ live agent + citation validity checks                   |
 | Structural tour eval                        | ✅ schema + path/line/snippet fixture checks               |
@@ -119,7 +119,7 @@ flowchart TB
 
   subgraph data [Postgres + pgvector]
     Chunks[(code_chunks)]
-    Vectors[(code_chunk_embeddings)]
+    Vectors[(code_chunk_embeddings<br/>halfvec exact scan)]
     Jobs[(jobs)]
     Counters[(rate_limits)]
   end
@@ -241,10 +241,14 @@ GitHub App slug configured via the required `GITHUB_APP_SLUG` environment variab
 (e.g. `camino-onboarder`).
 
 Startup creates missing tables and provisions pgvector, custom indexes, and the
-`live_code_chunks` view, but it does not migrate an older schema. A database created
-before the shared `jobs` table and generation-based indexes must be recreated for local
-development or upgraded with an explicit migration; `SQLModel.metadata.create_all()`
-does not add, rename, or remove columns on existing tables.
+`live_code_chunks` view. Embeddings default to `halfvec(1536)` with exact scans and no
+HNSW index. The API and standalone worker validate that the configured embedding type
+matches the database, but they do not migrate an older schema. A database created with
+the former `vector(1536)` default, or before the shared `jobs` table and
+generation-based indexes, must be recreated for local development or upgraded with the
+explicit migration in [Backend/README.md](Backend/README.md#local-db-created-before-2026-09).
+`SQLModel.metadata.create_all()` does not add, rename, or remove columns on existing
+tables.
 
 1. Sign in → open **Settings** → connect or manage the GitHub App.
 2. On **Home**, paste a GitHub issue URL, review the issue warnings and discovered
