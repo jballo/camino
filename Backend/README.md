@@ -490,8 +490,10 @@ is occupied. Pytest arguments pass through, for example `./scripts/test_all.sh -
 
 Never point `TEST_DATABASE_URL` at the development or eval database. The integration
 fixture truncates `jobs` and `repo_index_state`. CI may provide its own dedicated
-throwaway database through `TEST_DATABASE_URL`; the fixture rejects a database name
-that matches the application database captured before test settings are sanitized.
+throwaway database through `TEST_DATABASE_URL`, but it must also set `DATABASE_URL`
+to a parseable synthetic database name that differs from the test database. The
+fixture refuses destructive tests when the original application database identity
+is unknown or matches the test database.
 
 Current focused coverage includes retrieval/search tests, agent smoke helpers,
 ref-aware staged-generation ingestion and archive limits, contribution-target and live

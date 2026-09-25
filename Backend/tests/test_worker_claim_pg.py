@@ -81,6 +81,12 @@ def _test_database_url(
     application_database_name: str | None,
 ):
     url = make_url(override)
+    if application_database_name is None:
+        raise ValueError(
+            "Cannot safely use TEST_DATABASE_URL because the original "
+            "application database name is unavailable. Set DATABASE_URL to a "
+            "parseable, non-target sentinel or use scripts/test_all.sh."
+        )
     # Database names identify databases within a Postgres cluster. Rejecting
     # the application name unconditionally is deliberately conservative and
     # also covers host aliases such as localhost vs 127.0.0.1.
@@ -95,6 +101,14 @@ def _test_database_url(
             "to auto-provision a scratch one."
         )
     return url
+
+
+def test_test_database_url_rejects_unknown_application_database():
+    with pytest.raises(
+        ValueError,
+        match="original application database name is unavailable",
+    ):
+        _test_database_url("postgresql://localhost/testdb", None)
 
 
 def test_test_database_url_rejects_pre_sanitization_application_database():
