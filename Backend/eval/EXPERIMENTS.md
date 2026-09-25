@@ -52,7 +52,9 @@ uv run python -m eval.run_eval --mode ablation
 **Storage decision (exp7):** V2 (`halfvec(1536)`, no ANN index) selected. Quality
 matches V0, measured p95 is 16.09 ms at 11,742 chunks (`EXP 8-C`, ~15× under the
 250 ms gate — supersedes the earlier ~21–32 ms extrapolation), and footprint
-falls 553→140 MB. Production defaults remain unchanged until the separate cutover.
+falls 553→140 MB. The application now ships this configuration by default:
+`VECTOR_TYPE=halfvec`, `VECTOR_INDEX=none`, and fresh embedding columns use `PLAIN`
+storage. Startup rejects a configured type that does not match an existing database.
 
 **Dimension follow-up (exp8, COMPLETE):** all stages done; final answer is
 `halfvec(1536)`. Stage A's full sweep showed the hybrid 512 gain is a fusion
@@ -135,6 +137,8 @@ Cumulative vs baseline: **hit 0.800→0.900, recall 0.767→0.858, MRR
 | `rerank_top_n` / `rerank_rrf_weight` | 30 / 0.9 | `search.py`, `rerank.py` |
 | `rerank_model` | `BAAI/bge-reranker-base` | `rerank.py` `RERANK_MODEL` (exp6 optional) |
 | `limit` (final hydrate) | 10 | `search.py` `DEFAULT_FINAL_LIMIT` |
+| embedding column | `halfvec(1536)`, `PLAIN` storage | `config.py`, `models/code.py`, startup DDL |
+| ANN index | none (exact scan) | `VECTOR_INDEX=none`; exp7 V2 + exp8-C |
 | FTS index | split identifiers + OR query | `search_index.py`, `_fts_search` |
 | embedding text | NL header + class methods | `embeddings.py` `build_embedding_text` |
 
@@ -487,12 +491,11 @@ filtered query in either V0 or V1. All variants used the repo/ref/generation ind
 joined the surviving chunks to embeddings, and sorted exact cosine distances. HNSW
 was therefore storage-only overhead for this workload.
 
-**Decision: V2 wins phase 1.** It exactly matches V0 quality, including the q03/q17
-miss set. Its measured 5.35 ms p95 on the ~5.1k-active-chunk fixture (505 distance
-candidates after the demo-path filter) extrapolates to ~21–32 ms at 25–30k chunks
-using the plan's allowed ×4–6 range, comfortably below the 250 ms gate. This is an
-extrapolated rather than directly measured large-repo result, so production latency
-remains a post-cutover check.
+**Decision: V2 wins phase 1 and is now the shipped default.** It exactly matches V0
+quality, including the q03/q17 miss set. Its original 5.35 ms p95 on the
+~5.1k-active-chunk fixture was later backed by exp8-C's direct multi-repo measurement:
+16.09 ms p95 at 11,742 chunks, ~15× below the 250 ms gate. See EXP 8-C for the final
+latency evidence; the earlier ×4–6 extrapolation is retained here as experiment history.
 
 V2 reduces total embedding-relation footprint from 553 MB to 140 MB: **74.7%
 smaller / 3.95× more capacity**. Halfvec alone (V1) halves both total footprint

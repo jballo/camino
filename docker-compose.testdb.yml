@@ -15,8 +15,8 @@
 # limit is intentional for the same reason (run_t4g_test.sh skips it in the
 # budget preflight).
 #
-# The api creates the schema on first boot (pgvector extension, tables, HNSW/
-# GIN indexes), so a fresh volume needs no manual setup. The credentials below
+# The api creates the schema on first boot (pgvector extension, tables, and the
+# GIN index), so a fresh volume needs no manual setup. The credentials below
 # are local-only throwaways, not secrets.
 #
 # Cleanup between runs (host port 5433):

@@ -42,6 +42,11 @@ def test_ingestion_resource_cap_defaults_are_documented():
 def test_compose_worker_is_standalone_and_always_restarted():
     compose = yaml.safe_load((REPO_ROOT / "docker-compose.yml").read_text())
     worker = compose["services"]["worker"]
+    worker_environment = dict(
+        entry.split("=", maxsplit=1)
+        for entry in worker["environment"]
+        if "=" in entry
+    )
 
     assert worker["command"] == [
         "uv",
@@ -52,5 +57,5 @@ def test_compose_worker_is_standalone_and_always_restarted():
         "app.worker",
     ]
     assert worker["restart"] == "always"
-    assert worker["environment"]["RUN_WORKER"] == "false"
+    assert worker_environment["RUN_WORKER"] == "false"
     assert worker["profiles"] == ["worker"]

@@ -36,7 +36,7 @@ What works today:
 | GitHub issue briefs                         | ✅ preflight + branch discovery + grounded brief reader    |
 | GitHub App + Clerk auth                     | ✅ wired end-to-end                                        |
 | Repo ingest (snapshot → parse → embed → publish) | ✅ queued, bounded, ref-aware Python/JS/TS/TSX indexing |
-| Hybrid retrieval (pgvector + FTS + RRF)     | ✅ shipped stack (exp1–5)                                  |
+| Hybrid retrieval (halfvec exact scan + FTS + RRF) | ✅ shipped stack (exp1–5, exp7/8 storage validation) |
 | Retrieval eval harness                      | ✅ 20-question FastAPI golden set                          |
 | Agent smoke eval                            | ✅ live agent + citation validity checks                   |
 | Structural tour eval                        | ✅ schema + path/line/snippet fixture checks               |
@@ -119,7 +119,7 @@ flowchart TB
 
   subgraph data [Postgres + pgvector]
     Chunks[(code_chunks)]
-    Vectors[(code_chunk_embeddings)]
+    Vectors[(code_chunk_embeddings<br/>halfvec exact scan)]
     Jobs[(jobs)]
     Counters[(rate_limits)]
   end
@@ -241,10 +241,14 @@ GitHub App slug configured via the required `GITHUB_APP_SLUG` environment variab
 (e.g. `camino-onboarder`).
 
 Startup creates missing tables and provisions pgvector, custom indexes, and the
-`live_code_chunks` view, but it does not migrate an older schema. A database created
-before the shared `jobs` table and generation-based indexes must be recreated for local
-development or upgraded with an explicit migration; `SQLModel.metadata.create_all()`
-does not add, rename, or remove columns on existing tables.
+`live_code_chunks` view. Embeddings default to `halfvec(1536)` with exact scans and no
+HNSW index. The API and standalone worker validate that the configured embedding type
+matches the database, but they do not migrate an older schema. A database created with
+the former `vector(1536)` default, or before the shared `jobs` table and
+generation-based indexes, must be recreated for local development or upgraded with the
+explicit migration in [Backend/README.md](Backend/README.md#local-db-created-before-2026-09).
+`SQLModel.metadata.create_all()` does not add, rename, or remove columns on existing
+tables.
 
 1. Sign in → open **Settings** → connect or manage the GitHub App.
 2. On **Home**, paste a GitHub issue URL, review the issue warnings and discovered
@@ -268,9 +272,12 @@ Details: [Backend/README.md](Backend/README.md) · [Frontend/README.md](Frontend
 ## Tests
 
 ```bash
-# Backend
+# Backend: quick, secret-free feedback (Postgres integration tests may skip)
 cd Backend
 uv run pytest
+
+# Backend: complete pre-merge suite (Docker required; zero skips expected)
+./scripts/test_all.sh
 
 # Frontend
 cd ../Frontend
@@ -280,14 +287,13 @@ npm run lint
 
 Backend coverage includes API/auth behavior, webhook cleanup, rate limiting, retrieval,
 ref-aware staged ingestion, tour and issue-brief generation/cancellation, contribution
-target discovery, shared-job lifecycle, and startup schema provisioning. When the
-docker-compose Postgres is available, the same command automatically creates and
-drops a uniquely named `camino_worker_test_*` scratch database for real concurrent
-claim/recovery tests without deleting a pre-existing database; it never truncates
-`onboarding_agent`, and rejects a `TEST_DATABASE_URL` whose database name matches
-`DATABASE_URL` (even through a different host alias). Frontend Vitest coverage exercises
-the shared direct-to-FastAPI client plus queued-ingestion polling, timeout,
-cancellation, and error behavior, plus contribution-target and issue-brief clients.
+target discovery, shared-job lifecycle, and startup schema provisioning. The complete
+backend command provisions and removes an isolated pgvector database for real concurrent
+claim/recovery tests; never point `TEST_DATABASE_URL` at the development or eval
+database because those tests truncate tables. See [Backend testing](Backend/README.md#tests)
+for the workflow and manual CI configuration. Frontend Vitest coverage exercises the
+shared direct-to-FastAPI client plus queued-ingestion polling, timeout, cancellation,
+and error behavior, plus contribution-target and issue-brief clients.
 
 ---
 
@@ -414,7 +420,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [x] Contribution-target discovery from repository guidance, branch metadata, and the
   default branch, with issue-thread and user overrides for briefs
 - [x] tree-sitter parsing → symbol-level chunks (path, name, type, lines, source, signature/docstring)
-- [x] Postgres + pgvector: chunks table (HNSW embedding col + tsvector col)
+- [x] Postgres + pgvector: chunks table (halfvec embedding col, exact scan + tsvector col)
 - [x] Embedding pipeline (OpenAI `text-embedding-3-small`, enriched NL headers)
 - [x] Full-text search pipeline (identifier tokenization + OR query)
 - [x] Hybrid retrieval via Reciprocal Rank Fusion (exp1–5 shipped)

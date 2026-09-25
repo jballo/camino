@@ -9,6 +9,7 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.db import engine
+from app.db_schema import verify_embedding_schema
 
 from app.api import agent, briefs, github, journeys, repositories
 from app.webhooks import clerk, github as github_webhook
@@ -62,8 +63,9 @@ async def lifespan(app: FastAPI):
     SQLModel.metadata.create_all(engine)
 
     with engine.connect() as conn:
-        # create_all() cannot express these: the composite, partial, HNSW, and
-        # GIN indexes, and the view that exposes only live index generations.
+        # create_all() cannot express these: column storage, the composite,
+        # partial, HNSW, and GIN indexes, and the view that exposes only live
+        # index generations.
         # It also cannot add columns to tables created by older releases.
         conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS ref VARCHAR"))
         conn.execute(text(
@@ -121,9 +123,17 @@ async def lifespan(app: FastAPI):
             ON jobs (dedupe_key)
             WHERE status IN ('pending', 'running') AND dedupe_key IS NOT NULL
         """))
+        # Validate the configured type before issuing type-dependent index DDL,
+        # so mismatches fail with actionable migration guidance rather than an
+        # operator-class error from Postgres.
+        verify_embedding_schema(conn)
         embedding_index_ddl = _embedding_index_ddl()
         if embedding_index_ddl is not None:
             conn.execute(text(embedding_index_ddl))
+        conn.execute(text("""
+            ALTER TABLE code_chunk_embeddings
+            ALTER COLUMN embedding SET STORAGE PLAIN
+        """))
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS ix_chunks_search
             ON code_chunks USING gin (search_vector)

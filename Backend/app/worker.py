@@ -35,6 +35,7 @@ from app.brief import (
 )
 from app.config import settings
 from app.db import engine
+from app.db_schema import verify_embedding_schema
 from app.models.job import Job, JobStatus, JobType
 from app.models.code import RepoIndexState
 from app.models.tour import TourArtifact, TourFreshness
@@ -909,6 +910,9 @@ async def worker_loop(
 
 
 async def _run_standalone() -> None:
+    with engine.connect() as conn:
+        verify_embedding_schema(conn)
+
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):

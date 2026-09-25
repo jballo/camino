@@ -1,11 +1,18 @@
 # Phase 1 implementation plan — halfvec experiment matrix (exp7)
 
-**Date:** 2026-09-22 · **Status: complete; V2 selected, cutover pending.** Exp7 chose
-`halfvec(1536)` with no ANN index; production cutover remains a separate change.
-Follow-up: [exp8-dim-confirmation-plan.md](exp8-dim-confirmation-plan.md) targets the
-inconclusive 768/512 truncation result and the extrapolated V2 latency number.
+**Date:** 2026-09-22 · **Status: complete and implemented.** Exp7 chose
+`halfvec(1536)` with no ANN index; exp8 rejected dimension truncation and directly
+validated exact-scan latency. The application now uses V2 as the default, creates
+fresh embedding columns with `PLAIN` storage, and validates the configured type at API
+and standalone-worker startup.
 
-## Context
+> **Implementation update (2026-09-24):** This file preserves the experiment plan and
+> its original baseline instructions. The former `vector` + HNSW defaults described in
+> Steps 0–5 are historical. See [storage-capacity-plan.md](../storage-capacity-plan.md)
+> and [Backend/eval/EXPERIMENTS.md](../../Backend/eval/EXPERIMENTS.md) for the shipped
+> decision and final measurements.
+
+## Historical context and experiment procedure
 
 [storage-capacity-plan.md](../storage-capacity-plan.md) phase 1 proposes switching
 `code_chunk_embeddings.embedding` from `vector(1536)` to `halfvec(1536)`, gated on the
@@ -17,12 +24,12 @@ repo (5k–30k vectors), an **exact scan with no ANN index** may pass the latenc
 the 768-dim lever can be evaluated (and even migrated!) without re-embedding, via
 pgvector's `subvector()` + the fact that cosine distance is scale-invariant.
 
-So phase 1 becomes a small experiment matrix, run once, logged as **exp7** in
+Phase 1 therefore became a small experiment matrix, run once and logged as **exp7** in
 `Backend/eval/EXPERIMENTS.md`:
 
 | Variant | Schema | ANN index | Question it answers |
 |---|---|---|---|
-| **V0** | today (fp32 + HNSW) | global HNSW | Local-DB baseline + is the HNSW index even used for filtered queries? |
+| **V0** | then-current fp32 + HNSW | global HNSW | Local-DB baseline + is the HNSW index even used for filtered queries? |
 | **V1** | halfvec(1536) | HNSW `halfvec_cosine_ops` | The plan as written — quality parity? |
 | **V2** | halfvec(1536) | **none** (exact scan) | Does exact-scan latency fit the budget? |
 | **V3** | V1 or V2 schema | n/a (exact scan via `subvector`) | Do 768/512 dims hold quality? (query-time truncation, no re-ingest) |
@@ -49,7 +56,7 @@ adopt per the storage plan's original gate, don't block phase 1 on it.
   already costs ~100–300 ms per search, so this roughly keeps the retriever from
   dominating end-to-end latency.)
 
-## Key files
+## Key files at experiment start
 
 - `Backend/app/models/code.py` — `CodeChunkEmbedding.embedding`, currently
   `Column(Vector(EMBED_DIMENSIONS))` (pgvector-python also ships `HALFVEC`).
@@ -89,13 +96,13 @@ adopt per the storage plan's original gate, don't block phase 1 on it.
      `SET hnsw.iterative_scan = relaxed_order;` (pgvector 0.8) to see if the vector
      retriever is currently candidate-starved on filtered queries.
 
-## Step 1 — code changes (one PR, all variants config-driven)
+## Step 1 — historical experiment code changes (one PR, all variants config-driven)
 
 Make the variant switchable by env so runs don't need code edits in between:
 
 1. **Config** (`Backend/app/config.py` + wherever settings are read):
-   - `VECTOR_TYPE` = `vector` | `halfvec` (default `vector` until cutover)
-   - `VECTOR_INDEX` = `hnsw` | `none` (default `hnsw`)
+   - `VECTOR_TYPE` = `vector` | `halfvec` (kept at `vector` during the experiment)
+   - `VECTOR_INDEX` = `hnsw` | `none` (kept at `hnsw` during the experiment)
 2. **Model** (`models/code.py`): pick `Vector(…)` vs `HALFVEC(…)` from `VECTOR_TYPE`
    (import `HALFVEC` from `pgvector.sqlalchemy`).
 3. **Search SQL** (`services/search.py::_vector_search`): cast the parameter to the
@@ -118,9 +125,10 @@ Make the variant switchable by env so runs don't need code edits in between:
    *before* re-writing rows (it only affects new rows) — for the testdb, set it,
    then `VACUUM FULL code_chunk_embeddings;` or re-ingest. 3,080 B fits an 8 KB page.
 
-Sanity: `uv run pytest` for the touched modules; the existing tests must pass with
-defaults unchanged (`VECTOR_TYPE=vector`, `VECTOR_INDEX=hnsw` — zero behavior change
-until env flips).
+For the experiment PR, sanity was `uv run pytest` with defaults intentionally unchanged
+(`VECTOR_TYPE=vector`, `VECTOR_INDEX=hnsw`). The later defaults PR superseded that
+constraint and added the secret-free complete-suite workflow in
+`Backend/scripts/test_all.sh`.
 
 ## Step 2 — V1 run (halfvec + HNSW)
 
@@ -186,17 +194,13 @@ established; cosine needs no renormalize at all.)
    stackable or rejected).
 3. Update `docs/storage-capacity-plan.md` phase 1 with the chosen variant + numbers.
 
-## Step 6 — production cutover (after decision; separate PR)
+## Step 6 — defaults rollout (completed 2026-09-24)
 
-1. Set `VECTOR_TYPE`/`VECTOR_INDEX` in prod env (Doppler) per the decision.
-2. Run the V1-or-V2 migration SQL against Neon (the winning variant's block above).
-   `VACUUM FULL` on `code_chunk_embeddings` needs a table-copy's worth of free
-   space — with ~450 MB used of 500 MB this may not fit on Neon. Fallback that
-   avoids VACUUM FULL entirely: `TRUNCATE code_chunk_embeddings` + re-ingest
-   followed repos (corpus is a rebuildable cache, ~$0.25/repo — sanctioned by the
-   storage plan), or do the retype as part of the phase-2 RDS cutover.
-3. Verify: one production search per followed repo returns sane results; record new
-   `pg_total_relation_size`.
+The planned Neon cutover became unnecessary when Neon was retired on 2026-09-23.
+Development moved to local Postgres, no fp32 database required migration, and the future
+RDS database will start fresh. The follow-up defaults change shipped
+`VECTOR_TYPE=halfvec` and `VECTOR_INDEX=none`, added startup schema validation, and
+documented an explicit one-off migration for any older local fp32 volume.
 
 ## §7 — stackable follow-up if V3@768 passed (do NOT do in phase 1)
 

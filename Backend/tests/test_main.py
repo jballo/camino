@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import DEFAULT, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -19,17 +19,33 @@ async def test_lifespan_provisions_schema_extras(monkeypatch):
     monkeypatch.setattr(settings, "vector_type", "vector")
     monkeypatch.setattr(settings, "vector_index", "hnsw")
     connection = MagicMock()
+    schema_events: list[str] = []
+
+    def record_execute(statement):
+        schema_events.append(" ".join(str(statement).split()))
+        return DEFAULT
+
+    def record_verification(_connection):
+        schema_events.append("VERIFY_EMBEDDING_SCHEMA")
+
+    connection.execute.side_effect = record_execute
     mock_engine = MagicMock()
     mock_engine.connect.return_value.__enter__.return_value = connection
 
     with (
         patch.object(main, "engine", mock_engine),
         patch.object(main.SQLModel.metadata, "create_all") as create_all,
+        patch.object(
+            main,
+            "verify_embedding_schema",
+            side_effect=record_verification,
+        ) as verify_schema,
     ):
         async with main.lifespan(main.app):
             pass
 
     create_all.assert_called_once_with(mock_engine)
+    verify_schema.assert_called_once_with(connection)
     statements = _normalized_sql(connection)
     assert "CREATE EXTENSION IF NOT EXISTS vector" in statements
     assert "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS ref VARCHAR" in statements
@@ -65,9 +81,20 @@ async def test_lifespan_provisions_schema_extras(monkeypatch):
         and "embedding vector_cosine_ops" in sql
         for sql in statements
     )
+    hnsw_position = next(
+        index
+        for index, event in enumerate(schema_events)
+        if "CREATE INDEX IF NOT EXISTS ix_embeddings_hnsw" in event
+    )
+    assert schema_events.index("VERIFY_EMBEDDING_SCHEMA") < hnsw_position
     assert any(
         "CREATE INDEX IF NOT EXISTS ix_chunks_search" in sql
         for sql in statements
+    )
+    assert (
+        "ALTER TABLE code_chunk_embeddings "
+        "ALTER COLUMN embedding SET STORAGE PLAIN"
+        in statements
     )
 
 
@@ -100,6 +127,7 @@ def test_lifespan_starts_and_stops_worker(monkeypatch):
         patch.object(main, "engine", mock_engine),
         patch.object(main.SQLModel.metadata, "create_all"),
         patch.object(main, "worker_loop", fake_loop),
+        patch.object(main, "verify_embedding_schema"),
     ):
         with TestClient(main.app) as _client:
             task = main.app.state.worker_task
@@ -117,6 +145,7 @@ def test_lifespan_skips_worker_when_disabled(monkeypatch):
     with (
         patch.object(main, "engine", mock_engine),
         patch.object(main.SQLModel.metadata, "create_all"),
+        patch.object(main, "verify_embedding_schema"),
     ):
         with TestClient(main.app) as _client:
             assert main.app.state.worker_task is None

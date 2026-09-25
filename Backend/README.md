@@ -21,7 +21,7 @@ and `/tours/{id}`.
 
 ## Stack
 
-- **FastAPI** + SQLModel + Postgres with **pgvector**
+- **FastAPI** + SQLModel + Postgres with **pgvector** (`halfvec(1536)` exact scans by default)
 - **tree-sitter** — Python, JavaScript, TypeScript/TSX symbol extraction
 - **OpenAI** — embeddings (`text-embedding-3-small`) + chat (`gpt-4o-mini` default)
 - **LangGraph** — ReAct Q&A agent plus structured tour and issue-brief graphs
@@ -60,6 +60,10 @@ docker compose --profile worker up -d worker
 The Compose worker uses `restart: always`, connects to the Compose Postgres
 service, and runs the same `python -m app.worker` entrypoint.
 
+On a fresh database, start the API once before the standalone worker so the API can
+install pgvector and create the schema. Both entrypoints validate the embedding column
+type before accepting work; the worker does not create or migrate schema.
+
 Clerk user sync and GitHub App uninstall cleanup arrive via webhooks, which need a
 publicly reachable backend. To exercise them locally, expose port 8000 with a tunnel and
 configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
@@ -74,6 +78,8 @@ configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
 | `DATABASE_MAX_OVERFLOW` | Temporary overflow connections per backend process (default `10`) |
 | `OPENAI_API_KEY` | Embeddings + agent chat |
 | `AGENT_MODEL` | Chat model (default `gpt-4o-mini`) |
+| `VECTOR_TYPE` | pgvector embedding column/query type: `halfvec` (default) or `vector`; must match the existing database column |
+| `VECTOR_INDEX` | ANN index mode: `none` (default, exact scan) or `hnsw`; the API creates the configured HNSW index on startup but never drops one automatically |
 | `CORS_ORIGINS` | Allowed browser origins, comma-separated (default `http://localhost:3000`) |
 | `CLERK_SECRET_KEY` | Clerk backend API |
 | `CLERK_WH_KEY` | Clerk webhook signing secret |
@@ -133,16 +139,35 @@ stack boundaries and deployment order.
 ### RDS and migrations
 
 The current lifespan hook in `app/main.py` runs `CREATE EXTENSION`,
-`SQLModel.metadata.create_all()`, and the custom composite, partial, HNSW, and GIN
-indexes plus `live_code_chunks`. It intentionally does not perform compatibility
-migrations. `create_all()` creates missing tables but does not alter existing ones, so
-a database created before the shared `jobs` table or generation-based chunk schema must
-be recreated for local development or upgraded explicitly before startup.
+`SQLModel.metadata.create_all()`, and the custom composite, partial, and GIN indexes
+plus `live_code_chunks` and `PLAIN` embedding storage. It intentionally does not
+perform compatibility migrations. `create_all()` creates missing tables but does not
+alter existing ones, so a database created before the shared `jobs` table or
+generation-based chunk schema must be recreated for local development or upgraded
+explicitly before startup.
+
+#### Local DB created before 2026-09
+
+The default embedding schema is now `halfvec(1536)` with exact scans. Recreate an old
+local volume, or convert an fp32 volume once before startup:
+
+```sql
+DROP INDEX IF EXISTS ix_embeddings_hnsw;
+ALTER TABLE code_chunk_embeddings
+  ALTER COLUMN embedding TYPE halfvec(1536) USING embedding::halfvec(1536),
+  ALTER COLUMN embedding SET STORAGE PLAIN;
+ANALYZE code_chunk_embeddings;
+```
+
+The API and standalone worker fail fast when `VECTOR_TYPE` disagrees with the database
+column, with this migration as the recovery path. `VECTOR_INDEX=none` does not drop an
+existing `ix_embeddings_hnsw`; startup logs a warning because that index consumes
+storage but is not used by the configured exact-scan path.
 
 Before connecting ECS to RDS:
 
 1. Add Alembic and create an initial migration for all SQLModel tables, the `vector`
-   extension, HNSW index, and GIN index.
+   extension, `halfvec(1536)` embedding column with `PLAIN` storage, and GIN index.
 2. Keep schema migration permission separate from the runtime application's normal
    database access where practical.
 3. Package migrations in the backend image and execute them as a one-off ECS task before
@@ -241,6 +266,7 @@ worker processes—safe.
 ```
 app/
 ├── main.py              # FastAPI app, local DB/table initialization, indexes and view
+├── db_schema.py         # embedding type validation and stale-index warning
 ├── worker.py            # Postgres-backed shared job claim/dispatch loop
 ├── rate_limit.py        # PostgreSQL fixed-window limiter dependencies
 ├── api/
@@ -447,20 +473,40 @@ See [eval/README.md](eval/README.md) and [eval/EXPERIMENTS.md](eval/EXPERIMENTS.
 
 ## Tests
 
+Use the secret-free suite for quick feedback while developing:
+
 ```bash
 uv run pytest
 ```
 
-Postgres claim/recovery tests in `tests/test_worker_claim_pg.py` need a real
-database for `FOR UPDATE SKIP LOCKED`. With the docker-compose Postgres running
-they are included in a plain `uv run pytest`: the fixture creates a scratch
-database with a unique `camino_worker_test_*` name on the `DATABASE_URL` server
-and drops it after the run. It never drops a pre-existing database. If Postgres
-is down, the module skips. Set `TEST_DATABASE_URL` to target an existing database
-instead (it gets `jobs` truncated); the fixture refuses to run if its database
-name matches `DATABASE_URL`, including through a different host alias. The normal,
-recommended command is still only `uv run pytest`; no manual test-database setup
-is needed.
+This command never uses Doppler or application credentials. Most tests run, while
+the real-PostgreSQL claim/recovery cases use a uniquely named scratch database if the
+sanitized local PostgreSQL endpoint is reachable and otherwise skip. On a fresh
+checkout, the structural check against the untracked FastAPI fixture also skips. Use
+`-rs` to display skip reasons.
+
+Before merging any backend PR, run the complete suite:
+
+```bash
+./scripts/test_all.sh
+```
+
+On first use, the script shallow-clones the pinned FastAPI `0.115.6` fixture into
+the gitignored `eval/.data/fastapi` directory, so network access is required once.
+If an earlier clone was interrupted, the script preserves that incomplete directory
+with an `.incomplete.<timestamp>.<pid>` suffix and installs a fresh clone automatically.
+It then starts an isolated PostgreSQL 16 + pgvector container on loopback, waits
+for it, runs pytest with a passwordless `TEST_DATABASE_URL`, and removes the
+container on exit. The complete run should report **zero skipped tests**. Docker
+must be running; set `CAMINO_PYTEST_DB_PORT` only if the default host port `55432`
+is occupied. Pytest arguments pass through, for example `./scripts/test_all.sh -q`.
+
+Never point `TEST_DATABASE_URL` at the development or eval database. The integration
+fixture truncates `jobs` and `repo_index_state`. CI may provide its own dedicated
+throwaway database through `TEST_DATABASE_URL`, but it must also set `DATABASE_URL`
+to a parseable synthetic database name that differs from the test database. The
+fixture refuses destructive tests when the original application database identity
+is unknown or matches the test database.
 
 Current focused coverage includes retrieval/search tests, agent smoke helpers,
 ref-aware staged-generation ingestion and archive limits, contribution-target and live
