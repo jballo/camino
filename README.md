@@ -78,7 +78,7 @@ flowchart LR
 | --------------- | ------------------------------------ | ------------------------------------------------------------------------------------------- |
 | **1 — Done**    | Best-in-class retrieval for code Q&A | exp1–5 shipped (0.900 hit@5); optional exp6 BGE reranker (0.950, closes q17); q03 last miss |
 | **2 — Now**     | Issue briefs + supporting tours      | End-to-end brief/tour flows, M5 evals, and M6 durable Postgres queue landed                   |
-| **3**           | Ship to users                        | AWS CDK, RDS PostgreSQL + pgvector, ECS Fargate, health checks, and observability             |
+| **3**           | Ship to users                        | Single EC2 box + Docker Compose (Caddy, API, workers), RDS PostgreSQL + pgvector, health checks, CI, deployed smoke test |
 | **4 — Stretch** | Meet contributors where they work    | CLI (`camino brief`), PR reviewer bot                                                       |
 
 
@@ -297,48 +297,43 @@ and error behavior, plus contribution-target and issue-brief clients.
 
 ---
 
-## AWS deployment plan
+## Deployment plan: EC2 + Docker Compose
 
+> **Decision (2026-09, supersedes the earlier CDK/ECS Fargate plan):** Camino
+> launches on a **single EC2 instance running Docker Compose**. At launch the user
+> base is one person, the eventual target is a low couple hundred users, and an
+> always-on Fargate + ALB topology (~$95/mo) is not justified at that scale. The
+> real variable cost is OpenAI tokens, not compute. ECS/CDK remains the post-alpha
+> upgrade path if usage ever demands it.
+>
 > **Database decision (2026-09-17):** the storage capacity ceiling, the halfvec
 > embedding shrink, and the move to RDS `db.t4g.micro` are planned in
-> [docs/storage-capacity-plan.md](docs/storage-capacity-plan.md).
+> [docs/storage-capacity-plan.md](docs/storage-capacity-plan.md). Neon was dropped
+> on 2026-09-23; development runs on local Postgres until the RDS instance exists.
 
-**Decision:** provision Camino's AWS infrastructure with **AWS CDK in TypeScript**.
-Keep the infrastructure in an `Infrastructure/` CDK app with two independently
-deployable stacks:
+### Target topology (~$33/mo)
 
-1. **`CaminoDatabaseStack`** — VPC, isolated database subnets, security groups,
-   Secrets Manager credentials, and RDS PostgreSQL with pgvector support.
-2. **`CaminoBackendStack`** — ECR image, ECS Fargate service, public HTTPS
-   Application Load Balancer, CloudWatch logs, task roles, and backend secrets.
-
-The backend stack depends on outputs from the database stack, but the database can be
-deployed first:
-
-```bash
-cd Infrastructure
-npm ci
-npx cdk bootstrap
-npx cdk deploy CaminoDatabaseStack
-# After the backend image, migrations, health check, and secrets are ready:
-npx cdk deploy CaminoBackendStack
-```
-
-### Private-alpha topology
-
-- Run RDS in isolated subnets with `publiclyAccessible: false`; only the ECS task
-  security group may connect to port 5432.
-- Run the internet-facing ALB in public subnets. For the initial cost-conscious alpha,
-  Fargate tasks may use public subnets/public IPs while allowing inbound traffic only
-  from the ALB security group. This avoids a NAT Gateway while preserving the outbound
-  access required by GitHub and OpenAI.
-- Terminate TLS at the ALB with ACM and Route 53. Do not expose the ECS container port
-  directly.
-- Generate database credentials in Secrets Manager and inject application secrets into
-  the task definition. Never put secret values in CDK source, CloudFormation outputs, or
-  committed environment files.
-- Run the API and `python -m app.worker` as separate services, with `RUN_WORKER=false`
-  on the API and an always-restart policy on the worker.
+- **EC2 `t4g.small`** (2 vCPU ARM, 2 GB RAM, ~$19/mo) running Docker Compose:
+  Caddy (TLS + reverse proxy), the FastAPI API container with `RUN_WORKER=false`,
+  and 1–2 dedicated worker containers with an always-restart policy. Images must be
+  built for **arm64**. RAM is the sizing constraint — workers held ~290 MiB each and
+  the RAM/latency gates passed reproducibly in the load test
+  ([docs/t4g-loadtest.md](docs/t4g-loadtest.md)).
+- **RDS PostgreSQL `db.t4g.micro`**, single-AZ, 20 GB gp3 (~$14/mo) with pgvector,
+  encrypted storage, and automated backups, reachable only from the instance's
+  security group. Only <0.5 MB of the database (users, connections, jobs, brief
+  artifacts) is irreplaceable; chunks and embeddings are a rebuildable cache
+  (~$0.25/repo to re-ingest).
+- **Frontend stays on Vercel.** The browser calls the backend directly with Clerk
+  JWTs, so the backend needs a real domain and certificate (Route 53 + Caddy's
+  automatic TLS) and the Vercel origin in `CORS_ORIGINS`.
+- **Worker replicas are the throughput knob.** Jobs are I/O-bound (GitHub/OpenAI
+  calls) and the Postgres queue (`FOR UPDATE SKIP LOCKED` + leases) already
+  supports concurrent workers, so scaling is adding worker containers, not
+  resizing the box.
+- Production secrets are provisioned outside the repository and outside any agent
+  session, per [docs/secrets-plan.md](docs/secrets-plan.md) (no production
+  credentials exist yet; update that plan when they do).
 - Jobs are claimed from Postgres, so more than one worker can share the queue. A killed
   worker leaves its current job in `running` until the 600-second lease expires and
   recovery requeues or fails it. Active jobs renew their lease every one-third of the
@@ -350,20 +345,136 @@ Before the first backend deployment:
 
 - [ ] Validate that a submitted GitHub installation belongs to the authenticated GitHub user.
 - [~] Revoke the external GitHub App authorization during account deletion; Clerk already provides the authenticated, confirmed deletion flow and webhook-driven local cleanup.
-- [ ] Add a production backend Dockerfile and pinned production start command.
-- [ ] Add `/health` and readiness behavior for the ALB.
-- [ ] Add Alembic and commit an initial schema migration, including `vector` and indexes.
-- [ ] Run migrations as a one-off ECS task; do not run schema creation in every web task.
+- [ ] Add a production backend Dockerfile (arm64) and pinned production start command.
+- [ ] Add a production Compose file: Caddy, API (`RUN_WORKER=false`), worker replicas,
+  healthchecks, and restart policies.
+- [ ] Add `/health` and wire it into the Compose healthchecks and Caddy.
+- [ ] Add Alembic and commit an initial schema migration, including `halfvec` and indexes.
+- [ ] Run migrations as an explicit one-off step (`docker compose run`); do not run
+  schema creation on every app start.
 - [~] Add explicit LLM timeouts and a parsed source-file-count limit; compressed
   tarballs, expanded archive bytes, archive entries, and generated chunks are capped.
 - [x] Recover shared jobs left `running` after a task restart with expiring leases,
   bounded attempts, and periodic requeue/fail sweeps.
-- [ ] Add CI checks for backend tests, frontend lint/build, CDK synthesis, and migrations.
+- [ ] Add CI checks for backend tests, frontend lint/build, the arm64 image build, and
+  migrations.
+- [ ] Provision the RDS instance and production secrets (outside agent sessions), and
+  update [docs/secrets-plan.md](docs/secrets-plan.md) accordingly.
 - [ ] Run a deployed smoke test: auth → GitHub connect → ingest → ask → generate tour
   → generate issue brief.
 - [ ] Register `https://<backend>/webhooks/clerk` for Clerk user lifecycle events
   (`user.created`, `user.updated`, `user.deleted`) and
   `https://<backend>/webhooks/github` for GitHub installation events.
+
+### Pre-deployment checklist: security & operations
+
+A walk-through list, separate from the build gates above. Each item must be
+explicitly checked (not assumed) before real users touch the deployment.
+
+- [~] **Authorization: a logged-in user can only access their own data.**
+  Identity comes solely from the verified Clerk JWT `sub` claim, and job, brief,
+  journey, connection, and follow queries filter on the authenticated user with
+  ownership checks. Remaining: validate that a submitted GitHub installation
+  belongs to the authenticated GitHub user (gate above), then do a final
+  route-by-route audit that every read and write is user-scoped.
+- [~] **Validate and sanitize all user inputs (SQL injection, XSS, …).**
+  SQL goes through SQLModel or parameterized `text()` bind params — no string
+  interpolation. Request bodies are Pydantic models, several with
+  `extra="forbid"`. LLM/markdown output renders via `react-markdown` with no
+  `rehype-raw` and no `dangerouslySetInnerHTML`, so raw HTML is escaped.
+  Remaining: constrain `repoName` (#28) and sweep the other unconstrained
+  string fields for length/shape limits.
+- [~] **CORS policy configured.** Exact-origin matching is implemented; at
+  deploy time set `CORS_ORIGINS` to exactly the production Vercel origin and
+  confirm no wildcard or localhost entries ship.
+- [~] **Rate limiting on all API endpoints.** Per-user fixed windows cover the
+  costly operations (agent Q&A, ingest, direct search, contribution-target
+  discovery, journey creation, brief preview/creation) with `429` +
+  `Retry-After`. Remaining: decide per endpoint for the currently unlimited
+  routes (e.g. the GitHub connection endpoints in `github.py`) so nothing is
+  accidentally unmetered. Redis-backed limiting (#36) is post-launch.
+- [ ] **Auth-flow expiry (password reset, sessions).** Clerk owns passwords,
+  reset links, and sessions. Walk the Clerk dashboard before launch: reset-link
+  and magic-link expiry, session lifetime and revocation, and bot/abuse
+  protection on the sign-up flow. Document the chosen settings.
+- [ ] **Client-side error screens — users never see a raw stack trace.**
+  Today the frontend has no `error.tsx`, `global-error.tsx`, or `not-found.tsx`
+  anywhere. Add per-route error boundaries plus a global catch-all, and map
+  `ApiError` statuses to distinct screens: expired session (401 → re-auth),
+  not found (404), rate limited (429 with retry guidance), and a generic
+  "something broke" fallback for 5xx/unexpected errors.
+- [~] **Indexes on the most common data operations.** Startup provisions the
+  tuned retrieval indexes (halfvec exact scan by design, FTS/tsvector, the
+  generation-based indexes) — the hot read path is covered by the exp1–8 work.
+  No users yet, so the rest is educated guesses to re-check with production
+  telemetry: the job-queue claim path and the rate-limit counter lookups.
+- [~] **Production logging to debug incidents.** Stdlib logging exists but
+  there is no production config. Define log level, timestamps, and a request
+  correlation ID; ship container logs off the box with a retention policy
+  (gate above) so a crashed container's logs survive it.
+- [ ] **Alerts when something breaks.** Nothing today. Start small: alarm on
+  health-check failure, sustained 5xx rate, worker job-failure rate, and
+  disk/RAM pressure on the instance.
+- [ ] **Rollback when a deploy goes wrong.** Deploy immutable, versioned image
+  tags (never `latest`) so rollback is redeploying the previous tag.
+  Investigate blue-green on a single box: bring up the new Compose stack
+  alongside the old one and swap the Caddy upstream, falling back to tag
+  rollback (brief downtime) if that's too heavy for the alpha. Alembic
+  migrations must stay backward-compatible one release back so old code runs
+  against the new schema during a rollback.
+
+### Pre-deployment checklist: compliance, data retention & governance
+
+- [ ] **Privacy policy + terms of service published.** Required by GitHub's App
+  policies and expected for the Clerk/OpenAI integrations. Must disclose what
+  is stored (Clerk profile sync, encrypted GitHub connection, indexed code,
+  briefs/tours/jobs), that repository code is sent to OpenAI for embeddings and
+  generation, and the subprocessor list (Clerk, GitHub, OpenAI, AWS, Vercel).
+  Set an age minimum and governing law in the terms. Cookies today are
+  strictly-necessary Clerk session cookies with no analytics, so no consent
+  banner is needed — revisit if analytics are ever added.
+- [~] **Right to erasure (user data deletion).** Already strong: Clerk's typed
+  confirmation → verified `user.deleted` webhook → idempotent transactional
+  cleanup, with installation-sharing rules. Remaining: external GitHub App
+  revocation (gate above), and disclose in the privacy policy that deleted data
+  persists in database backups until the backup window rotates.
+- [ ] **Data access/export (portability).** No way today for a user to get
+  their data out. Minimal acceptable answer: briefs and tours are readable
+  in-app; a JSON export endpoint is a cheap later add. Decide and document.
+- [ ] **Data inventory + retention policy.** Write down every store and give
+  each an explicit retention rule:
+  - *Personal data:* Clerk profile sync, encrypted GitHub connection,
+    rate-limit counters (prune expired windows), logs (retention set in the ops
+    checklist — and never log tokens; avoid logging IPs unless needed).
+  - *Product artifacts:* jobs/briefs/tours — decide how long terminal
+    (failed/cancelled/completed) job rows and artifacts are kept.
+  - *Rebuildable cache:* chunks/embeddings — an eviction policy for stale refs
+    and unfollowed repos doubles as the storage-capacity lever
+    ([docs/storage-capacity-plan.md](docs/storage-capacity-plan.md)).
+- [ ] **Third-party data handling verified.** Confirm current OpenAI API
+  retention/training terms (API data is not used for training by default) and
+  Clerk's data processing terms; cite both in the privacy policy.
+- [ ] **GitHub App permissions minimized.** Audit the App to least privilege
+  (read-only contents/metadata/issues) before strangers install it; every
+  granted scope is something the privacy policy has to answer for.
+- [ ] **Backups that actually restore.** RDS automated backups plus one tested
+  restore drill before launch; note the backup window as the accepted RPO. An
+  untested backup is not a backup.
+- [~] **Encryption everywhere.** GitHub tokens are already encrypted at the
+  application layer; RDS encrypted storage is planned (gate above). Remaining:
+  require TLS on the app→RDS connection and confirm no plaintext listener.
+- [ ] **Operator account hardening (the real biggest risk for a solo project).**
+  MFA on the AWS root/IAM, GitHub, Clerk, and OpenAI accounts; SSM Session
+  Manager or key-only SSH for the EC2 box; no long-lived AWS access keys on
+  laptops.
+- [ ] **Dependency and image scanning.** Dependabot (or `pip-audit` +
+  `npm audit`) in CI plus a container image scan, with a habit of applying
+  patches — a solo project's dependencies rot silently.
+- [ ] **Security contact.** A `SECURITY.md` with a private reporting channel,
+  so the first vulnerability report doesn't arrive as a public issue.
+- [ ] **Cost guardrails.** A hard monthly cap or spend alert on the OpenAI
+  account and an AWS billing alarm. The per-user rate limits are the abuse
+  backstop, but a bug can outspend an abuser.
 
 Account deletion is initiated through Clerk's authenticated UserButton security UI,
 which requires the user to type `Delete account` before continuing. Clerk deletes the
@@ -387,20 +498,21 @@ which removes every Camino connection, indexed repository, tour, and embedding f
 installation. Clerk account deletion may instead preserve installation-scoped indexed
 data when another Camino user still references the same installation.
 
-The first alpha may use Single-AZ RDS and one ECS task. Multi-AZ RDS, private Fargate
-tasks with managed egress, autoscaling, SQS workers, and S3 artifact storage are
-post-alpha reliability upgrades.
+The first alpha is one box and Single-AZ RDS. Multi-AZ RDS, ECS Fargate with CDK,
+autoscaling, SQS workers, and S3 artifact storage are post-alpha reliability upgrades
+to revisit only if usage demands them.
 
 ---
 
 ## Now / next 3 actions
 
-1. **Create the CDK database stack** — VPC, isolated subnets, RDS PostgreSQL,
-   Secrets Manager, backups, and ECS-only database access.
-2. **Prepare the backend for Fargate** — fix GitHub installation ownership, add the
-   production image and health endpoint, and introduce Alembic migrations.
-3. **Create the CDK backend stack** — ECR, Fargate, ALB/HTTPS, CloudWatch logs,
-   secrets injection, CI synthesis, and a live end-to-end smoke test.
+1. **Prepare the backend for the box** — fix GitHub installation ownership, add the
+   production arm64 Dockerfile and `/health`, and introduce the Alembic baseline.
+2. **Stand up the data layer** — RDS `db.t4g.micro` + pgvector with backups
+   (storage plan phase 2), production secrets provisioned outside agent sessions.
+3. **Bring up the Compose stack on a `t4g.small`** — Caddy TLS on a real domain,
+   API + worker replicas, webhook registration, CI, and the live end-to-end smoke
+   test.
 
 **Retrieval status:** loop paused. exp6 (cross-encoder reranker) is complete — BGE blend
 hits the ≥0.95 target and closes q17; only q03 remains. Kept optional (off by default) to
@@ -484,19 +596,19 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 ### Infra & deploy (AWS)
 
 - [x] Local Postgres + pgvector (`docker-compose.yml`)
-- [x] Infrastructure-as-code decision: AWS CDK with TypeScript
-- [ ] `Infrastructure/` CDK app with separate database and backend stacks
-- [ ] VPC: public ALB/Fargate subnets for private alpha plus isolated RDS subnets
-- [ ] RDS PostgreSQL + pgvector, encrypted storage, backups, Secrets Manager credentials
-- [ ] Alembic baseline and one-off ECS migration task
-- [ ] Backend production Dockerfile, ECR repository, and pinned start command
-- [ ] ECS Fargate service (task/execution roles, security groups, desired count 1)
-- [ ] ALB health check, ACM certificate, HTTPS listener, and Route 53 record
-- [ ] CloudWatch application logs, retention policy, alarms, and request correlation
-- [ ] CI: tests, frontend build/lint, Docker build, CDK synth, and migration validation
-- [ ] S3 (tour artifacts + cached repo parses)
-- [ ] Optional SQS replacement if Postgres queue throughput becomes a production constraint
-- [ ] Bedrock access (≥1 LLM call routed through it)
+- [x] Deployment decision: single EC2 `t4g.small` + Docker Compose (supersedes CDK/Fargate)
+- [x] `t4g.small` load test: RAM and API-latency gates passed ([docs/t4g-loadtest.md](docs/t4g-loadtest.md))
+- [x] Storage shrink: halfvec exact scan shipped ([docs/storage-capacity-plan.md](docs/storage-capacity-plan.md) phase 1)
+- [ ] Backend production Dockerfile (arm64) and pinned start command
+- [ ] Production Compose file: Caddy TLS, API (`RUN_WORKER=false`), worker replicas, healthchecks, restart policies
+- [ ] `/health` endpoint wired into Compose healthchecks and Caddy
+- [ ] Alembic baseline and explicit one-off migration step
+- [ ] RDS `db.t4g.micro` + pgvector, encrypted storage, backups, security-group-only access (storage plan phase 2)
+- [ ] Production secrets provisioned outside agent sessions ([docs/secrets-plan.md](docs/secrets-plan.md))
+- [ ] Domain + TLS for the backend origin (Route 53 + Caddy); Vercel origin in `CORS_ORIGINS`
+- [ ] Logs with retention and basic alarms (CloudWatch agent or shipped container logs)
+- [ ] CI: tests, frontend build/lint, arm64 Docker build, migration validation
+- [ ] Post-alpha, only if usage demands: ECS/CDK, SQS workers, S3 artifacts, Bedrock routing
 
 ### Evaluation (the differentiator)
 
