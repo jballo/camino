@@ -564,22 +564,24 @@ async def get_contribution_target(
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> ContributionTargetResponse:
     try:
-        statement = select(GithubConnections).where(
-            GithubConnections.userId == auth_user_id,
-            GithubConnections.active.is_(True),
+        access = await asyncio.to_thread(
+            resolve_repo_access,
+            session,
+            auth_user_id,
+            repoName,
         )
-        result = session.exec(statement)
-        gh_connection = result.one()
-    except exc.NoResultFound:
-        raise HTTPException(status_code=404, detail="Github connection not found for user")
-    except exc.OperationalError:
+    except RepoAccessDenied:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    except RepoAccessUnavailable:
+        raise HTTPException(status_code=502, detail="Github access check failed")
+    except exc.SQLAlchemyError:
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
 
     resolution = await asyncio.to_thread(
         resolve_target_branch,
         repoName,
-        gh_connection.installationId,
+        access.installation_id,
     )
     return ContributionTargetResponse(
         repoName=repoName,
