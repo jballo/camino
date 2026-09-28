@@ -7,6 +7,10 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app.config import settings
 from app.db import SessionDep
+from app.services.authorization_revocation import (
+    AuthorizationRevocationError,
+    deactivate_user_connections,
+)
 from app.services.installation_deletion import (
     InstallationDeletionError,
     delete_installation_local_data,
@@ -41,13 +45,31 @@ async def github_webhook_handler(request: Request, session: SessionDep):
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
+    action = parsed_payload.get("action")
+    if gh_event == "github_app_authorization" and action == "revoked":
+        github_user_id = parsed_payload.get("sender", {}).get("id")
+        if github_user_id is None:
+            raise HTTPException(status_code=400, detail="Invalid request")
+        try:
+            deactivate_user_connections(session, github_user_id)
+            return "github app authorization revoked"
+        except AuthorizationRevocationError:
+            logger.exception(
+                "Authorization revocation failed for GitHub user %s",
+                github_user_id,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to deactivate GitHub connections",
+            )
+
     installation = parsed_payload.get("installation")
     if installation is None:
         raise HTTPException(status_code=400, detail="Invalid request")
     installation_id = installation.get("id")
     if installation_id is None:
         raise HTTPException(status_code=400, detail="Invalid request")
-    installation_event = parsed_payload.get("action")
+    installation_event = action
 
     if gh_event == "installation" and installation_event == "deleted":
         try:
