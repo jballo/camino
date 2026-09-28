@@ -230,7 +230,7 @@ at `http://127.0.0.1:3000` or another origin, add that exact value to the backen
 - GitHub App setup URL: `{NEXT_PUBLIC_APP_URL}/api/github/setup` with **Redirect on
   update** enabled
 - GitHub App webhook URL: `{public-backend-origin}/webhooks/github`, subscribed to
-  installation events so `installation.deleted` cleanup is delivered
+  installation events so delete, suspend, and unsuspend lifecycle updates are delivered
 - Clerk webhook URL: `{public-backend-origin}/webhooks/clerk`, subscribed to
   `user.created`, `user.updated`, and `user.deleted` (the backend syncs local user
   profiles from the first two and runs account cleanup on the third)
@@ -257,7 +257,8 @@ tables.
    tests, and an implementation checklist.
 3. For more repository context, open **Explore** → select a repo → **Process**. Camino
    queues ingestion and polls its status; **Stop** cancels an active job. Indexes are
-   scoped to the selected ref, and the repo must be indexed before Q&A or tour
+   scoped to the selected ref, private repositories are rejected, and the repo must be
+   indexed before Q&A or tour
    generation can use it.
 4. Ask a question in **Explore**, or open **Tours** to generate a tour: select the
    processed repo, enter a topic such as "authentication flow", and click
@@ -343,7 +344,7 @@ and error behavior, plus contribution-target and issue-brief clients.
 
 Before the first backend deployment:
 
-- [ ] Validate that a submitted GitHub installation belongs to the authenticated GitHub user.
+- [x] Validate that a submitted GitHub installation belongs to the authenticated GitHub user.
 - [~] Revoke the external GitHub App authorization during account deletion; Clerk already provides the authenticated, confirmed deletion flow and webhook-driven local cleanup.
 - [ ] Add a production backend Dockerfile (arm64) and pinned production start command.
 - [ ] Add a production Compose file: Caddy, API (`RUN_WORKER=false`), worker replicas,
@@ -374,9 +375,9 @@ explicitly checked (not assumed) before real users touch the deployment.
 - [~] **Authorization: a logged-in user can only access their own data.**
   Identity comes solely from the verified Clerk JWT `sub` claim, and job, brief,
   journey, connection, and follow queries filter on the authenticated user with
-  ownership checks. Remaining: validate that a submitted GitHub installation
-  belongs to the authenticated GitHub user (gate above), then do a final
-  route-by-route audit that every read and write is user-scoped.
+  ownership checks. GitHub connect also verifies the submitted installation against
+  the authenticated GitHub user's installations before writing it. Remaining: do a
+  final route-by-route audit that every read and write is user-scoped.
 - [~] **Validate and sanitize all user inputs (SQL injection, XSS, …).**
   SQL goes through SQLModel or parameterized `text()` bind params — no string
   interpolation. Request bodies are Pydantic models, several with
@@ -427,7 +428,7 @@ explicitly checked (not assumed) before real users touch the deployment.
 
 - [ ] **Privacy policy + terms of service published.** Required by GitHub's App
   policies and expected for the Clerk/OpenAI integrations. Must disclose what
-  is stored (Clerk profile sync, encrypted GitHub connection, indexed code,
+  is stored (Clerk profile sync, GitHub connection metadata, indexed code,
   briefs/tours/jobs), that repository code is sent to OpenAI for embeddings and
   generation, and the subprocessor list (Clerk, GitHub, OpenAI, AWS, Vercel).
   Set an age minimum and governing law in the terms. Cookies today are
@@ -443,7 +444,7 @@ explicitly checked (not assumed) before real users touch the deployment.
   in-app; a JSON export endpoint is a cheap later add. Decide and document.
 - [ ] **Data inventory + retention policy.** Write down every store and give
   each an explicit retention rule:
-  - *Personal data:* Clerk profile sync, encrypted GitHub connection,
+  - *Personal data:* Clerk profile sync, GitHub connection metadata,
     rate-limit counters (prune expired windows), logs (retention set in the ops
     checklist — and never log tokens; avoid logging IPs unless needed).
   - *Product artifacts:* jobs/briefs/tours — decide how long terminal
@@ -460,9 +461,9 @@ explicitly checked (not assumed) before real users touch the deployment.
 - [ ] **Backups that actually restore.** RDS automated backups plus one tested
   restore drill before launch; note the backup window as the accepted RPO. An
   untested backup is not a backup.
-- [~] **Encryption everywhere.** GitHub tokens are already encrypted at the
-  application layer; RDS encrypted storage is planned (gate above). Remaining:
-  require TLS on the app→RDS connection and confirm no plaintext listener.
+- [~] **Encryption everywhere.** GitHub user OAuth tokens are not persisted;
+  RDS encrypted storage is planned (gate above). Remaining: require TLS on the
+  app→RDS connection and confirm no plaintext listener.
 - [ ] **Operator account hardening (the real biggest risk for a solo project).**
   MFA on the AWS root/IAM, GitHub, Clerk, and OpenAI accounts; SSM Session
   Manager or key-only SSH for the EC2 box; no long-lived AWS access keys on
@@ -479,7 +480,7 @@ explicitly checked (not assumed) before real users touch the deployment.
 Account deletion is initiated through Clerk's authenticated UserButton security UI,
 which requires the user to type `Delete account` before continuing. Clerk deletes the
 identity and sends a verified `user.deleted` webhook. The webhook performs idempotent,
-transactional cleanup of the user's profile, encrypted GitHub connection, tours/jobs and
+transactional cleanup of the user's profile, GitHub connection metadata, tours/jobs and
 artifacts, and rate-limit records. It deletes indexed chunks and their cascading
 embeddings only when no other Camino connection references the same GitHub installation,
 so a shared installation is preserved. Failures roll back and return `500` so Clerk can
@@ -487,7 +488,7 @@ retry safely.
 
 Camino does not need a separate delete endpoint or confirmation UI for this Clerk-driven
 flow. The remaining deletion work is to uninstall or revoke the external GitHub App
-authorization; removing Camino's encrypted connection prevents further local use but
+authorization; removing Camino's connection metadata prevents further local use but
 does not revoke access at GitHub. Repository-level ownership within an installation also
 needs an explicit policy before shared repositories are supported. Webhook cleanup and
 retry behavior are covered by backend tests. Any retained deletion audit record must be
@@ -506,8 +507,8 @@ to revisit only if usage demands them.
 
 ## Now / next 3 actions
 
-1. **Prepare the backend for the box** — fix GitHub installation ownership, add the
-   production arm64 Dockerfile and `/health`, and introduce the Alembic baseline.
+1. **Prepare the backend for the box** — add the production arm64 Dockerfile and
+   `/health`, and introduce the full Alembic baseline.
 2. **Stand up the data layer** — RDS `db.t4g.micro` + pgvector with backups
    (storage plan phase 2), production secrets provisioned outside agent sessions.
 3. **Bring up the Compose stack on a `t4g.small`** — Caddy TLS on a real domain,

@@ -303,7 +303,8 @@ async def list_repositories(
 ) -> list[str]:
     try:
         statement = select(GithubConnections).where(
-            GithubConnections.userId == auth_user_id
+            GithubConnections.userId == auth_user_id,
+            GithubConnections.active.is_(True),
         )
         result = session.exec(statement)
         gh_connection = result.one()
@@ -372,7 +373,8 @@ async def repository_overview(
     try:
         connection = session.exec(
             select(GithubConnections).where(
-                GithubConnections.userId == auth_user_id
+                GithubConnections.userId == auth_user_id,
+                GithubConnections.active.is_(True),
             )
         ).one()
         installed_names = await asyncio.to_thread(
@@ -559,7 +561,8 @@ async def get_contribution_target(
 ) -> ContributionTargetResponse:
     try:
         statement = select(GithubConnections).where(
-            GithubConnections.userId == auth_user_id
+            GithubConnections.userId == auth_user_id,
+            GithubConnections.active.is_(True),
         )
         result = session.exec(statement)
         gh_connection = result.one()

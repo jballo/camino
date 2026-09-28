@@ -651,6 +651,7 @@ def test_ingestion_ownership_guard_locks_owned_job_and_checks_installation():
     assert "FOR SHARE OF j" in job_sql
     assert "FROM githubconnections" in installation_sql
     assert '"installationId" = :installation_id' in installation_sql
+    assert "active IS TRUE" in installation_sql
     assert "FOR SHARE" in installation_sql
 
 

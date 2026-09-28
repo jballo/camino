@@ -20,8 +20,11 @@ no credential values in command text, no env dumps) stay in force at all times.
 | `OPENAI_API_KEY` | backend | Doppler | Money, bounded by the project budget cap (§3) |
 | `CLERK_SECRET_KEY`, `CLERK_WH_KEY`, `CLERK_JWT_KEY` | backend (+ frontend secret key) | Doppler | Clerk **development** instance: test users only |
 | `GH_APP_SECRET`, `GH_APP_PRIVATE_KEY`, `GH_WEBHOOK_SECRET` | backend | Doppler | **Acts as the dev GitHub App on every account/repo it's installed on**: bounded by its permissions + installations (§3) |
-| `ENCRYPTION_KEY` | backend (Fernet for stored GitHub tokens) | Doppler | Decrypts stored GitHub user tokens in the dev DB |
 | `GH_APP_ID`, `GH_APP_CLIENT_ID`, `GITHUB_APP_SLUG`, `NEXT_PUBLIC_*`, `BACKEND_URL` | backend/frontend | Doppler / frontend env | Not secret |
+
+`ENCRYPTION_KEY` was removed from backend configuration on 2026-09-28 because Camino
+no longer stores GitHub user OAuth access or refresh tokens. It can be removed from the
+dev Doppler configuration by the user.
 
 "Dev" doesn't automatically mean harmless. The GitHub App and OpenAI rows are
 only cheap to leak once the §3 checks are done.
@@ -33,9 +36,6 @@ only cheap to leak once the §3 checks are done.
       minimum the app uses (read contents/metadata/issues). No admin, no write
       unless a feature requires it.
 - [ ] **Clerk:** keys come from the *development* instance.
-- [x] **ENCRYPTION_KEY:** rotated in Doppler on 2026-09-24 after the prior key's
-      exposure. Any GitHub connection encrypted with the former key must be
-      reconnected before use.
 - [ ] **Dev Postgres** is bound to localhost (compose publishes `5432:5432`,
       i.e. all interfaces; prefer `127.0.0.1:5432:5432`). Otherwise the
       committed `.env.example` URL is an open door on shared networks.
@@ -64,7 +64,6 @@ only cheap to leak once the §3 checks are done.
 | OpenAI key | OpenAI dashboard → project → API keys |
 | Clerk keys | Clerk dashboard (dev instance) → API keys / webhooks |
 | GitHub App secret / private key / webhook secret | GitHub → Settings → Developer settings → the dev App |
-| `ENCRYPTION_KEY` | Regenerate (§3), reconnect GitHub |
 | `DATABASE_URL` | Change the local Postgres password (if localhost-bound, optional) |
 
 Then update Doppler. That's the whole procedure; a dev leak is routine.
@@ -75,8 +74,7 @@ Then update Doppler. That's the whole procedure; a dev leak is routine.
   Doppler `prd` config or AWS Secrets Manager, injected into the EC2 box at
   deploy.
 - Prod credentials are all distinct from dev (separate Clerk production
-  instance, separate GitHub App, separate OpenAI project, new
-  `ENCRYPTION_KEY`).
+  instance, separate GitHub App, and separate OpenAI project).
 - Schema changes ship as migration files, rehearsed by agents on dev and
   applied by the deploy.
 - If agents need to look at prod: an MCP server connected as a read-only

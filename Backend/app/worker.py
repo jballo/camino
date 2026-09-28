@@ -117,6 +117,7 @@ LOCK_INSTALLATION_CONNECTION_SQL = text("""
 SELECT 1
 FROM githubconnections
 WHERE "installationId" = :installation_id
+  AND active IS TRUE
 ORDER BY id
 LIMIT 1
 FOR SHARE

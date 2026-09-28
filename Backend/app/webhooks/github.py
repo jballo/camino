@@ -11,6 +11,10 @@ from app.services.installation_deletion import (
     InstallationDeletionError,
     delete_installation_local_data,
 )
+from app.services.installation_state import (
+    InstallationStateError,
+    set_installation_active,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -55,6 +59,25 @@ async def github_webhook_handler(request: Request, session: SessionDep):
             )
             raise HTTPException(
                 status_code=500, detail="Failed to delete installation"
+            )
+
+    if gh_event == "installation" and installation_event in {"suspend", "unsuspend"}:
+        active = installation_event == "unsuspend"
+        try:
+            set_installation_active(
+                session,
+                installation_id,
+                active=active,
+            )
+            return f"github installation {installation_event}ed"
+        except InstallationStateError:
+            logger.exception(
+                "Installation state update failed for installation %s",
+                installation_id,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to update installation state",
             )
 
     return "Unknown event"

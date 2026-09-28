@@ -5,6 +5,7 @@ description = "Camino backend — GitHub repo ingest, hybrid code search, and La
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "alembic>=1.16.5",
     "fastapi[standard]>=0.135.3",
     "pydantic-settings>=2.13.1",
     "sqlmodel>=0.0.38",

@@ -16,7 +16,6 @@ The last line of output is machine-readable: ``JOB_IDS=<id> <id> ...``.
 """
 
 import argparse
-import datetime as dt
 import sys
 
 from sqlmodel import Session, select
@@ -57,17 +56,12 @@ def ensure_installation_connection(
             file=sys.stderr,
         )
         raise SystemExit(1)
-    now = dt.datetime.now(dt.UTC)
     session.add(
         GithubConnections(
             userId=user_id,
             githubUsername="loadtest-placeholder",
             githubUserId=0,
             installationId=installation_id,
-            encryptedAccessToken="loadtest-placeholder",
-            encryptedRefreshToken="loadtest-placeholder",
-            tokenExpiresAt=now + dt.timedelta(days=1),
-            refreshTokenExpiresAt=now + dt.timedelta(days=1),
         )
     )
     session.commit()

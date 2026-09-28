@@ -12,6 +12,7 @@ from app.config import settings
 from app.db import get_session
 from app.main import app
 from app.services.installation_deletion import InstallationDeletionError
+from app.services.installation_state import InstallationStateError
 
 
 WEBHOOK_URL = "/webhooks/github"
@@ -71,6 +72,51 @@ def test_replay_is_successful(delete_local, client_and_session):
     assert first.status_code == 200
     assert second.status_code == 200
     assert delete_local.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("action", "active", "message"),
+    [
+        ("suspend", False, "github installation suspended"),
+        ("unsuspend", True, "github installation unsuspended"),
+    ],
+)
+@patch("app.webhooks.github.set_installation_active")
+def test_installation_state_events_update_all_connections(
+    set_active,
+    action,
+    active,
+    message,
+    client_and_session,
+):
+    client, session = client_and_session
+    body = json.dumps(
+        {"action": action, "installation": {"id": INSTALLATION_ID}}
+    ).encode()
+
+    response = client.post(WEBHOOK_URL, content=body, headers=_signed(body))
+
+    assert response.status_code == 200
+    assert response.json() == message
+    set_active.assert_called_once_with(
+        session,
+        INSTALLATION_ID,
+        active=active,
+    )
+
+
+@patch("app.webhooks.github.set_installation_active")
+def test_installation_state_failure_is_retryable(set_active, client_and_session):
+    client, _ = client_and_session
+    set_active.side_effect = InstallationStateError()
+    body = json.dumps(
+        {"action": "suspend", "installation": {"id": INSTALLATION_ID}}
+    ).encode()
+
+    response = client.post(WEBHOOK_URL, content=body, headers=_signed(body))
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Failed to update installation state"}
 
 
 @patch("app.webhooks.github.delete_installation_local_data")

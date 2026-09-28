@@ -16,6 +16,7 @@ from app.services.repository_ingestion import (
     PermanentRepositoryIngestionError,
     TransientRepositoryIngestionError,
     _extract_tarball,
+    _prepare_repository,
     _persist_wave,
     ingest_repository,
 )
@@ -87,6 +88,37 @@ def _chunk(file_path: str, *, source_code: str = "def example():\n    pass"):
         docstring=None,
         parent_class=None,
     )
+
+
+def test_prepare_repository_rejects_private_repo_before_download():
+    integration = MagicMock()
+    response = MagicMock(status_code=200)
+    response.json.return_value = {"full_name": "org/private", "private": True}
+
+    with (
+        tempfile.TemporaryDirectory() as temp_dir,
+        patch(
+            "app.services.repository_ingestion.github_integration",
+            return_value=integration,
+        ),
+        patch(
+            "app.services.repository_ingestion.installation_access_token",
+            return_value="token",
+        ),
+        patch(
+            "app.services.repository_ingestion.requests.get",
+            return_value=response,
+        ),
+        patch("app.services.repository_ingestion._download_tarball") as download,
+        pytest.raises(
+            PermanentRepositoryIngestionError,
+            match="Private repositories are not supported",
+        ),
+    ):
+        _prepare_repository("org/private", 123, "main", Path(temp_dir))
+
+    download.assert_not_called()
+    response.close.assert_called_once_with()
 
 
 async def test_ingestion_stages_publishes_and_returns_counts():

@@ -140,6 +140,28 @@ def test_post_denies_inaccessible_repository_before_enqueue():
     enqueue.assert_not_called()
 
 
+def test_post_surfaces_revoked_installation_reconnect_error():
+    with (
+        patch(
+            "app.api.repositories.resolve_repo_access",
+            side_effect=RepoAccessDenied(
+                "GitHub connection is no longer valid — reconnect"
+            ),
+        ),
+        patch("app.api.repositories.enqueue_job") as enqueue,
+    ):
+        response = client.post(
+            URL,
+            json={"repoName": "org/repo", "ref": "main"},
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "detail": "GitHub connection is no longer valid — reconnect"
+    }
+    enqueue.assert_not_called()
+
+
 def test_get_returns_ingestion_status_and_result():
     job = _job(
         status=JobStatus.COMPLETE,

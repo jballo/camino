@@ -515,10 +515,6 @@ def test_ingestion_guard_requires_current_claim_and_installation(pg_engine_clean
                 githubUsername="octocat",
                 githubUserId=installation_id,
                 installationId=installation_id,
-                encryptedAccessToken="tok",
-                encryptedRefreshToken="rtok",
-                tokenExpiresAt=now + dt.timedelta(hours=1),
-                refreshTokenExpiresAt=now + dt.timedelta(days=30),
             )
         )
         session.add(
@@ -643,10 +639,6 @@ async def test_post_then_worker_then_get_completes(pg_engine_clean):
                 githubUsername="octocat",
                 githubUserId=1,
                 installationId=12345,
-                encryptedAccessToken="tok",
-                encryptedRefreshToken="rtok",
-                tokenExpiresAt=now + dt.timedelta(hours=1),
-                refreshTokenExpiresAt=now + dt.timedelta(days=30),
             )
         )
         session.add(
