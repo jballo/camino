@@ -43,9 +43,7 @@ No fp32 database exists, so no migration SQL runs as part of this plan.
 
 ## Rules for this session
 
-- Follow `AGENTS.md` and `docs/secrets-plan.md`. Every Doppler value is dev.
-  You may run `doppler run -- …` for the app, ingestion and evals, and operate
-  on the local DBs.
+- This plan operates only on development services and local databases.
 - **Unit tests never run under `doppler run`.** Assertion output can print the
   whole `Settings` object. Step 1 makes plain `uv run pytest` work.
 - Inspect local DBs with `docker exec <container> psql -U <user> -d <db> …`.
@@ -196,8 +194,8 @@ one:
 ## Out of scope
 
 RDS provisioning, raising `INGEST_MAX_CHUNKS` (blocked on #52), 768/512 dims,
-binary quantization, Alembic, and the other `docs/secrets-plan.md` §6 items
-(dev DB `127.0.0.1` bind, t4g compose DB URL).
+binary quantization, Alembic, the dev DB `127.0.0.1` bind, and the t4g Compose
+DB URL.
 
 ## Done when
 

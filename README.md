@@ -332,9 +332,8 @@ and error behavior, plus contribution-target and issue-brief clients.
   calls) and the Postgres queue (`FOR UPDATE SKIP LOCKED` + leases) already
   supports concurrent workers, so scaling is adding worker containers, not
   resizing the box.
-- Production secrets are provisioned outside the repository and outside any agent
-  session, per [docs/secrets-plan.md](docs/secrets-plan.md) (no production
-  credentials exist yet; update that plan when they do).
+- No production credentials exist yet. Define the production provisioning
+  procedure before creating them.
 - Jobs are claimed from Postgres, so more than one worker can share the queue. A killed
   worker leaves its current job in `running` until the 600-second lease expires and
   recovery requeues or fails it. Active jobs renew their lease every one-third of the
@@ -359,8 +358,8 @@ Before the first backend deployment:
   bounded attempts, and periodic requeue/fail sweeps.
 - [ ] Add CI checks for backend tests, frontend lint/build, the arm64 image build, and
   migrations.
-- [ ] Provision the RDS instance and production secrets (outside agent sessions), and
-  update [docs/secrets-plan.md](docs/secrets-plan.md) accordingly.
+- [ ] Provision the RDS instance and production secrets after documenting the
+  production provisioning procedure.
 - [ ] Run a deployed smoke test: auth → GitHub connect → ingest → ask → generate tour
   → generate issue brief.
 - [ ] Register `https://<backend>/webhooks/clerk` for Clerk user lifecycle events
@@ -605,7 +604,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [ ] `/health` endpoint wired into Compose healthchecks and Caddy
 - [ ] Alembic baseline and explicit one-off migration step
 - [ ] RDS `db.t4g.micro` + pgvector, encrypted storage, backups, security-group-only access (storage plan phase 2)
-- [ ] Production secrets provisioned outside agent sessions ([docs/secrets-plan.md](docs/secrets-plan.md))
+- [ ] Production secrets provisioned according to the documented deployment procedure
 - [ ] Domain + TLS for the backend origin (Route 53 + Caddy); Vercel origin in `CORS_ORIGINS`
 - [ ] Logs with retention and basic alarms (CloudWatch agent or shipped container logs)
 - [ ] CI: tests, frontend build/lint, arm64 Docker build, migration validation
