@@ -10,6 +10,7 @@ from app.api.repositories import (
     RepoFollowBody,
     _index_rows,
     follow_repository,
+    list_repositories,
     lookup_repository,
     repository_overview,
     unfollow_repository,
@@ -52,6 +53,46 @@ def test_index_rows_skips_query_for_empty_repository_set():
 
     assert _index_rows(session, set()) == []
     session.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_private_installed_repository_is_hidden_from_list_and_overview():
+    installation = MagicMock()
+    installation.get_repos.return_value = [
+        SimpleNamespace(full_name="public/installed", private=False),
+        SimpleNamespace(full_name="private/installed", private=True),
+    ]
+    integration = MagicMock()
+    integration.get_app_installation.return_value = installation
+
+    list_session = MagicMock()
+    list_session.exec.return_value.one.return_value = MagicMock(installationId=12)
+
+    overview_session = MagicMock()
+    connection_result = MagicMock()
+    connection_result.one.return_value = MagicMock(installationId=12)
+    follows_result = MagicMock()
+    follows_result.all.return_value = []
+    overview_session.exec.side_effect = [connection_result, follows_result]
+
+    with (
+        patch("app.api.repositories.Auth.AppAuth"),
+        patch(
+            "app.api.repositories.GithubIntegration",
+            return_value=integration,
+        ),
+        patch(
+            "app.api.repositories._index_rows",
+            return_value=[_index_row("public/installed")],
+        ) as index_rows,
+    ):
+        repositories = await list_repositories(list_session, USER_ID)
+        overview = await repository_overview(overview_session, USER_ID)
+
+    assert repositories == ["public/installed"]
+    assert [item.repoName for item in overview.installed] == ["public/installed"]
+    assert overview.requested == []
+    index_rows.assert_called_once_with(overview_session, {"public/installed"})
 
 
 @pytest.mark.asyncio

@@ -159,7 +159,11 @@ def _installed_repositories(installation_id: int) -> list[str]:
     installation = GithubIntegration(auth=app_auth).get_app_installation(
         installation_id
     )
-    return [repo.full_name for repo in installation.get_repos()]
+    return [
+        repo.full_name
+        for repo in installation.get_repos()
+        if not repo.private
+    ]
 
 
 def _installed_repository_names(installation_id: int) -> set[str]:
