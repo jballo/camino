@@ -7,7 +7,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, select
 
@@ -15,6 +17,7 @@ from app.config import settings
 from app.db import get_session
 from app.main import app
 from app.models.github_connection import GithubConnections
+from app.models.job import Job, JobStatus
 from app.services.authorization_revocation import AuthorizationRevocationError
 from app.services.installation_deletion import InstallationDeletionError
 from app.services.installation_state import InstallationStateError
@@ -22,6 +25,11 @@ from app.services.installation_state import InstallationStateError
 
 WEBHOOK_URL = "/webhooks/github"
 INSTALLATION_ID = 101
+
+
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_for_sqlite(_type, _compiler, **_kwargs):
+    return "JSON"
 
 
 def _signed(body: bytes, event: str = "installation") -> dict[str, str]:
@@ -56,6 +64,7 @@ def test_authorization_revoked_deactivates_only_matching_connections():
         poolclass=StaticPool,
     )
     GithubConnections.__table__.create(engine)
+    Job.__table__.create(engine)
 
     with Session(engine) as session:
         session.add_all(
@@ -77,6 +86,25 @@ def test_authorization_revoked_deactivates_only_matching_connections():
                     githubUsername="other",
                     githubUserId=777,
                     installationId=103,
+                ),
+            ]
+        )
+        session.add_all(
+            [
+                Job(
+                    userId="user-1",
+                    installation_id=101,
+                    repo_name="org/repo",
+                    ref="main",
+                    status=JobStatus.PENDING,
+                ),
+                Job(
+                    userId="user-3",
+                    installation_id=103,
+                    repo_name="org/other",
+                    ref="main",
+                    status=JobStatus.RUNNING,
+                    claimed_by="worker",
                 ),
             ]
         )
@@ -106,6 +134,10 @@ def test_authorization_revoked_deactivates_only_matching_connections():
             select(GithubConnections).order_by(GithubConnections.userId)
         ).all()
         assert [connection.active for connection in connections] == [False, False, True]
+        jobs = session.exec(select(Job).order_by(Job.userId)).all()
+        assert jobs[0].status == JobStatus.CANCELLED
+        assert jobs[0].error == "GitHub authorization revoked"
+        assert jobs[1].status == JobStatus.RUNNING
 
     engine.dispose()
 

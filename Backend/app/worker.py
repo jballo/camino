@@ -71,6 +71,12 @@ SET status = 'running',
 WHERE candidate.id = (
     SELECT j.id FROM jobs AS j
     WHERE j.status = 'pending'
+      AND EXISTS (
+          SELECT 1 FROM githubconnections AS c
+          WHERE c."userId" = j."userId"
+            AND c."installationId" = j.installation_id
+            AND c.active IS TRUE
+      )
       AND NOT EXISTS (
           SELECT 1 FROM jobs AS dependency
           WHERE dependency.id = j.blocked_by_job_id
@@ -117,11 +123,39 @@ LOCK_INSTALLATION_CONNECTION_SQL = text("""
 SELECT 1
 FROM githubconnections
 WHERE "installationId" = :installation_id
+  AND "userId" = :user_id
   AND active IS TRUE
 ORDER BY id
 LIMIT 1
 FOR SHARE
 """)
+
+JOB_AUTHORIZED_SQL = text("""
+SELECT EXISTS (
+    SELECT 1
+    FROM githubconnections
+    WHERE "userId" = :user_id
+      AND "installationId" = :installation_id
+      AND active IS TRUE
+)
+""")
+
+
+class JobAuthorizationRevokedError(Exception):
+    """Raised when a job owner no longer has an active GitHub connection."""
+
+
+def _ensure_job_authorized(
+    session: Session,
+    user_id: str,
+    installation_id: int,
+) -> None:
+    authorized = session.execute(
+        JOB_AUTHORIZED_SQL,
+        {"user_id": user_id, "installation_id": installation_id},
+    ).scalar_one()
+    if not authorized:
+        raise JobAuthorizationRevokedError("GitHub authorization was revoked")
 
 
 def _make_worker_id() -> str:
@@ -245,6 +279,7 @@ def _ensure_ingestion_owned(
     *,
     job_id: int,
     worker_id: str,
+    user_id: str,
     installation_id: int,
     lease_lost: threading.Event,
 ) -> None:
@@ -254,7 +289,7 @@ def _ensure_ingestion_owned(
 
     installation_exists = session.execute(
         LOCK_INSTALLATION_CONNECTION_SQL,
-        {"installation_id": installation_id},
+        {"installation_id": installation_id, "user_id": user_id},
     ).scalar_one_or_none()
     if installation_exists is None:
         raise IngestionCancelledError(
@@ -528,6 +563,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
         topic = job.topic
         repo_name = job.repo_name
         installation_id = job.installation_id
+        user_id = job.userId
         ref = job.ref
         attempts = job.attempts
         issue_repo = job.issue_repo
@@ -574,6 +610,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
         ingestion_completed = False
         job_parked = False
         try:
+            _ensure_job_authorized(session, user_id, installation_id)
             if ref is None:
                 raise PermanentRepositoryIngestionError(
                     "Legacy job is missing its repository ref"
@@ -588,6 +625,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     ref=ref,
                     cancel_event=lease_lost,
                 )
+                _ensure_job_authorized(session, user_id, installation_id)
                 await _stamp_tour_freshness(
                     session,
                     artifact,
@@ -605,6 +643,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     raise BriefGenerationError(
                         "Issue brief job is missing its issue metadata"
                     )
+                _ensure_job_authorized(session, user_id, installation_id)
                 issue = await asyncio.to_thread(
                     fetch_issue_thread,
                     issue_repo,
@@ -660,6 +699,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     result = artifact.model_dump(mode="json")
                 except BriefNeedsRefreshError:
                     session.rollback()
+                    _ensure_job_authorized(session, user_id, installation_id)
                     ingest_job, _ = enqueue_job(
                         session,
                         user_id=job.userId,
@@ -683,6 +723,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
                         guard_session,
                         job_id=job_id,
                         worker_id=worker_id,
+                        user_id=user_id,
                         installation_id=installation_id,
                         lease_lost=lease_lost,
                     )
@@ -712,6 +753,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
         except (
             BriefGenerationCancelledError,
             IngestionCancelledError,
+            JobAuthorizationRevokedError,
             TourGenerationCancelledError,
         ) as error:
             logger.warning(

@@ -194,16 +194,40 @@ def pg_engine(application_database_name):
 @pytest.fixture
 def pg_engine_clean(pg_engine):
     with Session(pg_engine) as session:
-        session.execute(text("TRUNCATE jobs, repo_index_state RESTART IDENTITY CASCADE"))
+        session.execute(
+            text(
+                "TRUNCATE jobs, repo_index_state, githubconnections "
+                "RESTART IDENTITY CASCADE"
+            )
+        )
         session.commit()
     return pg_engine
 
 
 def _insert_job(session: Session, **overrides) -> Job:
     now = dt.datetime.now(dt.timezone.utc)
+    user_id = overrides.get("userId", "user_1")
+    installation_id = overrides.get("installation_id", 1)
+    if overrides.get("with_connection", True):
+        connection = session.exec(
+            select(GithubConnections).where(
+                GithubConnections.userId == user_id,
+                GithubConnections.installationId == installation_id,
+            )
+        ).one_or_none()
+        if connection is None:
+            session.add(
+                GithubConnections(
+                    userId=user_id,
+                    githubUsername=f"github-{user_id}",
+                    githubUserId=uuid.uuid4().int % 2_000_000_000,
+                    installationId=installation_id,
+                )
+            )
+            session.commit()
     job = Job(
-        userId=overrides.get("userId", "user_1"),
-        installation_id=overrides.get("installation_id", 1),
+        userId=user_id,
+        installation_id=installation_id,
         repo_name=overrides.get("repo_name", "org/repo"),
         ref=overrides.get("ref", "main"),
         topic=overrides.get("topic", "topic"),
@@ -324,6 +348,85 @@ def test_claim_skips_non_pending_rows(pg_engine_clean):
 
     with Session(pg_engine_clean) as session:
         assert claim_next_job(session, WORKER_A) is None
+
+
+def test_claim_skips_job_with_inactive_owner_connection(pg_engine_clean):
+    with Session(pg_engine_clean) as session:
+        job = _insert_job(session)
+        session.execute(
+            text(
+                'UPDATE githubconnections SET active = false '
+                'WHERE "userId" = :user_id'
+            ),
+            {"user_id": job.userId},
+        )
+        session.commit()
+
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) is None
+    assert _reload(pg_engine_clean, job.id).status == JobStatus.PENDING
+
+
+def test_claim_skips_job_with_missing_connection(pg_engine_clean):
+    with Session(pg_engine_clean) as session:
+        job = _insert_job(session, with_connection=False)
+
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) is None
+    assert _reload(pg_engine_clean, job.id).status == JobStatus.PENDING
+
+
+def test_job_becomes_claimable_after_owner_reconnects(pg_engine_clean):
+    with Session(pg_engine_clean) as session:
+        job = _insert_job(session)
+        session.execute(
+            text(
+                'UPDATE githubconnections SET active = false '
+                'WHERE "userId" = :user_id'
+            ),
+            {"user_id": job.userId},
+        )
+        session.commit()
+        assert claim_next_job(session, WORKER_A) is None
+        session.execute(
+            text(
+                'UPDATE githubconnections SET active = true '
+                'WHERE "userId" = :user_id'
+            ),
+            {"user_id": job.userId},
+        )
+        session.commit()
+        assert claim_next_job(session, WORKER_A) == job.id
+
+
+def test_inactive_owner_at_queue_head_does_not_block_others(pg_engine_clean):
+    older = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    newer = dt.datetime(2026, 2, 1, tzinfo=dt.timezone.utc)
+    with Session(pg_engine_clean) as session:
+        blocked = _insert_job(
+            session,
+            userId="inactive_user",
+            createdAt=older,
+            updatedAt=older,
+        )
+        session.execute(
+            text(
+                'UPDATE githubconnections SET active = false '
+                'WHERE "userId" = :user_id'
+            ),
+            {"user_id": blocked.userId},
+        )
+        session.commit()
+        claimable = _insert_job(
+            session,
+            userId="active_user",
+            createdAt=newer,
+            updatedAt=newer,
+        )
+
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) == claimable.id
+    assert _reload(pg_engine_clean, blocked.id).status == JobStatus.PENDING
 
 
 def test_claim_skips_job_while_dependency_is_active(pg_engine_clean):
@@ -539,6 +642,7 @@ def test_ingestion_guard_requires_current_claim_and_installation(pg_engine_clean
             session,
             job_id=job_id,
             worker_id=WORKER_A,
+            user_id="user_1",
             installation_id=installation_id,
             lease_lost=threading.Event(),
         )
@@ -573,6 +677,7 @@ def test_ingestion_guard_requires_current_claim_and_installation(pg_engine_clean
             session,
             job_id=job_id,
             worker_id=WORKER_A,
+            user_id="user_1",
             installation_id=installation_id,
             lease_lost=threading.Event(),
         )
@@ -599,6 +704,51 @@ def test_ingestion_guard_requires_current_claim_and_installation(pg_engine_clean
             session,
             job_id=job_id,
             worker_id=WORKER_A,
+            user_id="user_1",
+            installation_id=installation_id,
+            lease_lost=threading.Event(),
+        )
+
+
+def test_ingestion_guard_rejects_inactive_owner_when_teammate_is_active(
+    pg_engine_clean,
+):
+    installation_id = uuid.uuid4().int % 2_000_000_000
+    with Session(pg_engine_clean) as session:
+        job = _insert_job(
+            session,
+            userId="inactive_owner",
+            installation_id=installation_id,
+            status=JobStatus.RUNNING,
+            claimed_at=dt.datetime.now(dt.timezone.utc),
+            claimed_by=WORKER_A,
+        )
+        owner_connection = session.exec(
+            select(GithubConnections).where(
+                GithubConnections.userId == "inactive_owner"
+            )
+        ).one()
+        owner_connection.active = False
+        session.add(owner_connection)
+        session.add(
+            GithubConnections(
+                userId="active_teammate",
+                githubUsername="teammate",
+                githubUserId=installation_id + 1,
+                installationId=installation_id,
+            )
+        )
+        session.commit()
+
+    with (
+        Session(pg_engine_clean) as session,
+        pytest.raises(IngestionCancelledError, match="no longer active"),
+    ):
+        _ensure_ingestion_owned(
+            session,
+            job_id=job.id,
+            worker_id=WORKER_A,
+            user_id="inactive_owner",
             installation_id=installation_id,
             lease_lost=threading.Event(),
         )

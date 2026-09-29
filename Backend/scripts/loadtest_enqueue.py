@@ -32,18 +32,23 @@ def ensure_installation_connection(
 ) -> None:
     """Seed the githubconnections row the worker's ownership guard requires.
 
-    Workers refuse to commit ingestion for an installation with no
-    ``githubconnections`` row (``worker._ensure_ingestion_owned``) — they
-    abandon the job as cancelled while it still reads ``running``. Production
-    rows come from the GitHub-app connect flow; a throwaway load-test database
-    has none, so seed a placeholder. Ingestion mints installation tokens from
-    the app credentials and never reads this row's token fields.
+    Workers refuse to claim or commit ingestion without an active connection
+    for the job's exact owner and installation. Production rows come from the
+    GitHub-app connect flow; a throwaway load-test database has none, so seed a
+    placeholder. Ingestion mints installation tokens from the app credentials
+    and never reads this row's token fields.
     """
-    if session.exec(
+    existing = session.exec(
         select(GithubConnections).where(
-            GithubConnections.installationId == installation_id
+            GithubConnections.userId == user_id,
+            GithubConnections.installationId == installation_id,
         )
-    ).first():
+    ).first()
+    if existing is not None:
+        if not existing.active:
+            existing.active = True
+            session.add(existing)
+            session.commit()
         return
     conflict = session.exec(
         select(GithubConnections).where(GithubConnections.userId == user_id)

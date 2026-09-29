@@ -17,6 +17,7 @@ from app.services.repository_ingestion import (
 )
 from app.tour import TourGenerationCancelledError, TourGenerationError
 from app.worker import (
+    JobAuthorizationRevokedError,
     _run_standalone,
     _ensure_ingestion_owned,
     _requeue_or_fail,
@@ -72,6 +73,7 @@ def _job(**overrides) -> MagicMock:
     job.issue_repo = None
     job.ref = "main"
     job.installation_id = 12345
+    job.userId = "user_1"
     job.job_type = JobType.TOUR
     job.status = JobStatus.RUNNING
     job.claimed_by = WORKER_ID
@@ -115,6 +117,35 @@ async def test_run_job_success_persists_artifact():
         claimed_at=None,
         claimed_by=None,
     )
+
+
+async def test_run_job_does_not_call_github_after_authorization_is_revoked():
+    job = _job(
+        job_type=JobType.ISSUE_BRIEF,
+        issue_repo="org/repo",
+        issue_number=44,
+        topic="Revoked request",
+    )
+    session = MagicMock()
+    session.get.return_value = job
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch(
+            "app.worker._ensure_job_authorized",
+            side_effect=JobAuthorizationRevokedError("revoked"),
+        ),
+        patch("app.worker.fetch_issue_thread") as fetch_issue,
+        patch("app.worker._update_owned_job") as persist,
+        patch("app.worker._mark_failed") as mark_failed,
+    ):
+        await run_job(1, WORKER_ID)
+
+    fetch_issue.assert_not_called()
+    persist.assert_not_called()
+    mark_failed.assert_not_called()
+    session.rollback.assert_called()
 
 
 async def test_issue_brief_parks_behind_refresh_without_spending_retry():
@@ -638,6 +669,7 @@ def test_ingestion_ownership_guard_locks_owned_job_and_checks_installation():
         session,
         job_id=1,
         worker_id=WORKER_ID,
+        user_id="user_1",
         installation_id=12345,
         lease_lost=threading.Event(),
     )
@@ -651,6 +683,7 @@ def test_ingestion_ownership_guard_locks_owned_job_and_checks_installation():
     assert "FOR SHARE OF j" in job_sql
     assert "FROM githubconnections" in installation_sql
     assert '"installationId" = :installation_id' in installation_sql
+    assert '"userId" = :user_id' in installation_sql
     assert "active IS TRUE" in installation_sql
     assert "FOR SHARE" in installation_sql
 
@@ -668,6 +701,7 @@ def test_ingestion_ownership_guard_rejects_missing_or_reclaimed_job():
             session,
             job_id=1,
             worker_id=WORKER_ID,
+            user_id="user_1",
             installation_id=12345,
             lease_lost=threading.Event(),
         )
@@ -687,6 +721,7 @@ def test_ingestion_ownership_guard_rejects_missing_installation():
             session,
             job_id=1,
             worker_id=WORKER_ID,
+            user_id="user_1",
             installation_id=12345,
             lease_lost=threading.Event(),
         )
@@ -704,6 +739,7 @@ def test_ingestion_ownership_guard_rejects_known_lease_loss_without_query():
             session,
             job_id=1,
             worker_id=WORKER_ID,
+            user_id="user_1",
             installation_id=12345,
             lease_lost=lease_lost,
         )
