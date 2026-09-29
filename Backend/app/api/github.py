@@ -93,17 +93,22 @@ async def add_github_connection(
         raise HTTPException(status_code=502, detail="Github error")
 
     try:
-        installation_is_accessible = any(
-            installation.id == payload.installationId
-            for installation in github_user.get_installations()
+        installation = next(
+            (
+                candidate
+                for candidate in github_user.get_installations()
+                if candidate.id == payload.installationId
+            ),
+            None,
         )
     except GithubException:
         raise HTTPException(status_code=502, detail="Github error")
-    if not installation_is_accessible:
+    if installation is None:
         raise HTTPException(
             status_code=403,
             detail="Installation not accessible to this GitHub user",
         )
+    installation_is_active = getattr(installation, "suspended_at", None) is None
 
     if (
         refresh_token is None
@@ -128,7 +133,7 @@ async def add_github_connection(
             existing.githubUsername = username
             existing.githubUserId = github_user_id
             existing.installationId = payload.installationId
-            existing.active = True
+            existing.active = installation_is_active
             session.add(existing)
             session.commit()
             return "Successfully updated github connection"
@@ -138,7 +143,7 @@ async def add_github_connection(
             githubUsername=username,
             githubUserId=github_user_id,
             installationId=payload.installationId,
-            active=True,
+            active=installation_is_active,
         )
         session.add(connection)
         session.commit()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import update
+from sqlalchemy import delete, update
 from sqlmodel import Session, select
 
 from app.models.github_connection import GithubConnections
@@ -109,13 +109,12 @@ def _reassign_shared_ingests(
 
 
 def revoke_user_authorization(session: Session, github_user_id: int) -> None:
-    """Deactivate a GitHub user and cancel or transfer their active work."""
+    """Remove a GitHub user and cancel or transfer their active work."""
     try:
         user_ids = set(
             session.exec(
-                update(GithubConnections)
+                delete(GithubConnections)
                 .where(GithubConnections.githubUserId == github_user_id)
-                .values(active=False)
                 .returning(GithubConnections.userId)
             )
             .scalars()

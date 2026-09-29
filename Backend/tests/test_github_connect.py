@@ -36,6 +36,7 @@ def _patch_github(
     installation_ids: tuple[int, ...] = (99,),
     *,
     installations_error: Exception | None = None,
+    suspended_at: dt.datetime | None = None,
 ):
     oauth_app = MagicMock()
     oauth_app.get_access_token.return_value = _access_token()
@@ -45,7 +46,7 @@ def _patch_github(
     github_user.id = GITHUB_USER_ID
     if installations_error is None:
         github_user.get_installations.return_value = [
-            SimpleNamespace(id=installation_id)
+            SimpleNamespace(id=installation_id, suspended_at=suspended_at)
             for installation_id in installation_ids
         ]
     else:
@@ -115,6 +116,26 @@ def test_connect_updates_github_user_id_on_existing_row(client_and_session):
     assert existing.githubUsername == "octocat"
     assert existing.installationId == 99
     assert existing.active is True
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_connect_marks_suspended_installation_inactive(
+    existing,
+    client_and_session,
+):
+    client, session = client_and_session
+    existing_connection = MagicMock() if existing else None
+    session.exec.return_value.one_or_none.return_value = existing_connection
+
+    with _patch_github(suspended_at=dt.datetime(2026, 9, 1, tzinfo=dt.UTC)):
+        response = client.post(
+            CONNECT_URL,
+            json={"code": "oauth-code", "installationId": 99},
+        )
+
+    assert response.status_code == 200
+    connection = existing_connection or session.add.call_args.args[0]
+    assert connection.active is False
 
 
 def test_unique_user_conflict_returns_409(client_and_session):

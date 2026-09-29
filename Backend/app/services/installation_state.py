@@ -14,7 +14,11 @@ def set_installation_active(
     *,
     active: bool,
 ) -> None:
-    """Apply a GitHub installation suspend/unsuspend event to every owner row."""
+    """Set installation suspension state for remaining owner rows.
+
+    ``active`` represents installation suspension only. Users who revoked their
+    authorization have no connection row and cannot be restored by unsuspend.
+    """
     try:
         session.exec(
             update(GithubConnections)

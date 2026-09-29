@@ -18,9 +18,11 @@ from app.db import get_session
 from app.main import app
 from app.models.github_connection import GithubConnections
 from app.models.job import Job, JobStatus
+from app.security import get_authenticated_user_id
 from app.services.authorization_revocation import AuthorizationRevocationError
 from app.services.installation_deletion import InstallationDeletionError
 from app.services.installation_state import InstallationStateError
+from app.worker import JOB_AUTHORIZED_SQL
 
 
 WEBHOOK_URL = "/webhooks/github"
@@ -57,7 +59,7 @@ def client_and_session():
     app.dependency_overrides.clear()
 
 
-def test_authorization_revoked_deactivates_only_matching_connections():
+def test_authorization_revoked_deletes_only_matching_connections():
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -133,11 +135,151 @@ def test_authorization_revoked_deactivates_only_matching_connections():
         connections = session.exec(
             select(GithubConnections).order_by(GithubConnections.userId)
         ).all()
-        assert [connection.active for connection in connections] == [False, False, True]
+        assert [connection.userId for connection in connections] == ["user-3"]
+        assert connections[0].active is True
         jobs = session.exec(select(Job).order_by(Job.userId)).all()
         assert jobs[0].status == JobStatus.CANCELLED
         assert jobs[0].error == "GitHub authorization revoked"
         assert jobs[1].status == JobStatus.RUNNING
+
+    engine.dispose()
+
+
+def _post_installation_event(client: TestClient, action: str) -> None:
+    body = json.dumps(
+        {"action": action, "installation": {"id": INSTALLATION_ID}}
+    ).encode()
+    response = client.post(WEBHOOK_URL, content=body, headers=_signed(body))
+    assert response.status_code == 200
+
+
+def _post_revocation(client: TestClient, github_user_id: int) -> None:
+    body = json.dumps(
+        {"action": "revoked", "sender": {"id": github_user_id}}
+    ).encode()
+    response = client.post(
+        WEBHOOK_URL,
+        content=body,
+        headers=_signed(body, "github_app_authorization"),
+    )
+    assert response.status_code == 200
+
+
+def _worker_job_is_authorized(
+    session: Session,
+    *,
+    user_id: str,
+) -> bool:
+    return bool(
+        session.execute(
+            JOB_AUTHORIZED_SQL,
+            {"user_id": user_id, "installation_id": INSTALLATION_ID},
+        ).scalar_one()
+    )
+
+
+def test_unsuspend_does_not_restore_revoked_user_on_shared_installation():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    GithubConnections.__table__.create(engine)
+    Job.__table__.create(engine)
+
+    with Session(engine) as session:
+        session.add_all(
+            [
+                GithubConnections(
+                    userId="revoked-user",
+                    githubUsername="revoked",
+                    githubUserId=501,
+                    installationId=INSTALLATION_ID,
+                ),
+                GithubConnections(
+                    userId="remaining-user",
+                    githubUsername="remaining",
+                    githubUserId=777,
+                    installationId=INSTALLATION_ID,
+                ),
+            ]
+        )
+        session.commit()
+
+        def _session():
+            yield session
+
+        app.dependency_overrides[get_session] = _session
+        app.dependency_overrides[get_authenticated_user_id] = lambda: "revoked-user"
+        client = TestClient(app)
+        try:
+            _post_revocation(client, 501)
+            _post_installation_event(client, "suspend")
+            _post_installation_event(client, "unsuspend")
+            status = client.get("/api/v1/github/connection")
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        connections = session.exec(
+            select(GithubConnections).order_by(GithubConnections.userId)
+        ).all()
+        assert [connection.userId for connection in connections] == [
+            "remaining-user"
+        ]
+        assert connections[0].active is True
+        assert _worker_job_is_authorized(
+            session,
+            user_id="revoked-user",
+        ) is False
+        assert status.status_code == 200
+        assert status.json() == {"connected": False, "githubUsername": None}
+
+    engine.dispose()
+
+
+def test_suspend_unsuspend_does_not_restore_revoked_sole_user():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    GithubConnections.__table__.create(engine)
+    Job.__table__.create(engine)
+
+    with Session(engine) as session:
+        session.add(
+            GithubConnections(
+                userId="revoked-user",
+                githubUsername="revoked",
+                githubUserId=501,
+                installationId=INSTALLATION_ID,
+            )
+        )
+        session.commit()
+
+        def _session():
+            yield session
+
+        app.dependency_overrides[get_session] = _session
+        app.dependency_overrides[get_authenticated_user_id] = lambda: "revoked-user"
+        client = TestClient(app)
+        try:
+            _post_revocation(client, 501)
+            _post_installation_event(client, "suspend")
+            _post_installation_event(client, "unsuspend")
+            status = client.get("/api/v1/github/connection")
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        assert session.exec(select(GithubConnections)).all() == []
+        assert _worker_job_is_authorized(
+            session,
+            user_id="revoked-user",
+        ) is False
+        assert status.status_code == 200
+        assert status.json() == {"connected": False, "githubUsername": None}
 
     engine.dispose()
 

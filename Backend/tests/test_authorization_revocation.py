@@ -81,7 +81,7 @@ def _job(
     )
 
 
-def test_deactivates_connections_and_cancels_only_revoked_users_active_jobs():
+def test_deletes_connections_and_cancels_only_revoked_users_active_jobs():
     engine = _engine()
     with Session(engine) as session:
         session.add_all(
@@ -100,8 +100,8 @@ def test_deactivates_connections_and_cancels_only_revoked_users_active_jobs():
 
         connection = session.exec(
             select(GithubConnections).where(GithubConnections.userId == "revoked")
-        ).one()
-        assert connection.active is False
+        ).one_or_none()
+        assert connection is None
         revoked_jobs = session.exec(
             select(Job).where(Job.userId == "revoked").order_by(Job.id)
         ).all()
@@ -273,7 +273,7 @@ def test_backward_compatible_alias_delegates_to_revocation():
     deactivate_user_connections(session, 501)
 
     statement = str(session.exec.call_args.args[0])
-    assert "UPDATE githubconnections" in statement
+    assert "DELETE FROM githubconnections" in statement
     assert 'githubconnections."githubUserId"' in statement
     assert 'RETURNING githubconnections."userId"' in statement
     session.commit.assert_called_once_with()
