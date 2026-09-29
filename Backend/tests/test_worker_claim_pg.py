@@ -38,6 +38,7 @@ from app.models.tour import TourArtifact, TourStep
 from app.models.job import Job, JobStatus, JobType
 from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
 from app.security import get_authenticated_user_id
+from app.services.installation_state import set_installation_active
 from app.services.repo_access import RepoAccess
 from app.services.repository_ingestion import IngestionCancelledError
 from app.worker import (
@@ -483,6 +484,70 @@ def test_missing_dependency_fails_open(pg_engine_clean):
         blocked = _insert_job(session, blocked_by_job_id=999999)
     with Session(pg_engine_clean) as session:
         assert claim_next_job(session, WORKER_A) == blocked.id
+
+
+def test_suspended_owners_brief_survives_running_ingest_replacement(pg_engine_clean):
+    older = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    newer = dt.datetime(2026, 2, 1, tzinfo=dt.timezone.utc)
+    with Session(pg_engine_clean) as session:
+        ingest = _insert_job(
+            session,
+            userId="suspended",
+            installation_id=101,
+            job_type=JobType.REPOSITORY_INGEST,
+            dedupe_key="repository_ingest:org/repo:main",
+            status=JobStatus.RUNNING,
+            claimed_at=older,
+            claimed_by=WORKER_B,
+            createdAt=older,
+            updatedAt=older,
+        )
+        own_brief = _insert_job(
+            session,
+            userId="suspended",
+            installation_id=101,
+            job_type=JobType.ISSUE_BRIEF,
+            blocked_by_job_id=ingest.id,
+            createdAt=older,
+            updatedAt=older,
+        )
+        teammate_brief = _insert_job(
+            session,
+            userId="teammate",
+            installation_id=202,
+            job_type=JobType.ISSUE_BRIEF,
+            blocked_by_job_id=ingest.id,
+            createdAt=newer,
+            updatedAt=newer,
+        )
+
+    with Session(pg_engine_clean) as session:
+        set_installation_active(session, 101, active=False)
+
+    with Session(pg_engine_clean) as session:
+        replacement_id = claim_next_job(session, WORKER_A)
+    replacement = _reload(pg_engine_clean, replacement_id)
+    assert replacement.job_type == JobType.REPOSITORY_INGEST
+    assert replacement.userId == "teammate"
+    assert _reload(pg_engine_clean, own_brief.id).blocked_by_job_id == replacement_id
+    assert (
+        _reload(pg_engine_clean, teammate_brief.id).blocked_by_job_id
+        == replacement_id
+    )
+
+    with Session(pg_engine_clean) as session:
+        session.execute(
+            text("UPDATE jobs SET status = 'complete' WHERE id = :id"),
+            {"id": replacement_id},
+        )
+        session.commit()
+        assert claim_next_job(session, WORKER_A) == teammate_brief.id
+        assert claim_next_job(session, WORKER_A) is None
+
+    with Session(pg_engine_clean) as session:
+        set_installation_active(session, 101, active=True)
+        assert claim_next_job(session, WORKER_A) == own_brief.id
+    assert _reload(pg_engine_clean, own_brief.id).status == JobStatus.RUNNING
 
 
 def test_parking_preserves_retry_budget_and_created_at(pg_engine_clean):
