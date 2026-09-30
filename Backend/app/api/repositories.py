@@ -24,13 +24,13 @@ from app.rate_limit import (
     REPOSITORY_SEARCH_RATE_LIMIT,
 )
 from app.security import get_authenticated_user_id
-from app.services.jobs import (
-    cancel_job,
-    enqueue_job,
-    normalize_repository_name,
-    repository_ingest_dedupe_key,
-)
+from app.services.jobs import normalize_repository_name
 from app.services.search import hybrid_search
+from app.services.shared_ingests import (
+    SharedIngestRaceError,
+    cancel_shared_ingest,
+    enqueue_shared_ingest,
+)
 from app.services.repo_access import (
     RepoAccessDenied,
     RepoAccessUnavailable,
@@ -505,21 +505,18 @@ async def follow_repository(
             followed = True
 
         if resolution is not None:
-            _, job_queued = enqueue_job(
+            requester_job, _, _ = enqueue_shared_ingest(
                 session,
                 user_id=auth_user_id,
                 installation_id=access.installation_id,
                 repo_name=repo_name,
                 ref=resolution.branch,
-                job_type=JobType.REPOSITORY_INGEST,
-                dedupe_key=repository_ingest_dedupe_key(
-                    repo_name=repo_name,
-                    ref=resolution.branch,
-                ),
+                waiting_row=True,
                 commit=False,
             )
+            job_queued = requester_job.userId == auth_user_id
         session.commit()
-    except exc.SQLAlchemyError:
+    except (exc.SQLAlchemyError, SharedIngestRaceError):
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
 
@@ -627,19 +624,15 @@ async def process_repository(
         raise HTTPException(status_code=422, detail="Could not resolve repository ref")
 
     try:
-        job, created = enqueue_job(
+        job, _, created = enqueue_shared_ingest(
             session,
             user_id=auth_user_id,
             installation_id=access.installation_id,
             repo_name=payload.repoName,
             ref=ref,
-            job_type=JobType.REPOSITORY_INGEST,
-            dedupe_key=repository_ingest_dedupe_key(
-                repo_name=payload.repoName,
-                ref=ref,
-            ),
+            waiting_row=True,
         )
-    except exc.SQLAlchemyError:
+    except (exc.SQLAlchemyError, SharedIngestRaceError):
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
 
@@ -692,7 +685,8 @@ async def cancel_repository_ingest(
         )
 
     try:
-        cancel_job(session, job_id)
+        cancel_shared_ingest(session, job)
+        session.commit()
         session.refresh(job)
     except exc.SQLAlchemyError:
         session.rollback()

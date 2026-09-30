@@ -152,15 +152,16 @@ def test_suspension_transfers_pending_shared_ingest_to_authorized_dependent():
         assert _claimable(session, ingest)
 
         own_brief = session.get(Job, own_brief_id)
-        assert own_brief.status == JobStatus.PENDING
-        assert own_brief.blocked_by_job_id == ingest_id
+        assert own_brief.status == JobStatus.CANCELLED
+        assert own_brief.error == SUSPENSION_ERROR
         teammate_brief = session.get(Job, teammate_brief_id)
+        assert teammate_brief.status == JobStatus.PENDING
         assert teammate_brief.blocked_by_job_id == ingest_id
 
     engine.dispose()
 
 
-def test_suspension_replaces_running_ingest_and_repoints_all_dependents():
+def test_suspension_replaces_running_ingest_and_repoints_other_users_dependents():
     engine = _engine()
     with Session(engine) as session:
         ingest_id, own_brief_id, teammate_brief_id = _seed_shared_ingest(
@@ -187,15 +188,17 @@ def test_suspension_replaces_running_ingest_and_repoints_all_dependents():
         assert replacement.installation_id == 202
 
         own_brief = session.get(Job, own_brief_id)
+        assert own_brief.status == JobStatus.CANCELLED
+        assert own_brief.error == SUSPENSION_ERROR
+        assert own_brief.blocked_by_job_id == ingest_id
         teammate_brief = session.get(Job, teammate_brief_id)
-        assert own_brief.status == JobStatus.PENDING
-        assert own_brief.blocked_by_job_id == replacement.id
+        assert teammate_brief.status == JobStatus.PENDING
         assert teammate_brief.blocked_by_job_id == replacement.id
 
     engine.dispose()
 
 
-def test_suspension_without_other_dependents_leaves_jobs_frozen_until_unsuspend():
+def test_suspension_without_other_dependents_cancels_jobs_for_good():
     engine = _engine()
     with Session(engine) as session:
         session.add(_connection("suspended", 501, 101))
@@ -219,18 +222,18 @@ def test_suspension_without_other_dependents_leaves_jobs_frozen_until_unsuspend(
 
         set_installation_active(session, 101, active=False)
 
-        ingest = session.get(Job, ingest_id)
-        brief = session.get(Job, brief_id)
-        assert ingest.userId == "suspended"
-        assert ingest.status == JobStatus.PENDING
-        assert ingest.error is None
-        assert brief.status == JobStatus.PENDING
-        assert brief.blocked_by_job_id == ingest_id
-        assert not _claimable(session, ingest)
+        for job_id in (ingest_id, brief_id):
+            job = session.get(Job, job_id)
+            assert job.userId == "suspended"
+            assert job.status == JobStatus.CANCELLED
+            assert job.error == SUSPENSION_ERROR
 
         set_installation_active(session, 101, active=True)
 
-        assert _claimable(session, session.get(Job, ingest_id))
+        for job_id in (ingest_id, brief_id):
+            job = session.get(Job, job_id)
+            assert job.status == JobStatus.CANCELLED
+            assert not _claimable(session, job)
 
     engine.dispose()
 
@@ -246,15 +249,94 @@ def test_co_suspended_users_are_not_chosen_as_new_ingest_owner():
 
         set_installation_active(session, 101, active=False)
 
+        jobs = session.exec(select(Job)).all()
+        assert len(jobs) == 3
+        assert {job.id for job in jobs} == {
+            ingest_id,
+            own_brief_id,
+            teammate_brief_id,
+        }
+        for job in jobs:
+            assert job.status == JobStatus.CANCELLED
+            assert job.error == SUSPENSION_ERROR
+
+    engine.dispose()
+
+
+def _seed_waiting_row(session: Session, *, ingest_status: str) -> tuple[int, int]:
+    """Seed a suspended-owner primary and another user's waiting row on it."""
+    session.add_all(
+        [
+            _connection("suspended", 501, 101),
+            _connection("teammate", 601, 202),
+        ]
+    )
+    ingest = _job(
+        "suspended",
+        101,
+        status=ingest_status,
+        job_type=JobType.REPOSITORY_INGEST,
+    )
+    session.add(ingest)
+    session.flush()
+    waiting = _job(
+        "teammate",
+        202,
+        status=JobStatus.PENDING,
+        job_type=JobType.REPOSITORY_INGEST,
+        blocked_by_job_id=ingest.id,
+    )
+    waiting.dedupe_key = "repository_ingest:org/repo:main:user:teammate"
+    session.add(waiting)
+    session.commit()
+    return ingest.id, waiting.id
+
+
+def test_other_users_waiting_row_takes_over_pending_ingest():
+    engine = _engine()
+    with Session(engine) as session:
+        ingest_id, waiting_id = _seed_waiting_row(
+            session, ingest_status=JobStatus.PENDING
+        )
+
+        set_installation_active(session, 101, active=False)
+
         ingest = session.get(Job, ingest_id)
-        assert ingest.userId == "suspended"
-        assert ingest.status == JobStatus.RUNNING
-        assert ingest.error is None
-        assert len(session.exec(select(Job)).all()) == 3
-        for brief_id in (own_brief_id, teammate_brief_id):
-            brief = session.get(Job, brief_id)
-            assert brief.status == JobStatus.PENDING
-            assert brief.blocked_by_job_id == ingest_id
+        assert ingest.userId == "teammate"
+        assert ingest.installation_id == 202
+        assert ingest.status == JobStatus.PENDING
+        assert _claimable(session, ingest)
+        waiting = session.get(Job, waiting_id)
+        assert waiting.status == JobStatus.PENDING
+        assert waiting.blocked_by_job_id == ingest_id
+
+    engine.dispose()
+
+
+def test_other_users_waiting_row_takes_over_running_ingest():
+    engine = _engine()
+    with Session(engine) as session:
+        ingest_id, waiting_id = _seed_waiting_row(
+            session, ingest_status=JobStatus.RUNNING
+        )
+
+        set_installation_active(session, 101, active=False)
+
+        old_ingest = session.get(Job, ingest_id)
+        assert old_ingest.status == JobStatus.CANCELLED
+        assert old_ingest.error == SUSPENSION_ERROR
+        replacement = session.exec(
+            select(Job).where(
+                Job.dedupe_key == "repository_ingest:org/repo:main",
+                Job.status == JobStatus.PENDING,
+            )
+        ).one()
+        assert replacement.userId == "teammate"
+        assert replacement.installation_id == 202
+        assert _claimable(session, replacement)
+        waiting = session.get(Job, waiting_id)
+        assert waiting.status == JobStatus.PENDING
+        assert waiting.blocked_by_job_id == replacement.id
 
     engine.dispose()
 

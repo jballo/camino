@@ -6,16 +6,28 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg2.errorcodes import NOT_NULL_VIOLATION, UNIQUE_VIOLATION
 from github import GithubException
+from sqlalchemy import create_engine
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, select
 
 from app.db import get_session
 from app.main import app
 from app.models.github_connection import GithubConnections
+from app.models.job import Job, JobStatus, JobType
 from app.security import get_authenticated_user_id
+from app.services.installation_state import SUSPENSION_ERROR
 
 
 CONNECT_URL = "/api/v1/github/connect"
 GITHUB_USER_ID = 4242
+
+
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_for_sqlite(_type, _compiler, **_kwargs):
+    return "JSON"
 
 
 def _noop_verify():
@@ -225,3 +237,166 @@ def test_installation_lookup_error_returns_502_without_persisting(
     session.exec.assert_not_called()
     session.add.assert_not_called()
     session.commit.assert_not_called()
+
+
+@pytest.fixture
+def sqlite_client_and_session():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    GithubConnections.__table__.create(engine)
+    Job.__table__.create(engine)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                GithubConnections(
+                    userId="user_123",
+                    githubUsername="octocat",
+                    githubUserId=GITHUB_USER_ID,
+                    installationId=98,
+                ),
+                GithubConnections(
+                    userId="teammate",
+                    githubUsername="teammate",
+                    githubUserId=777,
+                    installationId=202,
+                ),
+            ]
+        )
+        session.commit()
+
+        def _session():
+            yield session
+
+        app.dependency_overrides[get_authenticated_user_id] = _noop_verify
+        app.dependency_overrides[get_session] = _session
+        client = TestClient(app)
+        try:
+            yield client, session
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def _seed_reconnect_jobs(session) -> tuple[int, int, int]:
+    """Seed a running shared ingest, a pending brief, and a teammate's brief."""
+    ingest = Job(
+        userId="user_123",
+        installation_id=98,
+        repo_name="org/repo",
+        ref="main",
+        job_type=JobType.REPOSITORY_INGEST,
+        dedupe_key="repository_ingest:org/repo:main",
+        status=JobStatus.RUNNING,
+        claimed_at=dt.datetime(2026, 9, 1, tzinfo=dt.UTC),
+        claimed_by="worker",
+        attempts=2,
+    )
+    session.add(ingest)
+    session.flush()
+    own_brief = Job(
+        userId="user_123",
+        installation_id=98,
+        repo_name="org/repo",
+        ref="main",
+        job_type=JobType.ISSUE_BRIEF,
+        status=JobStatus.PENDING,
+        blocked_by_job_id=ingest.id,
+    )
+    teammate_brief = Job(
+        userId="teammate",
+        installation_id=202,
+        repo_name="org/repo",
+        ref="main",
+        job_type=JobType.ISSUE_BRIEF,
+        status=JobStatus.PENDING,
+        blocked_by_job_id=ingest.id,
+    )
+    session.add_all([own_brief, teammate_brief])
+    session.commit()
+    return ingest.id, own_brief.id, teammate_brief.id
+
+
+def test_reconnect_to_different_active_installation_moves_jobs(
+    sqlite_client_and_session,
+):
+    client, session = sqlite_client_and_session
+    ingest_id, own_brief_id, teammate_brief_id = _seed_reconnect_jobs(session)
+
+    with _patch_github():
+        response = client.post(
+            CONNECT_URL,
+            json={"code": "oauth-code", "installationId": 99},
+        )
+
+    assert response.status_code == 200
+    ingest = session.get(Job, ingest_id)
+    assert ingest.userId == "user_123"
+    assert ingest.installation_id == 99
+    assert ingest.status == JobStatus.PENDING
+    assert ingest.claimed_at is None
+    assert ingest.claimed_by is None
+    assert ingest.attempts == 1
+    own_brief = session.get(Job, own_brief_id)
+    assert own_brief.installation_id == 99
+    assert own_brief.status == JobStatus.PENDING
+    assert own_brief.blocked_by_job_id == ingest_id
+    teammate_brief = session.get(Job, teammate_brief_id)
+    assert teammate_brief.installation_id == 202
+    assert teammate_brief.blocked_by_job_id == ingest_id
+
+
+def test_reconnect_to_suspended_installation_cancels_jobs_and_hands_over_ingest(
+    sqlite_client_and_session,
+):
+    client, session = sqlite_client_and_session
+    ingest_id, own_brief_id, teammate_brief_id = _seed_reconnect_jobs(session)
+
+    with _patch_github(suspended_at=dt.datetime(2026, 9, 1, tzinfo=dt.UTC)):
+        response = client.post(
+            CONNECT_URL,
+            json={"code": "oauth-code", "installationId": 99},
+        )
+
+    assert response.status_code == 200
+    for job_id in (ingest_id, own_brief_id):
+        job = session.get(Job, job_id)
+        assert job.status == JobStatus.CANCELLED
+        assert job.error == SUSPENSION_ERROR
+    replacement = session.exec(
+        select(Job).where(
+            Job.job_type == JobType.REPOSITORY_INGEST,
+            Job.status == JobStatus.PENDING,
+        )
+    ).one()
+    assert replacement.userId == "teammate"
+    assert replacement.installation_id == 202
+    teammate_brief = session.get(Job, teammate_brief_id)
+    assert teammate_brief.status == JobStatus.PENDING
+    assert teammate_brief.blocked_by_job_id == replacement.id
+
+
+def test_reconnect_to_same_installation_leaves_jobs_untouched(
+    sqlite_client_and_session,
+):
+    client, session = sqlite_client_and_session
+    ingest_id, own_brief_id, _ = _seed_reconnect_jobs(session)
+
+    with _patch_github(installation_ids=(98,)):
+        response = client.post(
+            CONNECT_URL,
+            json={"code": "oauth-code", "installationId": 98},
+        )
+
+    assert response.status_code == 200
+    ingest = session.get(Job, ingest_id)
+    assert ingest.installation_id == 98
+    assert ingest.status == JobStatus.RUNNING
+    assert ingest.claimed_by == "worker"
+    assert ingest.attempts == 2
+    own_brief = session.get(Job, own_brief_id)
+    assert own_brief.installation_id == 98
+    assert own_brief.status == JobStatus.PENDING

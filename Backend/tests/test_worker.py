@@ -169,13 +169,17 @@ async def test_issue_brief_parks_behind_refresh_without_spending_retry():
         patch("app.worker.resolve_target_branch", return_value=MagicMock(branch="main", default_branch="main")),
         patch("app.worker.resolve_fork_status", return_value=MagicMock()),
         patch("app.worker.generate_brief", new_callable=AsyncMock, side_effect=BriefNeedsRefreshError("stale")),
-        patch("app.worker.enqueue_job", return_value=(dependency, True)) as enqueue,
+        patch(
+            "app.worker.enqueue_shared_ingest",
+            return_value=(dependency, dependency, True),
+        ) as enqueue,
         patch("app.worker.park_job", park),
         patch("app.worker._update_owned_job") as persist,
     ):
         await run_job(1, WORKER_ID)
 
-    assert enqueue.call_args.kwargs["job_type"] == JobType.REPOSITORY_INGEST
+    assert enqueue.call_args.kwargs["waiting_row"] is False
+    assert enqueue.call_args.kwargs["commit"] is False
     park.assert_called_once_with(
         session, 1, WORKER_ID, blocked_by_job_id=17
     )

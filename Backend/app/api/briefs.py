@@ -25,7 +25,6 @@ from app.services.jobs import (
     enqueue_job,
     issue_brief_dedupe_key,
     normalize_repository_name,
-    repository_ingest_dedupe_key,
 )
 from app.services.repo_access import (
     RepoAccessDenied,
@@ -33,6 +32,7 @@ from app.services.repo_access import (
     authorize_index_read,
     resolve_repo_access,
 )
+from app.services.shared_ingests import SharedIngestRaceError, enqueue_shared_ingest
 from app.services.target_branch import TargetBranchResolution, resolve_target_branch
 
 router = APIRouter()
@@ -249,16 +249,16 @@ async def create_brief(
                 state,
             )
         else:
-            ingest, _ = enqueue_job(
+            _, primary, _ = enqueue_shared_ingest(
                 session,
                 user_id=auth_user_id,
                 installation_id=installation_id,
                 repo_name=repo_name,
                 ref=ref,
-                job_type=JobType.REPOSITORY_INGEST,
-                dedupe_key=repository_ingest_dedupe_key(repo_name=repo_name, ref=ref),
+                waiting_row=False,
+                commit=False,
             )
-            dependency_id = ingest.id
+            dependency_id = primary.id
         brief, _ = enqueue_job(
             session,
             user_id=auth_user_id,
@@ -277,12 +277,14 @@ async def create_brief(
             issue_repo=preview.issueRepo,
             issue_number=preview.issueNumber,
             blocked_by_job_id=dependency_id,
+            commit=False,
         )
+        session.commit()
     except RepoAccessDenied:
         raise HTTPException(status_code=404, detail="Repository index not found")
     except RepoAccessUnavailable:
         raise HTTPException(status_code=502, detail="Github access check failed")
-    except exc.SQLAlchemyError:
+    except (exc.SQLAlchemyError, SharedIngestRaceError):
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
     return BriefCreatedResponse(id=brief.id, status=brief.status)

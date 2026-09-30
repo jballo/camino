@@ -2,7 +2,7 @@ from sqlalchemy import update
 from sqlmodel import Session
 
 from app.models.github_connection import GithubConnections
-from app.services.shared_ingests import reassign_shared_ingests
+from app.services.shared_ingests import release_user_jobs
 
 
 SUSPENSION_ERROR = "GitHub installation suspended"
@@ -23,8 +23,8 @@ def set_installation_active(
     ``active`` represents installation suspension only. Users who revoked their
     authorization have no connection row and cannot be restored by unsuspend.
     Suspension hands shared ingests owned by the installation's users to an
-    authorized dependent; the suspended users' own jobs stay pending until
-    unsuspend makes them claimable again.
+    authorized dependent, then cancels the suspended users' remaining active
+    jobs. Unsuspend only makes the users eligible to run new work.
     """
     try:
         user_ids = set(
@@ -39,11 +39,11 @@ def set_installation_active(
         )
 
         if not active:
-            reassign_shared_ingests(
+            release_user_jobs(
                 session,
                 user_ids,
                 error=SUSPENSION_ERROR,
-                repoint_sidelined_dependents=True,
+                dispose="cancel",
             )
         session.commit()
     except Exception as error:

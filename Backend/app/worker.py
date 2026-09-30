@@ -41,13 +41,13 @@ from app.models.code import RepoIndexState
 from app.models.tour import TourArtifact, TourFreshness
 from app.services.fork_status import resolve_fork_status
 from app.services.issue_thread import IssueThreadError, fetch_issue_thread
-from app.services.jobs import enqueue_job, repository_ingest_dedupe_key
 from app.services.repository_ingestion import (
     IngestionCancelledError,
     PermanentRepositoryIngestionError,
     TransientRepositoryIngestionError,
     ingest_repository,
 )
+from app.services.shared_ingests import enqueue_shared_ingest
 from app.services.staleness import compare_to_head
 from app.services.target_branch import TargetBranchResolution, resolve_target_branch
 from app.tour import (
@@ -189,6 +189,23 @@ def claim_next_job(session: Session, worker_id: str) -> int | None:
             session.commit()
             logger.warning(
                 "failed dependent job | id=%s dependency=%s", job_id, dependency.id
+            )
+            continue
+        if (
+            dependency is not None
+            and dependency.status == JobStatus.COMPLETE
+            and job.job_type == JobType.REPOSITORY_INGEST
+        ):
+            # A waiting row shares its primary's result instead of re-ingesting.
+            job.status = JobStatus.COMPLETE
+            job.artifact = dependency.artifact
+            job.claimed_at = None
+            job.claimed_by = None
+            job.attempts -= 1
+            session.add(job)
+            session.commit()
+            logger.info(
+                "completed waiting ingest | id=%s primary=%s", job_id, dependency.id
             )
             continue
         session.commit()
@@ -700,22 +717,22 @@ async def run_job(job_id: int, worker_id: str) -> None:
                 except BriefNeedsRefreshError:
                     session.rollback()
                     _ensure_job_authorized(session, user_id, installation_id)
-                    ingest_job, _ = enqueue_job(
+                    # Park in the same transaction as the enqueue so a handoff
+                    # of the primary cannot miss this brief.
+                    _, primary, _ = enqueue_shared_ingest(
                         session,
                         user_id=job.userId,
                         installation_id=installation_id,
                         repo_name=repo_name,
                         ref=ref,
-                        job_type=JobType.REPOSITORY_INGEST,
-                        dedupe_key=repository_ingest_dedupe_key(
-                            repo_name=repo_name, ref=ref
-                        ),
+                        waiting_row=False,
+                        commit=False,
                     )
                     job_parked = park_job(
                         session,
                         job_id,
                         worker_id,
-                        blocked_by_job_id=ingest_job.id,
+                        blocked_by_job_id=primary.id,
                     )
             elif job_type == JobType.REPOSITORY_INGEST:
                 def ensure_ingestion_owned(guard_session: Session) -> None:

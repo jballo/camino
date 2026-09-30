@@ -27,6 +27,14 @@ def repository_ingest_dedupe_key(
     return f"{JobType.REPOSITORY_INGEST}:{normalized_repo_name}:{ref}"
 
 
+def repository_ingest_waiter_dedupe_key(
+    *, user_id: str, repo_name: str, ref: str
+) -> str:
+    """Identity of one user's waiting row on another user's primary ingest."""
+    primary_key = repository_ingest_dedupe_key(repo_name=repo_name, ref=ref)
+    return f"{primary_key}:user:{user_id}"
+
+
 def issue_brief_dedupe_key(
     *,
     user_id: str,

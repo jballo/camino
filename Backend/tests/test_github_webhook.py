@@ -17,7 +17,7 @@ from app.config import settings
 from app.db import get_session
 from app.main import app
 from app.models.github_connection import GithubConnections
-from app.models.job import Job, JobStatus
+from app.models.job import Job, JobStatus, JobType
 from app.security import get_authenticated_user_id
 from app.services.authorization_revocation import AuthorizationRevocationError
 from app.services.installation_deletion import InstallationDeletionError
@@ -436,3 +436,90 @@ def test_invalid_signature_is_rejected(client_and_session):
     )
 
     assert response.status_code == 401
+
+
+def test_installation_deleted_hands_shared_ingest_to_waiting_brief_owner():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    GithubConnections.__table__.create(engine)
+    Job.__table__.create(engine)
+
+    with Session(engine) as session:
+        session.add_all(
+            [
+                GithubConnections(
+                    userId="departing",
+                    githubUsername="departing",
+                    githubUserId=501,
+                    installationId=INSTALLATION_ID,
+                ),
+                GithubConnections(
+                    userId="teammate",
+                    githubUsername="teammate",
+                    githubUserId=777,
+                    installationId=202,
+                ),
+            ]
+        )
+        ingest = Job(
+            userId="departing",
+            installation_id=INSTALLATION_ID,
+            repo_name="org/repo",
+            ref="main",
+            job_type=JobType.REPOSITORY_INGEST,
+            dedupe_key="repository_ingest:org/repo:main",
+            status=JobStatus.RUNNING,
+            claimed_by="worker",
+        )
+        session.add(ingest)
+        session.flush()
+        brief = Job(
+            userId="teammate",
+            installation_id=202,
+            repo_name="org/repo",
+            ref="main",
+            job_type=JobType.ISSUE_BRIEF,
+            status=JobStatus.PENDING,
+            blocked_by_job_id=ingest.id,
+        )
+        session.add(brief)
+        session.commit()
+        brief_id = brief.id
+
+        def _session():
+            yield session
+
+        app.dependency_overrides[get_session] = _session
+        client = TestClient(app)
+        body = json.dumps(
+            {"action": "deleted", "installation": {"id": INSTALLATION_ID}}
+        ).encode()
+        try:
+            response = client.post(WEBHOOK_URL, content=body, headers=_signed(body))
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        assert response.status_code == 200
+        assert session.exec(
+            select(Job).where(Job.userId == "departing")
+        ).all() == []
+        assert session.exec(
+            select(Job).where(Job.installation_id == INSTALLATION_ID)
+        ).all() == []
+        replacement = session.exec(
+            select(Job).where(
+                Job.job_type == JobType.REPOSITORY_INGEST,
+                Job.status == JobStatus.PENDING,
+            )
+        ).one()
+        assert replacement.userId == "teammate"
+        assert replacement.installation_id == 202
+        brief = session.get(Job, brief_id)
+        assert brief.status == JobStatus.PENDING
+        assert brief.blocked_by_job_id == replacement.id
+
+    engine.dispose()

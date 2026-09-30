@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 import os
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -24,7 +26,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, select
@@ -38,9 +40,13 @@ from app.models.tour import TourArtifact, TourStep
 from app.models.job import Job, JobStatus, JobType
 from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
 from app.security import get_authenticated_user_id
-from app.services.installation_state import set_installation_active
+from app.services.installation_state import (
+    SUSPENSION_ERROR,
+    set_installation_active,
+)
 from app.services.repo_access import RepoAccess
 from app.services.repository_ingestion import IngestionCancelledError
+from app.services.shared_ingests import enqueue_shared_ingest, release_user_jobs
 from app.worker import (
     _ensure_ingestion_owned,
     claim_next_job,
@@ -486,7 +492,9 @@ def test_missing_dependency_fails_open(pg_engine_clean):
         assert claim_next_job(session, WORKER_A) == blocked.id
 
 
-def test_suspended_owners_brief_survives_running_ingest_replacement(pg_engine_clean):
+def test_suspended_owners_brief_is_cancelled_while_teammate_follows_replacement(
+    pg_engine_clean,
+):
     older = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
     newer = dt.datetime(2026, 2, 1, tzinfo=dt.timezone.utc)
     with Session(pg_engine_clean) as session:
@@ -524,12 +532,15 @@ def test_suspended_owners_brief_survives_running_ingest_replacement(pg_engine_cl
     with Session(pg_engine_clean) as session:
         set_installation_active(session, 101, active=False)
 
+    own = _reload(pg_engine_clean, own_brief.id)
+    assert own.status == JobStatus.CANCELLED
+    assert own.error == SUSPENSION_ERROR
+
     with Session(pg_engine_clean) as session:
         replacement_id = claim_next_job(session, WORKER_A)
     replacement = _reload(pg_engine_clean, replacement_id)
     assert replacement.job_type == JobType.REPOSITORY_INGEST
     assert replacement.userId == "teammate"
-    assert _reload(pg_engine_clean, own_brief.id).blocked_by_job_id == replacement_id
     assert (
         _reload(pg_engine_clean, teammate_brief.id).blocked_by_job_id
         == replacement_id
@@ -546,8 +557,229 @@ def test_suspended_owners_brief_survives_running_ingest_replacement(pg_engine_cl
 
     with Session(pg_engine_clean) as session:
         set_installation_active(session, 101, active=True)
-        assert claim_next_job(session, WORKER_A) == own_brief.id
-    assert _reload(pg_engine_clean, own_brief.id).status == JobStatus.RUNNING
+        assert claim_next_job(session, WORKER_A) is None
+    assert _reload(pg_engine_clean, own_brief.id).status == JobStatus.CANCELLED
+
+
+def _insert_waiting_row(session: Session, primary: Job, **overrides) -> Job:
+    user_id = overrides.pop("userId", "waiter")
+    return _insert_job(
+        session,
+        userId=user_id,
+        installation_id=overrides.pop("installation_id", 202),
+        job_type=JobType.REPOSITORY_INGEST,
+        dedupe_key=f"repository_ingest:org/repo:main:user:{user_id}",
+        blocked_by_job_id=primary.id,
+        **overrides,
+    )
+
+
+def test_waiting_row_completes_from_primary_without_running(pg_engine_clean):
+    artifact = {"chunks_inserted": 12, "embeddings_created": 12}
+    with Session(pg_engine_clean) as session:
+        primary = _insert_job(
+            session,
+            job_type=JobType.REPOSITORY_INGEST,
+            dedupe_key="repository_ingest:org/repo:main",
+            status=JobStatus.COMPLETE,
+        )
+        session.execute(
+            text("UPDATE jobs SET artifact = CAST(:artifact AS JSONB) WHERE id = :id"),
+            {"artifact": json.dumps(artifact), "id": primary.id},
+        )
+        session.commit()
+        waiting = _insert_waiting_row(session, primary, attempts=1)
+
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) is None
+
+    row = _reload(pg_engine_clean, waiting.id)
+    assert row.status == JobStatus.COMPLETE
+    assert row.artifact == artifact
+    assert row.attempts == 1
+    assert row.claimed_at is None
+    assert row.claimed_by is None
+
+
+def test_waiting_row_fails_when_primary_failed(pg_engine_clean):
+    with Session(pg_engine_clean) as session:
+        primary = _insert_job(
+            session,
+            job_type=JobType.REPOSITORY_INGEST,
+            dedupe_key="repository_ingest:org/repo:main",
+            status=JobStatus.FAILED,
+            error="ref not found",
+        )
+        waiting = _insert_waiting_row(session, primary)
+
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) is None
+
+    row = _reload(pg_engine_clean, waiting.id)
+    assert row.status == JobStatus.FAILED
+    assert row.error == "ingest failed: ref not found"
+
+
+ORPHANED_ACTIVE_JOBS_SQL = text("""
+SELECT j.id FROM jobs AS j
+WHERE j.status IN ('pending', 'running')
+  AND NOT EXISTS (
+      SELECT 1 FROM githubconnections AS c
+      WHERE c."userId" = j."userId"
+        AND c."installationId" = j.installation_id
+        AND c.active IS TRUE
+  )
+""")
+
+
+def _wait_for_lock_waiter(engine, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    with engine.connect() as conn:
+        while time.monotonic() < deadline:
+            waiting = conn.execute(
+                text("SELECT count(*) FROM pg_locks WHERE NOT granted")
+            ).scalar_one()
+            conn.rollback()
+            if waiting:
+                return
+            time.sleep(0.02)
+    raise AssertionError("second removal never waited on a row lock")
+
+
+@pytest.mark.parametrize("first_removed", ["owner", "waiter"])
+def test_concurrent_removals_never_leave_ingest_with_removed_owner(
+    pg_engine_clean, first_removed
+):
+    with Session(pg_engine_clean) as session:
+        primary = _insert_job(
+            session,
+            userId="owner",
+            installation_id=101,
+            job_type=JobType.REPOSITORY_INGEST,
+            dedupe_key="repository_ingest:org/repo:main",
+        )
+        _insert_waiting_row(session, primary)
+
+    first_installation, second_installation = (
+        (101, 202) if first_removed == "owner" else (202, 101)
+    )
+    first = Session(pg_engine_clean)
+    try:
+        # Hold the first removal's locks uncommitted while the second runs.
+        first.execute(
+            update(GithubConnections)
+            .where(GithubConnections.installationId == first_installation)
+            .values(active=False)
+        )
+        release_user_jobs(
+            first,
+            {"owner" if first_removed == "owner" else "waiter"},
+            error=SUSPENSION_ERROR,
+            dispose="cancel",
+        )
+        errors: list[BaseException] = []
+
+        def remove_second() -> None:
+            try:
+                with Session(pg_engine_clean) as session:
+                    set_installation_active(
+                        session, second_installation, active=False
+                    )
+            except BaseException as error:  # pragma: no cover - surfaced below
+                errors.append(error)
+
+        thread = threading.Thread(target=remove_second)
+        thread.start()
+        _wait_for_lock_waiter(pg_engine_clean)
+        first.commit()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        assert errors == []
+    finally:
+        first.close()
+
+    with Session(pg_engine_clean) as session:
+        assert session.execute(ORPHANED_ACTIVE_JOBS_SQL).all() == []
+        statuses = {
+            job.status for job in session.exec(select(Job)).all()
+        }
+    assert statuses == {JobStatus.CANCELLED}
+
+
+async def test_waiting_user_takes_over_and_completes_after_owner_suspension(
+    pg_engine_clean,
+):
+    result = {"chunks_inserted": 3, "embeddings_created": 3}
+    with Session(pg_engine_clean) as session:
+        for github_user_id, (user_id, installation_id) in enumerate(
+            (("owner", 101), ("waiter", 202)), start=1
+        ):
+            session.add(
+                GithubConnections(
+                    userId=user_id,
+                    githubUsername=f"github-{user_id}",
+                    githubUserId=github_user_id,
+                    installationId=installation_id,
+                )
+            )
+        session.commit()
+        _, primary, _ = enqueue_shared_ingest(
+            session,
+            user_id="owner",
+            installation_id=101,
+            repo_name="org/repo",
+            ref="main",
+        )
+        waiting, joined, created = enqueue_shared_ingest(
+            session,
+            user_id="waiter",
+            installation_id=202,
+            repo_name="org/repo",
+            ref="main",
+        )
+        primary_id, waiting_id = primary.id, waiting.id
+    assert created is True
+    assert joined.id == primary_id
+
+    with Session(pg_engine_clean) as session:
+        set_installation_active(session, 101, active=False)
+    handed_over = _reload(pg_engine_clean, primary_id)
+    assert handed_over.userId == "waiter"
+    assert handed_over.installation_id == 202
+
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) == primary_id
+
+    ingested_with: list[int] = []
+
+    async def fake_ingest(
+        session,
+        *,
+        installation_id,
+        ensure_owned,
+        finalize_publication,
+        **_kwargs,
+    ):
+        ingested_with.append(installation_id)
+        ensure_owned(session)
+        finalize_publication(session, result)
+        session.commit()
+        return result
+
+    with (
+        patch("app.worker.engine", pg_engine_clean),
+        patch("app.worker.ingest_repository", side_effect=fake_ingest),
+    ):
+        await run_job(primary_id, WORKER_A)
+
+    assert ingested_with == [202]
+    assert _reload(pg_engine_clean, primary_id).status == JobStatus.COMPLETE
+
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) is None
+    row = _reload(pg_engine_clean, waiting_id)
+    assert row.status == JobStatus.COMPLETE
+    assert row.artifact == result
 
 
 def test_parking_preserves_retry_budget_and_created_at(pg_engine_clean):

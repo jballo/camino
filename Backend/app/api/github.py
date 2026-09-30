@@ -18,6 +18,11 @@ from app.config import settings
 from app.db import SessionDep
 from app.models.github_connection import GithubConnections
 from app.security import get_authenticated_user_id
+from app.services.installation_state import SUSPENSION_ERROR
+from app.services.shared_ingests import (
+    move_user_jobs_to_installation,
+    release_user_jobs,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -124,17 +129,32 @@ async def add_github_connection(
 
     try:
         existing = session.exec(
-            select(GithubConnections).where(
-                GithubConnections.userId == auth_user_id
-            )
+            select(GithubConnections)
+            .where(GithubConnections.userId == auth_user_id)
+            .with_for_update()
         ).one_or_none()
 
         if existing is not None:
+            previous_installation_id = existing.installationId
             existing.githubUsername = username
             existing.githubUserId = github_user_id
             existing.installationId = payload.installationId
             existing.active = installation_is_active
             session.add(existing)
+            session.flush()
+            if not installation_is_active:
+                release_user_jobs(
+                    session,
+                    {auth_user_id},
+                    error=SUSPENSION_ERROR,
+                    dispose="cancel",
+                )
+            elif previous_installation_id != payload.installationId:
+                move_user_jobs_to_installation(
+                    session,
+                    user_id=auth_user_id,
+                    installation_id=payload.installationId,
+                )
             session.commit()
             return "Successfully updated github connection"
 

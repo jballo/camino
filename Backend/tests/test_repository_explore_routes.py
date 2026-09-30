@@ -243,7 +243,7 @@ async def test_follow_attaches_an_indexed_repository_without_enqueuing():
             return_value=RepoAccess(installation_id=12, visibility="public"),
         ),
         patch("app.api.repositories._installed_repository_names", return_value=set()),
-        patch("app.api.repositories.enqueue_job") as enqueue,
+        patch("app.api.repositories.enqueue_shared_ingest") as enqueue,
     ):
         result = await follow_repository(
             RepoFollowBody(repoName="Org/Repo"),
@@ -269,6 +269,7 @@ async def test_follow_requests_an_unindexed_repository_once():
     indexed_result = MagicMock()
     indexed_result.first.return_value = None
     session.exec.return_value = indexed_result
+    requester_job = MagicMock(userId=USER_ID)
 
     with (
         patch(
@@ -281,8 +282,8 @@ async def test_follow_requests_an_unindexed_repository_once():
             return_value=SimpleNamespace(branch="main"),
         ),
         patch(
-            "app.api.repositories.enqueue_job",
-            return_value=(MagicMock(), True),
+            "app.api.repositories.enqueue_shared_ingest",
+            return_value=(requester_job, requester_job, True),
         ) as enqueue,
     ):
         result = await follow_repository(
@@ -293,9 +294,8 @@ async def test_follow_requests_an_unindexed_repository_once():
 
     assert result.indexed is False
     assert result.jobQueued is True
-    assert enqueue.call_args.kwargs["dedupe_key"] == (
-        "repository_ingest:org/repo:main"
-    )
+    assert enqueue.call_args.kwargs["ref"] == "main"
+    assert enqueue.call_args.kwargs["waiting_row"] is True
     assert enqueue.call_args.kwargs["commit"] is False
     session.commit.assert_called_once_with()
 
@@ -317,7 +317,7 @@ async def test_follow_does_not_persist_when_branch_cannot_be_resolved():
             "app.api.repositories.resolve_target_branch",
             return_value=SimpleNamespace(branch=None),
         ),
-        patch("app.api.repositories.enqueue_job") as enqueue,
+        patch("app.api.repositories.enqueue_shared_ingest") as enqueue,
         pytest.raises(HTTPException) as error,
     ):
         await follow_repository(
@@ -350,7 +350,7 @@ async def test_follow_rolls_back_when_enqueue_fails():
             return_value=SimpleNamespace(branch="main"),
         ),
         patch(
-            "app.api.repositories.enqueue_job",
+            "app.api.repositories.enqueue_shared_ingest",
             side_effect=exc.SQLAlchemyError("enqueue failed"),
         ),
         pytest.raises(HTTPException) as error,
