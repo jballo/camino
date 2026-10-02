@@ -49,6 +49,18 @@ async def test_lifespan_provisions_schema_extras(monkeypatch):
     statements = _normalized_sql(connection)
     assert "CREATE EXTENSION IF NOT EXISTS vector" in statements
     assert "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS ref VARCHAR" in statements
+    assert 'ALTER TABLE jobs ALTER COLUMN "userId" DROP NOT NULL' in statements
+    assert "ALTER TABLE jobs ALTER COLUMN installation_id DROP NOT NULL" in statements
+    conversion = next(
+        statement
+        for statement in statements
+        if statement.startswith("WITH owned AS")
+    )
+    assert statements.index(conversion) > statements.index(
+        "ALTER TABLE jobs ALTER COLUMN installation_id DROP NOT NULL"
+    )
+    assert "dedupe_key || ':user:' || \"userId\"" in conversion
+    assert 'SET "userId" = NULL, installation_id = NULL' in conversion
     assert (
         "UPDATE jobs SET status = 'failed', "
         "error = 'Legacy issue brief is missing its issue repository; recreate it', "

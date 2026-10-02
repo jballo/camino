@@ -10,6 +10,7 @@ from app.api.repositories import (
     RepoFollowBody,
     _index_rows,
     follow_repository,
+    list_repositories,
     lookup_repository,
     repository_overview,
     unfollow_repository,
@@ -52,6 +53,46 @@ def test_index_rows_skips_query_for_empty_repository_set():
 
     assert _index_rows(session, set()) == []
     session.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_private_installed_repository_is_hidden_from_list_and_overview():
+    installation = MagicMock()
+    installation.get_repos.return_value = [
+        SimpleNamespace(full_name="public/installed", private=False),
+        SimpleNamespace(full_name="private/installed", private=True),
+    ]
+    integration = MagicMock()
+    integration.get_app_installation.return_value = installation
+
+    list_session = MagicMock()
+    list_session.exec.return_value.one.return_value = MagicMock(installationId=12)
+
+    overview_session = MagicMock()
+    connection_result = MagicMock()
+    connection_result.one.return_value = MagicMock(installationId=12)
+    follows_result = MagicMock()
+    follows_result.all.return_value = []
+    overview_session.exec.side_effect = [connection_result, follows_result]
+
+    with (
+        patch("app.api.repositories.Auth.AppAuth"),
+        patch(
+            "app.api.repositories.GithubIntegration",
+            return_value=integration,
+        ),
+        patch(
+            "app.api.repositories._index_rows",
+            return_value=[_index_row("public/installed")],
+        ) as index_rows,
+    ):
+        repositories = await list_repositories(list_session, USER_ID)
+        overview = await repository_overview(overview_session, USER_ID)
+
+    assert repositories == ["public/installed"]
+    assert [item.repoName for item in overview.installed] == ["public/installed"]
+    assert overview.requested == []
+    index_rows.assert_called_once_with(overview_session, {"public/installed"})
 
 
 @pytest.mark.asyncio
@@ -202,7 +243,7 @@ async def test_follow_attaches_an_indexed_repository_without_enqueuing():
             return_value=RepoAccess(installation_id=12, visibility="public"),
         ),
         patch("app.api.repositories._installed_repository_names", return_value=set()),
-        patch("app.api.repositories.enqueue_job") as enqueue,
+        patch("app.api.repositories.enqueue_shared_ingest") as enqueue,
     ):
         result = await follow_repository(
             RepoFollowBody(repoName="Org/Repo"),
@@ -223,11 +264,14 @@ async def test_follow_attaches_an_indexed_repository_without_enqueuing():
 
 
 @pytest.mark.asyncio
-async def test_follow_requests_an_unindexed_repository_once():
+@pytest.mark.parametrize("created", [True, False])
+async def test_follow_reports_whether_this_request_queued_a_job(created):
     session = MagicMock()
     indexed_result = MagicMock()
     indexed_result.first.return_value = None
     session.exec.return_value = indexed_result
+    waiting = MagicMock(userId=USER_ID)
+    shared = MagicMock(userId=None)
 
     with (
         patch(
@@ -240,8 +284,8 @@ async def test_follow_requests_an_unindexed_repository_once():
             return_value=SimpleNamespace(branch="main"),
         ),
         patch(
-            "app.api.repositories.enqueue_job",
-            return_value=(MagicMock(), True),
+            "app.api.repositories.enqueue_shared_ingest",
+            return_value=(waiting, shared, created),
         ) as enqueue,
     ):
         result = await follow_repository(
@@ -251,10 +295,9 @@ async def test_follow_requests_an_unindexed_repository_once():
         )
 
     assert result.indexed is False
-    assert result.jobQueued is True
-    assert enqueue.call_args.kwargs["dedupe_key"] == (
-        "repository_ingest:org/repo:main"
-    )
+    assert result.jobQueued is created
+    assert enqueue.call_args.kwargs["ref"] == "main"
+    assert enqueue.call_args.kwargs["waiting_row"] is True
     assert enqueue.call_args.kwargs["commit"] is False
     session.commit.assert_called_once_with()
 
@@ -276,7 +319,7 @@ async def test_follow_does_not_persist_when_branch_cannot_be_resolved():
             "app.api.repositories.resolve_target_branch",
             return_value=SimpleNamespace(branch=None),
         ),
-        patch("app.api.repositories.enqueue_job") as enqueue,
+        patch("app.api.repositories.enqueue_shared_ingest") as enqueue,
         pytest.raises(HTTPException) as error,
     ):
         await follow_repository(
@@ -309,7 +352,7 @@ async def test_follow_rolls_back_when_enqueue_fails():
             return_value=SimpleNamespace(branch="main"),
         ),
         patch(
-            "app.api.repositories.enqueue_job",
+            "app.api.repositories.enqueue_shared_ingest",
             side_effect=exc.SQLAlchemyError("enqueue failed"),
         ),
         pytest.raises(HTTPException) as error,

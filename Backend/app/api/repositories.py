@@ -24,13 +24,9 @@ from app.rate_limit import (
     REPOSITORY_SEARCH_RATE_LIMIT,
 )
 from app.security import get_authenticated_user_id
-from app.services.jobs import (
-    cancel_job,
-    enqueue_job,
-    normalize_repository_name,
-    repository_ingest_dedupe_key,
-)
+from app.services.jobs import cancel_job, normalize_repository_name
 from app.services.search import hybrid_search
+from app.services.shared_ingests import enqueue_shared_ingest, waiting_row_outcome
 from app.services.repo_access import (
     RepoAccessDenied,
     RepoAccessUnavailable,
@@ -159,7 +155,11 @@ def _installed_repositories(installation_id: int) -> list[str]:
     installation = GithubIntegration(auth=app_auth).get_app_installation(
         installation_id
     )
-    return [repo.full_name for repo in installation.get_repos()]
+    return [
+        repo.full_name
+        for repo in installation.get_repos()
+        if not repo.private
+    ]
 
 
 def _installed_repository_names(installation_id: int) -> set[str]:
@@ -296,6 +296,45 @@ def _repository_ingest_response(job: Job) -> RepoIngestStatusResponse:
     )
 
 
+def _repository_ingest_status(session: Session, job: Job) -> RepoIngestStatusResponse:
+    """Report a pending waiting row with its shared ingest's live state.
+
+    The waiting row itself only settles at its next claim. Read-only.
+    """
+    if job.userId is None or job.status != JobStatus.PENDING:
+        return _repository_ingest_response(job)
+    try:
+        shared = (
+            session.get(Job, job.blocked_by_job_id)
+            if job.blocked_by_job_id is not None
+            else None
+        )
+    except exc.SQLAlchemyError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+
+    outcome = waiting_row_outcome(shared)
+    if outcome is None:
+        status, attempts, artifact, error = (
+            shared.status,
+            shared.attempts,
+            None,
+            None,
+        )
+    else:
+        status, artifact, error = outcome
+        attempts = job.attempts
+    return RepoIngestStatusResponse(
+        id=job.id,
+        status=status,
+        repoName=job.repo_name,
+        ref=job.ref,
+        attempts=attempts,
+        result=artifact,
+        error=error,
+    )
+
+
 @router.get("")
 async def list_repositories(
     session: SessionDep,
@@ -303,7 +342,8 @@ async def list_repositories(
 ) -> list[str]:
     try:
         statement = select(GithubConnections).where(
-            GithubConnections.userId == auth_user_id
+            GithubConnections.userId == auth_user_id,
+            GithubConnections.active.is_(True),
         )
         result = session.exec(statement)
         gh_connection = result.one()
@@ -372,7 +412,8 @@ async def repository_overview(
     try:
         connection = session.exec(
             select(GithubConnections).where(
-                GithubConnections.userId == auth_user_id
+                GithubConnections.userId == auth_user_id,
+                GithubConnections.active.is_(True),
             )
         ).one()
         installed_names = await asyncio.to_thread(
@@ -499,17 +540,13 @@ async def follow_repository(
             followed = True
 
         if resolution is not None:
-            _, job_queued = enqueue_job(
+            _, _, job_queued = enqueue_shared_ingest(
                 session,
                 user_id=auth_user_id,
                 installation_id=access.installation_id,
                 repo_name=repo_name,
                 ref=resolution.branch,
-                job_type=JobType.REPOSITORY_INGEST,
-                dedupe_key=repository_ingest_dedupe_key(
-                    repo_name=repo_name,
-                    ref=resolution.branch,
-                ),
+                waiting_row=True,
                 commit=False,
             )
         session.commit()
@@ -558,21 +595,24 @@ async def get_contribution_target(
     auth_user_id: str = Depends(get_authenticated_user_id),
 ) -> ContributionTargetResponse:
     try:
-        statement = select(GithubConnections).where(
-            GithubConnections.userId == auth_user_id
+        access = await asyncio.to_thread(
+            resolve_repo_access,
+            session,
+            auth_user_id,
+            repoName,
         )
-        result = session.exec(statement)
-        gh_connection = result.one()
-    except exc.NoResultFound:
-        raise HTTPException(status_code=404, detail="Github connection not found for user")
-    except exc.OperationalError:
+    except RepoAccessDenied:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    except RepoAccessUnavailable:
+        raise HTTPException(status_code=502, detail="Github access check failed")
+    except exc.SQLAlchemyError:
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
 
     resolution = await asyncio.to_thread(
         resolve_target_branch,
         repoName,
-        gh_connection.installationId,
+        access.installation_id,
     )
     return ContributionTargetResponse(
         repoName=repoName,
@@ -618,17 +658,13 @@ async def process_repository(
         raise HTTPException(status_code=422, detail="Could not resolve repository ref")
 
     try:
-        job, created = enqueue_job(
+        job, _, created = enqueue_shared_ingest(
             session,
             user_id=auth_user_id,
             installation_id=access.installation_id,
             repo_name=payload.repoName,
             ref=ref,
-            job_type=JobType.REPOSITORY_INGEST,
-            dedupe_key=repository_ingest_dedupe_key(
-                repo_name=payload.repoName,
-                ref=ref,
-            ),
+            waiting_row=True,
         )
     except exc.SQLAlchemyError:
         session.rollback()
@@ -654,7 +690,7 @@ async def get_repository_ingest(
         job_id,
         auth_user_id,
     )
-    return _repository_ingest_response(job)
+    return _repository_ingest_status(session, job)
 
 
 @router.post("/ingest/{job_id}/cancel")
@@ -683,7 +719,7 @@ async def cancel_repository_ingest(
         )
 
     try:
-        cancel_job(session, job_id)
+        cancel_job(session, job.id)
         session.refresh(job)
     except exc.SQLAlchemyError:
         session.rollback()

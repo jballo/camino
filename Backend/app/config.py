@@ -15,7 +15,6 @@ class Settings(BaseSettings):
     gh_app_client_id: str
     gh_app_secret: str
     gh_app_private_key: str
-    encryption_key: str
     gh_webhook_secret: str
     openai_api_key: str
     agent_model: str = "gpt-4o-mini"

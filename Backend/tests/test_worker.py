@@ -10,17 +10,22 @@ from app.models.job import JobStatus, JobType
 from app.brief import BriefNeedsRefreshError
 from app.models.tour import TourArtifact, TourStep
 from app.services.staleness import ChangedFile, HeadComparison
+from app.services.github_app import INVALID_CONNECTION_MESSAGE
 from app.services.repository_ingestion import (
     IngestionCancelledError,
     PermanentRepositoryIngestionError,
+    SponsorInstallationInvalidError,
     TransientRepositoryIngestionError,
 )
 from app.tour import TourGenerationCancelledError, TourGenerationError
 from app.worker import (
+    JobAuthorizationRevokedError,
     _run_standalone,
     _ensure_ingestion_owned,
+    _fail_rejected_sponsor_waiters,
     _requeue_or_fail,
     _stage_owned_ingestion_completion,
+    release_shared_ingest,
     run_job,
     worker_loop,
 )
@@ -72,6 +77,7 @@ def _job(**overrides) -> MagicMock:
     job.issue_repo = None
     job.ref = "main"
     job.installation_id = 12345
+    job.userId = "user_1"
     job.job_type = JobType.TOUR
     job.status = JobStatus.RUNNING
     job.claimed_by = WORKER_ID
@@ -81,6 +87,23 @@ def _job(**overrides) -> MagicMock:
     for key, value in overrides.items():
         setattr(job, key, value)
     return job
+
+
+def _shared_ingest_job(**overrides) -> MagicMock:
+    return _job(
+        job_type=JobType.REPOSITORY_INGEST,
+        topic=None,
+        userId=None,
+        installation_id=None,
+        **overrides,
+    )
+
+
+def _patch_sponsors(*installation_ids: int):
+    return patch(
+        "app.worker._sponsor_installations",
+        return_value=list(installation_ids),
+    )
 
 
 def _patch_session(session: MagicMock):
@@ -117,6 +140,35 @@ async def test_run_job_success_persists_artifact():
     )
 
 
+async def test_run_job_does_not_call_github_after_authorization_is_revoked():
+    job = _job(
+        job_type=JobType.ISSUE_BRIEF,
+        issue_repo="org/repo",
+        issue_number=44,
+        topic="Revoked request",
+    )
+    session = MagicMock()
+    session.get.return_value = job
+
+    with (
+        _patch_session(session),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch(
+            "app.worker._ensure_job_authorized",
+            side_effect=JobAuthorizationRevokedError("revoked"),
+        ),
+        patch("app.worker.fetch_issue_thread") as fetch_issue,
+        patch("app.worker._update_owned_job") as persist,
+        patch("app.worker._mark_failed") as mark_failed,
+    ):
+        await run_job(1, WORKER_ID)
+
+    fetch_issue.assert_not_called()
+    persist.assert_not_called()
+    mark_failed.assert_not_called()
+    session.rollback.assert_called()
+
+
 async def test_issue_brief_parks_behind_refresh_without_spending_retry():
     job = _job(
         job_type=JobType.ISSUE_BRIEF,
@@ -138,13 +190,17 @@ async def test_issue_brief_parks_behind_refresh_without_spending_retry():
         patch("app.worker.resolve_target_branch", return_value=MagicMock(branch="main", default_branch="main")),
         patch("app.worker.resolve_fork_status", return_value=MagicMock()),
         patch("app.worker.generate_brief", new_callable=AsyncMock, side_effect=BriefNeedsRefreshError("stale")),
-        patch("app.worker.enqueue_job", return_value=(dependency, True)) as enqueue,
+        patch(
+            "app.worker.enqueue_shared_ingest",
+            return_value=(dependency, dependency, True),
+        ) as enqueue,
         patch("app.worker.park_job", park),
         patch("app.worker._update_owned_job") as persist,
     ):
         await run_job(1, WORKER_ID)
 
-    assert enqueue.call_args.kwargs["job_type"] == JobType.REPOSITORY_INGEST
+    assert enqueue.call_args.kwargs["waiting_row"] is False
+    assert enqueue.call_args.kwargs["commit"] is False
     park.assert_called_once_with(
         session, 1, WORKER_ID, blocked_by_job_id=17
     )
@@ -479,7 +535,7 @@ async def test_run_job_propagates_lease_loss_to_running_tour():
 
 
 async def test_run_job_dispatches_repository_ingestion():
-    job = _job(job_type=JobType.REPOSITORY_INGEST, topic=None)
+    job = _shared_ingest_job()
     session = MagicMock()
     session.get.return_value = job
     result = {"chunks_inserted": 12, "embeddings_created": 12}
@@ -497,6 +553,7 @@ async def test_run_job_dispatches_repository_ingestion():
 
     with (
         _patch_session(session),
+        _patch_sponsors(12345, 67890),
         patch("app.worker._renew_job_lease", return_value=True),
         patch("app.worker._update_owned_job", persist),
         patch(
@@ -550,13 +607,14 @@ def test_ingestion_completion_is_staged_without_a_separate_commit():
 
 
 async def test_run_job_requeues_transient_ingestion_failure():
-    job = _job(job_type=JobType.REPOSITORY_INGEST, topic=None, attempts=2)
+    job = _shared_ingest_job(attempts=2)
     session = MagicMock()
     session.get.return_value = job
     requeue = MagicMock(return_value=True)
 
     with (
         _patch_session(session),
+        _patch_sponsors(12345),
         patch("app.worker._renew_job_lease", return_value=True),
         patch("app.worker._requeue_or_fail", requeue),
         patch(
@@ -577,13 +635,14 @@ async def test_run_job_requeues_transient_ingestion_failure():
 
 
 async def test_run_job_fails_permanent_ingestion_failure():
-    job = _job(job_type=JobType.REPOSITORY_INGEST, topic=None)
+    job = _shared_ingest_job()
     session = MagicMock()
     session.get.return_value = job
     mark_failed = MagicMock(return_value=True)
 
     with (
         _patch_session(session),
+        _patch_sponsors(12345),
         patch("app.worker._renew_job_lease", return_value=True),
         patch("app.worker._mark_failed", mark_failed),
         patch(
@@ -602,36 +661,199 @@ async def test_run_job_fails_permanent_ingestion_failure():
     )
 
 
-async def test_run_job_discards_cancelled_ingestion_without_updating_job():
-    job = _job(job_type=JobType.REPOSITORY_INGEST, topic=None)
+async def test_run_job_tries_next_sponsor_when_installation_is_invalid():
+    job = _shared_ingest_job()
     session = MagicMock()
     session.get.return_value = job
-    persist = MagicMock(return_value=True)
+    result = {"chunks_inserted": 12, "embeddings_created": 12}
+    mark_failed = MagicMock(return_value=True)
+    guarded_installations = []
+
+    async def ingest(_session, *, installation_id, ensure_owned, **_kwargs):
+        with patch("app.worker._ensure_ingestion_owned") as guard:
+            ensure_owned(_session)
+        guarded_installations.append(guard.call_args.kwargs["installation_id"])
+        if installation_id == 111:
+            raise SponsorInstallationInvalidError(INVALID_CONNECTION_MESSAGE)
+        return result
+
+    with (
+        _patch_session(session),
+        _patch_sponsors(111, 222),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._mark_failed", mark_failed),
+        patch("app.worker._fail_rejected_sponsor_waiters") as fail_waiters,
+        patch("app.worker.ingest_repository", side_effect=ingest) as ingest_mock,
+    ):
+        await run_job(1, WORKER_ID)
+
+    assert [
+        call.kwargs["installation_id"] for call in ingest_mock.await_args_list
+    ] == [111, 222]
+    assert guarded_installations == [111, 222]
+    # 111's waiters share the result 222 sponsored.
+    fail_waiters.assert_not_called()
+    mark_failed.assert_not_called()
+
+
+async def test_run_job_tries_sponsor_who_joined_after_the_others_were_rejected():
+    job = _shared_ingest_job()
+    session = MagicMock()
+    session.get.return_value = job
+    result = {"chunks_inserted": 12, "embeddings_created": 12}
+    mark_failed = MagicMock(return_value=True)
+    # 111 is rejected; 222 joins while 111 is being tried.
+    sponsor_reads = iter([[111], [111, 222]])
+
+    async def ingest(_session, *, installation_id, **_kwargs):
+        if installation_id == 111:
+            raise SponsorInstallationInvalidError(INVALID_CONNECTION_MESSAGE)
+        return result
+
+    with (
+        _patch_session(session),
+        patch(
+            "app.worker._sponsor_installations",
+            side_effect=lambda *_args: next(sponsor_reads),
+        ),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._mark_failed", mark_failed),
+        patch("app.worker._fail_rejected_sponsor_waiters"),
+        patch("app.worker.ingest_repository", side_effect=ingest) as ingest_mock,
+    ):
+        await run_job(1, WORKER_ID)
+
+    assert [
+        call.kwargs["installation_id"] for call in ingest_mock.await_args_list
+    ] == [111, 222]
+    mark_failed.assert_not_called()
+
+
+async def test_run_job_releases_shared_ingest_when_every_sponsor_is_rejected():
+    job = _shared_ingest_job()
+    session = MagicMock()
+    session.get.return_value = job
+    mark_failed = MagicMock(return_value=True)
+    release = MagicMock(return_value=True)
+
+    with (
+        _patch_session(session),
+        _patch_sponsors(111, 222),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._mark_failed", mark_failed),
+        patch("app.worker.release_shared_ingest", release),
+        patch("app.worker._fail_rejected_sponsor_waiters") as fail_waiters,
+        patch(
+            "app.worker.ingest_repository",
+            new_callable=AsyncMock,
+            side_effect=SponsorInstallationInvalidError(INVALID_CONNECTION_MESSAGE),
+        ) as ingest,
+    ):
+        await run_job(1, WORKER_ID)
+
+    assert ingest.await_count == 2
+    assert [call.kwargs for call in fail_waiters.call_args_list] == [
+        {"job_id": 1, "installation_id": 111, "error": INVALID_CONNECTION_MESSAGE},
+        {"job_id": 1, "installation_id": 222, "error": INVALID_CONNECTION_MESSAGE},
+    ]
+    # The shared ingest never fails over an installation; it goes back to
+    # pending so a later requester can still sponsor it.
+    mark_failed.assert_not_called()
+    release.assert_called_once_with(session, 1, WORKER_ID)
+
+
+def test_fail_rejected_sponsor_waiters_targets_only_that_installation():
+    session = MagicMock()
+
+    _fail_rejected_sponsor_waiters(
+        session,
+        job_id=1,
+        installation_id=111,
+        error=INVALID_CONNECTION_MESSAGE,
+    )
+
+    statement = session.execute.call_args.args[0]
+    compiled = str(statement.compile(compile_kwargs={"literal_binds": False}))
+    assert "jobs.blocked_by_job_id = :blocked_by_job_id_1" in compiled
+    assert "jobs.installation_id = :installation_id_1" in compiled
+    assert "jobs.status IN" in compiled
+    params = statement.compile().params
+    assert params["blocked_by_job_id_1"] == 1
+    assert params["installation_id_1"] == 111
+    assert params["status"] == JobStatus.FAILED
+    assert params["error"] == INVALID_CONNECTION_MESSAGE
+    session.commit.assert_called_once()
+
+
+async def test_run_job_releases_shared_ingest_nobody_eligible_is_waiting_on():
+    job = _shared_ingest_job()
+    session = MagicMock()
+    session.get.return_value = job
+    release = MagicMock(return_value=True)
+    mark_failed = MagicMock(return_value=True)
+
+    with (
+        _patch_session(session),
+        _patch_sponsors(),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker.release_shared_ingest", release),
+        patch("app.worker._mark_failed", mark_failed),
+        patch("app.worker.ingest_repository", new_callable=AsyncMock) as ingest,
+    ):
+        await run_job(1, WORKER_ID)
+
+    ingest.assert_not_awaited()
+    release.assert_called_once_with(session, 1, WORKER_ID)
+    mark_failed.assert_not_called()
+
+
+async def test_run_job_releases_cancelled_ingestion_without_other_updates():
+    job = _shared_ingest_job()
+    session = MagicMock()
+    session.get.return_value = job
+    release = MagicMock(return_value=True)
     mark_failed = MagicMock(return_value=True)
     requeue = MagicMock(return_value=True)
 
     with (
         _patch_session(session),
+        _patch_sponsors(12345),
         patch("app.worker._renew_job_lease", return_value=True),
-        patch("app.worker._update_owned_job", persist),
+        patch("app.worker.release_shared_ingest", release),
         patch("app.worker._mark_failed", mark_failed),
         patch("app.worker._requeue_or_fail", requeue),
         patch(
             "app.worker.ingest_repository",
             new_callable=AsyncMock,
-            side_effect=IngestionCancelledError("lease lost"),
+            side_effect=IngestionCancelledError("nobody waiting"),
         ),
     ):
         await run_job(1, WORKER_ID)
 
-    persist.assert_not_called()
+    release.assert_called_once_with(session, 1, WORKER_ID)
     mark_failed.assert_not_called()
     requeue.assert_not_called()
     session.rollback.assert_called()
 
 
-def test_ingestion_ownership_guard_locks_owned_job_and_checks_installation():
+def test_release_shared_ingest_refunds_attempt_while_claim_is_held():
     session = MagicMock()
+    session.execute.return_value.rowcount = 1
+
+    assert release_shared_ingest(session, 1, WORKER_ID) is True
+
+    statement = session.execute.call_args.args[0]
+    compiled = str(statement.compile())
+    assert "jobs.status = :status_1" in compiled
+    assert "jobs.claimed_by = :claimed_by_1" in compiled
+    assert "attempts=(jobs.attempts - :attempts_1)" in compiled
+    assert statement.compile().params["status"] == JobStatus.PENDING
+    session.commit.assert_called_once()
+
+
+def test_ingestion_guard_locks_waiting_connections_and_checks_claim():
+    session = MagicMock()
+    session.execute.return_value.first.return_value = (1,)
     session.execute.return_value.scalar_one_or_none.return_value = 1
 
     _ensure_ingestion_owned(
@@ -642,25 +864,28 @@ def test_ingestion_ownership_guard_locks_owned_job_and_checks_installation():
         lease_lost=threading.Event(),
     )
 
-    installation_sql = " ".join(
-        str(session.execute.call_args_list[0].args[0]).split()
-    )
-    job_sql = " ".join(str(session.execute.call_args_list[1].args[0]).split())
+    sponsor_call, job_call = session.execute.call_args_list
+    sponsor_sql = " ".join(str(sponsor_call.args[0]).split())
+    job_sql = " ".join(str(job_call.args[0]).split())
+    assert sponsor_call.args[1] == {"job_id": 1, "installation_id": 12345}
+    assert "w.blocked_by_job_id = :job_id" in sponsor_sql
+    assert "w.status IN ('pending', 'running')" in sponsor_sql
+    assert 'c."installationId" = :installation_id' in sponsor_sql
+    assert "c.active IS TRUE" in sponsor_sql
+    assert "FOR SHARE OF c" in sponsor_sql
+    assert "LIMIT" not in sponsor_sql
     assert "j.status = 'running'" in job_sql
     assert "j.claimed_by = :worker_id" in job_sql
     assert "FOR SHARE OF j" in job_sql
-    assert "FROM githubconnections" in installation_sql
-    assert '"installationId" = :installation_id' in installation_sql
-    assert "FOR SHARE" in installation_sql
 
 
-def test_ingestion_ownership_guard_rejects_missing_or_reclaimed_job():
+def test_ingestion_guard_rejects_missing_or_reclaimed_job():
     session = MagicMock()
-    existing_installation = MagicMock()
-    existing_installation.scalar_one_or_none.return_value = 1
+    sponsored = MagicMock()
+    sponsored.first.return_value = (1,)
     missing_job = MagicMock()
     missing_job.scalar_one_or_none.return_value = None
-    session.execute.side_effect = [existing_installation, missing_job]
+    session.execute.side_effect = [sponsored, missing_job]
 
     with pytest.raises(IngestionCancelledError, match="no longer active"):
         _ensure_ingestion_owned(
@@ -674,14 +899,11 @@ def test_ingestion_ownership_guard_rejects_missing_or_reclaimed_job():
     assert session.execute.call_count == 2
 
 
-def test_ingestion_ownership_guard_rejects_missing_installation():
+def test_ingestion_guard_rejects_when_nobody_eligible_waits_on_installation():
     session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
+    session.execute.return_value.first.return_value = None
 
-    with pytest.raises(
-        IngestionCancelledError,
-        match="installation is no longer active",
-    ):
+    with pytest.raises(IngestionCancelledError, match="Nobody eligible"):
         _ensure_ingestion_owned(
             session,
             job_id=1,
@@ -693,7 +915,7 @@ def test_ingestion_ownership_guard_rejects_missing_installation():
     assert session.execute.call_count == 1
 
 
-def test_ingestion_ownership_guard_rejects_known_lease_loss_without_query():
+def test_ingestion_guard_rejects_known_lease_loss_without_query():
     session = MagicMock()
     lease_lost = threading.Event()
     lease_lost.set()

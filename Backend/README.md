@@ -87,7 +87,6 @@ configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
 | `GH_APP_ID` / `GH_APP_CLIENT_ID` / `GH_APP_SECRET` | GitHub App credentials |
 | `GH_APP_PRIVATE_KEY` | GitHub App PEM (escaped newlines OK) |
 | `GH_WEBHOOK_SECRET` | GitHub webhook verification |
-| `ENCRYPTION_KEY` | Fernet key for token encryption at rest |
 | `RATE_LIMIT_AGENT_ASK_REQUESTS` / `RATE_LIMIT_AGENT_ASK_WINDOW_SECONDS` | Q&A limit (default 20 requests / 600 seconds) |
 | `RATE_LIMIT_REPOSITORY_INGEST_REQUESTS` / `RATE_LIMIT_REPOSITORY_INGEST_WINDOW_SECONDS` | Ingest limit (default 2 requests / 3600 seconds) |
 | `INGEST_MAX_TARBALL_BYTES` | Maximum compressed GitHub tarball download size (default `209715200`, or 200 MiB) |
@@ -104,14 +103,6 @@ configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
 | `WORKER_LEASE_TIMEOUT` | Seconds before a dead worker's claim is stale (default `600`); active jobs renew their lease every one-third of this interval |
 | `WORKER_MAX_ATTEMPTS` | Claims allowed before stale recovery marks a job failed (default `3`) |
 
-Generate `ENCRYPTION_KEY` with:
-
-```bash
-uv run python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
-```
-
----
-
 ## AWS deployment target
 
 The backend will run on **ECS Fargate**, provisioned by the TypeScript CDK app in the
@@ -126,8 +117,8 @@ stack boundaries and deployment order.
 - Add an unauthenticated `/health` liveness endpoint that does not depend on external
   APIs. Add a readiness check that verifies required startup configuration and database
   connectivity without calling GitHub or OpenAI.
-- Validate that `installationId` submitted to `POST /api/v1/github/connect` belongs to
-  an installation the authenticated GitHub user may access before persisting it.
+- Completed: `POST /api/v1/github/connect` verifies `installationId` against the
+  authenticated GitHub user's accessible installations before persisting it.
 - Revoke or uninstall the external GitHub App authorization when Clerk's confirmed
   account-deletion flow triggers the existing local cleanup service.
 - Add explicit request/model deadlines and cap the parsed repository file count before
@@ -145,6 +136,13 @@ perform compatibility migrations. `create_all()` creates missing tables but does
 alter existing ones, so a database created before the shared `jobs` table or
 generation-based chunk schema must be recreated for local development or upgraded
 explicitly before startup.
+
+The targeted revision in `migrations/versions/20260928_01_github_connection_no_tokens.py`
+drops the obsolete stored OAuth-token columns and adds installation activity state for
+existing databases. Run
+`doppler run -- uv run alembic upgrade head` before starting this release. A full
+initial migration for databases that do not yet have an app-created schema remains
+deployment work below.
 
 #### Local DB created before 2026-09
 
@@ -166,7 +164,7 @@ storage but is not used by the configured exact-scan path.
 
 Before connecting ECS to RDS:
 
-1. Add Alembic and create an initial migration for all SQLModel tables, the `vector`
+1. Create the full initial Alembic migration for all SQLModel tables, the `vector`
    extension, `halfvec(1536)` embedding column with `PLAIN` storage, and GIN index.
 2. Keep schema migration permission separate from the runtime application's normal
    database access where practical.
@@ -189,7 +187,6 @@ Inject these values from Secrets Manager into the task definition:
 - `CLERK_SECRET_KEY`, `CLERK_WH_KEY`, and `CLERK_JWT_KEY`
 - `GH_APP_ID`, `GH_APP_CLIENT_ID`, `GH_APP_SECRET`, `GH_APP_PRIVATE_KEY`, and
   `GH_WEBHOOK_SECRET`
-- `ENCRYPTION_KEY`
 
 Non-secret settings such as `AGENT_MODEL`, `CORS_ORIGINS`, pool sizes, and rate-limit
 thresholds can be plain task-definition environment variables. Secret values must not
@@ -208,22 +205,36 @@ increments `attempts`, and the job becomes `failed` after `WORKER_MAX_ATTEMPTS`.
 Repository names are case-folded for queue, index, and search identity, so casing
 variants cannot create competing jobs or generations.
 
-Repository ingestion verifies installation access with PyGithub, then streams one
-GitHub tarball snapshot up to `INGEST_MAX_TARBALL_BYTES`, safely extracts it, and
-parses supported source files locally. Extraction also enforces
+Repository ingestion verifies installation access with PyGithub and rejects repository
+metadata marked private, then streams one public GitHub tarball snapshot up to
+`INGEST_MAX_TARBALL_BYTES`, safely extracts it, and parses supported source files
+locally. Extraction also enforces
 `INGEST_MAX_EXTRACTED_BYTES` and `INGEST_MAX_ARCHIVE_ENTRIES` before parsing. The
 snapshot reflects a single commit. This blocking download/extract/parse stretch runs
 with `asyncio.to_thread`; embedding calls and job orchestration remain asynchronous.
 
 Parsing, embedding, and inserts run in bounded waves of `INGEST_WAVE_CHUNKS`. Each
 ingest writes a new generation that remains invisible while its waves commit. Once
-complete, one short transaction updates `repo_index_state`, marks the owning job
+complete, one short transaction updates `repo_index_state`, marks the ingest job
 complete, and deletes the old rows; failed waves leave the previous complete index live. The
 `INGEST_MAX_CHUNKS` cap rejects oversized repositories before further embedding. Each
 wave and the final publication revalidate and lock the worker's job ownership, so a
 reclaimed or deleted job cannot commit more data. Single-statement reads use the
 `live_code_chunks` view; multi-statement hybrid search resolves one active generation
 and binds every retrieval and hydration query to it.
+
+One shared ingest job does the work for each repository and ref. It belongs to nobody:
+it stores no user or installation. Every requester, including the first, gets their own
+waiting row blocked on it, and briefs block on it directly. A worker claims the shared
+ingest only while at least one waiting job's owner still has an active GitHub connection,
+and runs it under that owner's installation, oldest waiting job first. If GitHub refuses
+that installation, the next one is tried. Before each wave commit and the final
+publication, the worker checks that someone eligible is still waiting on that
+installation; if not, it stops and returns the ingest to `pending` without spending an
+attempt. The shared ingest only ends as `complete` or `failed`, and waiting rows take its
+outcome. Revoking, suspending, deleting, or reconnecting a user only cancels, deletes, or
+moves that user's own rows, so other users waiting on the same ingest are unaffected. A
+shared ingest nobody is waiting on stays `pending` until someone requests it again.
 
 Indexes are keyed by normalized repository and ref, so a contribution branch can live
 beside another indexed branch without collisions. Search, Q&A, tours, and briefs resolve
@@ -248,9 +259,9 @@ scans every 60 seconds.
 
 Pending or running jobs can be cancelled through their type-specific API endpoint.
 Cancellation changes the row to `cancelled` and clears its claim. The heartbeat then
-causes in-flight tour or brief generation to cancel its LangGraph task; ingestion
-rechecks ownership before each wave commit and during atomic publication, preventing a
-cancelled or reclaimed job from publishing more data. Cancelling a completed or failed
+causes in-flight tour or brief generation to cancel its LangGraph task. Cancelling an
+ingestion request cancels only the requester's waiting row; when nobody else is waiting,
+the running shared ingest stops at its next wave commit and goes back to `pending`. Cancelling a completed or failed
 job returns `409`, while cancelling an already-cancelled job is idempotent.
 
 Keep `RUN_WORKER=false` in API processes and supervise the separate worker process.
@@ -371,13 +382,16 @@ ingestion polls include the current `attempts` count. Equivalent active ingestio
 tour, and issue-brief requests reuse an existing job instead of racing. Brief responses
 add a phase so clients can distinguish `blocked_on_ingest`, `queued`, and `generating`.
 
-An ingestion job owner can always poll it. Another user connected to the same
-installation can poll only while GitHub still reports that repository as accessible,
-and only the owner can cancel it. Journey and issue-brief polling, listing, and
+`POST /repositories/ingest` returns the requester's waiting row. Polling it reports the
+shared ingest's live status and attempts until the waiting row settles. The row's owner
+can always poll it; another user can poll a row only while GitHub still reports that
+repository as accessible to them, and only the owner can cancel it. The shared ingest
+itself has no owner and cannot be cancelled through the API. Journey and issue-brief polling, listing, and
 cancellation remain strictly owner-scoped.
 
 GitHub connect requires expiring user-to-server OAuth credentials with a refresh token;
-non-expiring or already-expired tokens are rejected.
+non-expiring or already-expired tokens are rejected. The token is used only during the
+request for identity and installation-ownership checks and is never persisted.
 
 ### Direct browser calls
 
@@ -416,7 +430,7 @@ that below the Postgres connection budget.
 
 A verified Clerk `user.deleted` event calls `delete_local_account_data` in one database
 transaction. The service removes the user's background jobs and artifacts, rate-limit
-counters, encrypted GitHub connection, and profile. It removes indexed code chunks only
+counters, GitHub connection metadata, and profile. It removes indexed code chunks only
 when no remaining Camino connection references the same GitHub installation; database
 cascades then remove the associated embeddings.
 
@@ -430,7 +444,7 @@ Account deletion is initiated through Clerk's authenticated UserButton security 
 which requires the user to type `Delete account` before continuing. Clerk deletes the
 identity and sends the verified `user.deleted` webhook that triggers this local cleanup;
 Camino does not need a separate delete endpoint or confirmation UI for that flow. The
-cleanup removes Camino's stored encrypted GitHub connection, but it does not uninstall
+cleanup removes Camino's stored GitHub connection metadata, but it does not uninstall
 or revoke the external GitHub App authorization.
 
 ### GitHub installation deletion
@@ -443,8 +457,8 @@ are handled safely. Failures roll back and return `500` so GitHub can retry; inv
 signatures return `401`.
 
 Configure the GitHub App to deliver installation events to `POST /webhooks/github`.
-Requests are verified with the HMAC secret in `GH_WEBHOOK_SECRET`; this handler currently
-acts only on the `deleted` action.
+Requests are verified with the HMAC secret in `GH_WEBHOOK_SECRET`. The handler also
+marks every shared connection inactive on `suspend` and active again on `unsuspend`.
 
 ---
 

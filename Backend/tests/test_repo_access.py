@@ -3,6 +3,7 @@ from unittest.mock import ANY, MagicMock, patch
 import pytest
 
 from app.models.code import RepoIndexState
+from app.services.github_app import GithubConnectionInvalid
 from app.services.repo_access import (
     RepoAccessDenied,
     authorize_index_read,
@@ -25,11 +26,7 @@ def _response(status: int, payload: dict | None = None) -> MagicMock:
     return response
 
 
-@pytest.mark.parametrize(
-    ("private", "visibility"),
-    [(False, "public"), (True, "private")],
-)
-def test_resolve_repo_access_uses_repository_visibility(private, visibility):
+def test_resolve_repo_access_accepts_public_repository():
     session = _session()
     with (
         patch(
@@ -38,13 +35,13 @@ def test_resolve_repo_access_uses_repository_visibility(private, visibility):
         ),
         patch(
             "app.services.repo_access.requests.get",
-            return_value=_response(200, {"private": private}),
+            return_value=_response(200, {"private": False}),
         ) as get,
     ):
         access = resolve_repo_access(session, "user_1", "Org/Repo")
 
     assert access.installation_id == 123
-    assert access.visibility == visibility
+    assert access.visibility == "public"
     assert get.call_args.args[0] == "https://api.github.com/repos/org/repo"
 
 
@@ -63,12 +60,42 @@ def test_resolve_repo_access_treats_404_as_denied():
         resolve_repo_access(_session(), "user_1", "org/private")
 
 
-@pytest.mark.parametrize("visibility", ["public", "private"])
-def test_index_read_always_rechecks_access(visibility):
+def test_resolve_repo_access_surfaces_reconnect_for_revoked_installation():
+    with (
+        patch(
+            "app.services.repo_access.installation_access_token",
+            side_effect=GithubConnectionInvalid(
+                "GitHub connection is no longer valid — reconnect"
+            ),
+        ),
+        pytest.raises(
+            RepoAccessDenied,
+            match="GitHub connection is no longer valid — reconnect",
+        ),
+    ):
+        resolve_repo_access(_session(), "user_1", "org/repo")
+
+
+def test_resolve_repo_access_rejects_private_repository():
+    with (
+        patch(
+            "app.services.repo_access.installation_access_token",
+            return_value="token",
+        ),
+        patch(
+            "app.services.repo_access.requests.get",
+            return_value=_response(200, {"private": True}),
+        ),
+        pytest.raises(RepoAccessDenied, match="Private repositories are not supported"),
+    ):
+        resolve_repo_access(_session(), "user_1", "org/private")
+
+
+def test_index_read_always_rechecks_access():
     state = RepoIndexState(
         repo_name="org/repo",
         ref="main",
-        visibility=visibility,
+        visibility="public",
         active_generation="generation-1",
     )
     with patch("app.services.repo_access.resolve_repo_access") as probe:
@@ -91,7 +118,7 @@ def test_privatized_repo_denies_stale_public_index_read():
         ),
         patch(
             "app.services.repo_access.requests.get",
-            return_value=_response(404),
+            return_value=_response(200, {"private": True}),
         ),
         pytest.raises(RepoAccessDenied),
     ):

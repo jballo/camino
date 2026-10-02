@@ -103,7 +103,8 @@ async def create_journey(
     try:
         gh_connection = session.exec(
             select(GithubConnections).where(
-                GithubConnections.userId == auth_user_id
+                GithubConnections.userId == auth_user_id,
+                GithubConnections.active.is_(True),
             )
         ).one()
     except exc.NoResultFound:

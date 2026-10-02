@@ -94,6 +94,43 @@ async def lifespan(app: FastAPI):
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS refresh_cycles INTEGER "
             "NOT NULL DEFAULT 0"
         ))
+        # A shared repository ingest belongs to nobody; every requester holds
+        # a waiting row on it instead.
+        conn.execute(text('ALTER TABLE jobs ALTER COLUMN "userId" DROP NOT NULL'))
+        conn.execute(text(
+            "ALTER TABLE jobs ALTER COLUMN installation_id DROP NOT NULL"
+        ))
+        # Convert shared ingests that still have an owner: the owner gets a
+        # waiting row on the ingest, and the ingest drops its owner. Nothing
+        # matches after the first run.
+        conn.execute(text("""
+            WITH owned AS (
+                SELECT id, "userId", installation_id, repo_name, ref, dedupe_key
+                FROM jobs
+                WHERE job_type = 'repository_ingest'
+                  AND status IN ('pending', 'running')
+                  AND "userId" IS NOT NULL
+                  AND blocked_by_job_id IS NULL
+                  AND dedupe_key = 'repository_ingest:' || repo_name || ':' || ref
+                FOR UPDATE
+            ),
+            waiting AS (
+                INSERT INTO jobs (
+                    "userId", installation_id, repo_name, ref, job_type,
+                    dedupe_key, status, blocked_by_job_id, attempts,
+                    refresh_cycles
+                )
+                SELECT "userId", installation_id, repo_name, ref,
+                       'repository_ingest', dedupe_key || ':user:' || "userId",
+                       'pending', id, 0, 0
+                FROM owned
+                ON CONFLICT DO NOTHING
+            )
+            UPDATE jobs
+            SET "userId" = NULL,
+                installation_id = NULL
+            WHERE id IN (SELECT id FROM owned)
+        """))
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_jobs_issue_number ON jobs (issue_number)"
         ))

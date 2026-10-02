@@ -41,13 +41,14 @@ from app.models.code import RepoIndexState
 from app.models.tour import TourArtifact, TourFreshness
 from app.services.fork_status import resolve_fork_status
 from app.services.issue_thread import IssueThreadError, fetch_issue_thread
-from app.services.jobs import enqueue_job, repository_ingest_dedupe_key
 from app.services.repository_ingestion import (
     IngestionCancelledError,
     PermanentRepositoryIngestionError,
+    SponsorInstallationInvalidError,
     TransientRepositoryIngestionError,
     ingest_repository,
 )
+from app.services.shared_ingests import enqueue_shared_ingest, waiting_row_outcome
 from app.services.staleness import compare_to_head
 from app.services.target_branch import TargetBranchResolution, resolve_target_branch
 from app.tour import (
@@ -71,6 +72,30 @@ SET status = 'running',
 WHERE candidate.id = (
     SELECT j.id FROM jobs AS j
     WHERE j.status = 'pending'
+      AND (
+          EXISTS (
+              SELECT 1 FROM githubconnections AS c
+              WHERE c."userId" = j."userId"
+                AND c."installationId" = j.installation_id
+                AND c.active IS TRUE
+          )
+          OR (
+              -- A shared ingest has no owner; it runs while someone eligible
+              -- is waiting on it.
+              j."userId" IS NULL
+              AND j.job_type = 'repository_ingest'
+              AND EXISTS (
+                  SELECT 1
+                  FROM jobs AS w
+                  JOIN githubconnections AS c
+                    ON c."userId" = w."userId"
+                   AND c."installationId" = w.installation_id
+                  WHERE w.blocked_by_job_id = j.id
+                    AND w.status IN ('pending', 'running')
+                    AND c.active IS TRUE
+              )
+          )
+      )
       AND NOT EXISTS (
           SELECT 1 FROM jobs AS dependency
           WHERE dependency.id = j.blocked_by_job_id
@@ -113,14 +138,58 @@ WHERE j.id = :job_id
 FOR SHARE OF j
 """)
 
-LOCK_INSTALLATION_CONNECTION_SQL = text("""
+# No LIMIT: a row that stops qualifying while this waits for its lock must
+# not hide another row that still qualifies.
+LOCK_SPONSOR_CONNECTIONS_SQL = text("""
 SELECT 1
-FROM githubconnections
-WHERE "installationId" = :installation_id
-ORDER BY id
-LIMIT 1
-FOR SHARE
+FROM jobs AS w
+JOIN githubconnections AS c
+  ON c."userId" = w."userId" AND c."installationId" = w.installation_id
+WHERE w.blocked_by_job_id = :job_id
+  AND w.status IN ('pending', 'running')
+  AND c."installationId" = :installation_id
+  AND c.active IS TRUE
+FOR SHARE OF c
 """)
+
+SPONSOR_INSTALLATIONS_SQL = text("""
+SELECT w.installation_id
+FROM jobs AS w
+JOIN githubconnections AS c
+  ON c."userId" = w."userId" AND c."installationId" = w.installation_id
+WHERE w.blocked_by_job_id = :job_id
+  AND w.status IN ('pending', 'running')
+  AND c.active IS TRUE
+GROUP BY w.installation_id
+ORDER BY min(w."createdAt"), w.installation_id
+""")
+
+JOB_AUTHORIZED_SQL = text("""
+SELECT EXISTS (
+    SELECT 1
+    FROM githubconnections
+    WHERE "userId" = :user_id
+      AND "installationId" = :installation_id
+      AND active IS TRUE
+)
+""")
+
+
+class JobAuthorizationRevokedError(Exception):
+    """Raised when a job owner no longer has an active GitHub connection."""
+
+
+def _ensure_job_authorized(
+    session: Session,
+    user_id: str,
+    installation_id: int,
+) -> None:
+    authorized = session.execute(
+        JOB_AUTHORIZED_SQL,
+        {"user_id": user_id, "installation_id": installation_id},
+    ).scalar_one()
+    if not authorized:
+        raise JobAuthorizationRevokedError("GitHub authorization was revoked")
 
 
 def _make_worker_id() -> str:
@@ -141,6 +210,31 @@ def claim_next_job(session: Session, worker_id: str) -> int | None:
             if job is not None and job.blocked_by_job_id is not None
             else None
         )
+        if (
+            job is not None
+            and job.job_type == JobType.REPOSITORY_INGEST
+            and job.userId is not None
+        ):
+            # A waiting row never runs an ingest; it inherits the shared
+            # ingest's outcome. The claim only returns unblocked jobs, so the
+            # shared ingest has finished or is gone.
+            outcome = waiting_row_outcome(dependency)
+            if outcome is None:
+                session.rollback()
+                return None
+            job.status, job.artifact, job.error = outcome
+            job.claimed_at = None
+            job.claimed_by = None
+            job.attempts -= 1
+            session.add(job)
+            session.commit()
+            logger.info(
+                "settled waiting ingest | id=%s status=%s shared=%s",
+                job_id,
+                job.status,
+                job.blocked_by_job_id,
+            )
+            continue
         if dependency is not None and dependency.status in (
             JobStatus.FAILED,
             JobStatus.CANCELLED,
@@ -191,6 +285,60 @@ def park_job(
         return False
     session.commit()
     return True
+
+
+def release_shared_ingest(session: Session, job_id: int, worker_id: str) -> bool:
+    """Return an interrupted shared ingest to the queue without spending an attempt.
+
+    A shared ingest never ends as cancelled. When nobody eligible is waiting
+    it goes back to pending, and becomes claimable again once someone is.
+    """
+    return _update_owned_job(
+        session,
+        job_id,
+        worker_id,
+        status=JobStatus.PENDING,
+        claimed_at=None,
+        claimed_by=None,
+        attempts=Job.attempts - 1,
+        error=None,
+    )
+
+
+def _sponsor_installations(session: Session, job_id: int) -> list[int]:
+    """Installations of eligible waiting jobs, oldest waiting job first."""
+    return list(
+        session.execute(SPONSOR_INSTALLATIONS_SQL, {"job_id": job_id}).scalars()
+    )
+
+
+def _fail_rejected_sponsor_waiters(
+    session: Session,
+    *,
+    job_id: int,
+    installation_id: int,
+    error: str,
+) -> None:
+    """Fail jobs waiting on ``job_id`` under an installation GitHub rejected.
+
+    The rejection says nothing about the repository, so the shared ingest
+    itself goes back to pending instead of failing. Commits.
+    """
+    session.execute(
+        update(Job)
+        .where(
+            Job.blocked_by_job_id == job_id,
+            Job.installation_id == installation_id,
+            Job.status.in_(JobStatus.ACTIVE),
+        )
+        .values(
+            status=JobStatus.FAILED,
+            error=error,
+            claimed_at=None,
+            claimed_by=None,
+        )
+    )
+    session.commit()
 
 
 def recover_stale_jobs(
@@ -247,17 +395,26 @@ def _ensure_ingestion_owned(
     installation_id: int,
     lease_lost: threading.Event,
 ) -> None:
-    """Lock and verify the job claim before an ingestion transaction commits."""
+    """Lock and verify the job claim before an ingestion transaction commits.
+
+    The shared ingest may only save while an eligible job is still waiting on
+    it under ``installation_id``. Locking those connection rows makes a
+    removal either commit before the save, failing this check, or wait for it.
+
+    A user cancel is deliberately not ordered this way: it can land between
+    this check and the save, and the run then stops at the next save point
+    (#72).
+    """
     if lease_lost.is_set():
         raise IngestionCancelledError("Ingestion job lease was lost")
 
-    installation_exists = session.execute(
-        LOCK_INSTALLATION_CONNECTION_SQL,
-        {"installation_id": installation_id},
-    ).scalar_one_or_none()
-    if installation_exists is None:
+    sponsored = session.execute(
+        LOCK_SPONSOR_CONNECTIONS_SQL,
+        {"job_id": job_id, "installation_id": installation_id},
+    ).first()
+    if sponsored is None:
         raise IngestionCancelledError(
-            "GitHub installation is no longer active"
+            "Nobody eligible is waiting on this installation"
         )
 
     owns_job = session.execute(
@@ -527,6 +684,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
         topic = job.topic
         repo_name = job.repo_name
         installation_id = job.installation_id
+        user_id = job.userId
         ref = job.ref
         attempts = job.attempts
         issue_repo = job.issue_repo
@@ -573,6 +731,8 @@ async def run_job(job_id: int, worker_id: str) -> None:
         ingestion_completed = False
         job_parked = False
         try:
+            if job_type != JobType.REPOSITORY_INGEST:
+                _ensure_job_authorized(session, user_id, installation_id)
             if ref is None:
                 raise PermanentRepositoryIngestionError(
                     "Legacy job is missing its repository ref"
@@ -587,6 +747,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     ref=ref,
                     cancel_event=lease_lost,
                 )
+                _ensure_job_authorized(session, user_id, installation_id)
                 await _stamp_tour_freshness(
                     session,
                     artifact,
@@ -604,6 +765,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     raise BriefGenerationError(
                         "Issue brief job is missing its issue metadata"
                     )
+                _ensure_job_authorized(session, user_id, installation_id)
                 issue = await asyncio.to_thread(
                     fetch_issue_thread,
                     issue_repo,
@@ -659,33 +821,25 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     result = artifact.model_dump(mode="json")
                 except BriefNeedsRefreshError:
                     session.rollback()
-                    ingest_job, _ = enqueue_job(
+                    _ensure_job_authorized(session, user_id, installation_id)
+                    # Park in the same transaction as the enqueue so the shared
+                    # ingest is never left without this brief waiting on it.
+                    _, shared, _ = enqueue_shared_ingest(
                         session,
                         user_id=job.userId,
                         installation_id=installation_id,
                         repo_name=repo_name,
                         ref=ref,
-                        job_type=JobType.REPOSITORY_INGEST,
-                        dedupe_key=repository_ingest_dedupe_key(
-                            repo_name=repo_name, ref=ref
-                        ),
+                        waiting_row=False,
+                        commit=False,
                     )
                     job_parked = park_job(
                         session,
                         job_id,
                         worker_id,
-                        blocked_by_job_id=ingest_job.id,
+                        blocked_by_job_id=shared.id,
                     )
             elif job_type == JobType.REPOSITORY_INGEST:
-                def ensure_ingestion_owned(guard_session: Session) -> None:
-                    _ensure_ingestion_owned(
-                        guard_session,
-                        job_id=job_id,
-                        worker_id=worker_id,
-                        installation_id=installation_id,
-                        lease_lost=lease_lost,
-                    )
-
                 def finalize_ingestion_publication(
                     publication_session: Session,
                     artifact: dict[str, int],
@@ -697,20 +851,71 @@ async def run_job(job_id: int, worker_id: str) -> None:
                         artifact=artifact,
                     )
 
-                result = await ingest_repository(
-                    session,
-                    repo_name=repo_name,
-                    installation_id=installation_id,
-                    ref=ref,
-                    ensure_owned=ensure_ingestion_owned,
-                    finalize_publication=finalize_ingestion_publication,
-                )
+                # Re-read sponsors after every rejection so requesters who join
+                # mid-run are tried too. Running out releases the ingest back to
+                # pending, where anyone joining later makes it claimable again.
+                rejections: dict[int, str] = {}
+                while True:
+                    sponsor = next(
+                        (
+                            installation
+                            for installation in _sponsor_installations(
+                                session, job_id
+                            )
+                            if installation not in rejections
+                        ),
+                        None,
+                    )
+                    session.commit()
+                    if sponsor is None:
+                        # Waiters on a rejected installation still share a
+                        # result someone else sponsors, so they only fail here.
+                        for installation, error in rejections.items():
+                            _fail_rejected_sponsor_waiters(
+                                session,
+                                job_id=job_id,
+                                installation_id=installation,
+                                error=error,
+                            )
+                        raise IngestionCancelledError("Nobody eligible is waiting")
+
+                    def ensure_ingestion_owned(
+                        guard_session: Session,
+                        sponsor: int = sponsor,
+                    ) -> None:
+                        _ensure_ingestion_owned(
+                            guard_session,
+                            job_id=job_id,
+                            worker_id=worker_id,
+                            installation_id=sponsor,
+                            lease_lost=lease_lost,
+                        )
+
+                    try:
+                        result = await ingest_repository(
+                            session,
+                            repo_name=repo_name,
+                            installation_id=sponsor,
+                            ref=ref,
+                            ensure_owned=ensure_ingestion_owned,
+                            finalize_publication=finalize_ingestion_publication,
+                        )
+                        break
+                    except SponsorInstallationInvalidError as error:
+                        logger.warning(
+                            "sponsor installation rejected; trying next "
+                            "| id=%s installation=%s",
+                            job_id,
+                            sponsor,
+                        )
+                        rejections[sponsor] = str(error)
                 ingestion_completed = True
             else:
                 permanent_error = f"Unsupported job type: {job_type}"
         except (
             BriefGenerationCancelledError,
             IngestionCancelledError,
+            JobAuthorizationRevokedError,
             TourGenerationCancelledError,
         ) as error:
             logger.warning(
@@ -777,6 +982,16 @@ async def run_job(job_id: int, worker_id: str) -> None:
 
         if job_cancelled or lease_lost.is_set():
             session.rollback()
+            if job_type == JobType.REPOSITORY_INGEST:
+                try:
+                    released = release_shared_ingest(session, job_id, worker_id)
+                except exc.SQLAlchemyError:
+                    logger.exception("failed to release shared ingest | id=%s", job_id)
+                    session.rollback()
+                    released = False
+                if released:
+                    logger.info("released shared ingest | id=%s", job_id)
+                    return
             logger.warning(
                 "discarded job outcome after cancellation or lease ownership "
                 "change | id=%s worker=%s",

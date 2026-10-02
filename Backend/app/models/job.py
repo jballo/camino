@@ -28,8 +28,10 @@ class Job(SQLModel, table=True):
     __tablename__ = "jobs"
 
     id: int | None = Field(default=None, primary_key=True)
-    userId: str = Field(index=True)
-    installation_id: int
+    # A shared repository ingest has neither: it belongs to nobody and runs
+    # under the installation of whoever is waiting on it.
+    userId: str | None = Field(default=None, index=True)
+    installation_id: int | None = Field(default=None)
     repo_name: str = Field(index=True)
     ref: str | None = Field(default=None, index=True)
     issue_repo: str | None = Field(default=None)

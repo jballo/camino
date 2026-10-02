@@ -9,7 +9,10 @@ from sqlmodel import Session, select
 
 from app.models.code import RepoIndexState
 from app.models.github_connection import GithubConnections
-from app.services.github_app import installation_access_token
+from app.services.github_app import (
+    GithubConnectionInvalid,
+    installation_access_token,
+)
 from app.services.jobs import normalize_repository_name
 
 logger = logging.getLogger(__name__)
@@ -48,7 +51,10 @@ def resolve_repo_access(
     the repository is either missing or not visible to this user.
     """
     connection = session.exec(
-        select(GithubConnections).where(GithubConnections.userId == user_id)
+        select(GithubConnections).where(
+            GithubConnections.userId == user_id,
+            GithubConnections.active.is_(True),
+        )
     ).first()
     if connection is None:
         raise RepoAccessDenied("GitHub connection not found for user")
@@ -64,6 +70,8 @@ def resolve_repo_access(
             },
             timeout=_REQUEST_TIMEOUT,
         )
+    except GithubConnectionInvalid as error:
+        raise RepoAccessDenied(str(error)) from error
     except Exception as error:
         raise RepoAccessUnavailable("GitHub repository access check failed") from error
 
@@ -87,10 +95,12 @@ def resolve_repo_access(
         raise RepoAccessUnavailable(
             "GitHub repository access check returned invalid data"
         )
+    if payload.get("private") is True:
+        raise RepoAccessDenied("Private repositories are not supported")
 
     return RepoAccess(
         installation_id=connection.installationId,
-        visibility="private" if payload.get("private") else "public",
+        visibility="public",
     )
 
 
@@ -103,11 +113,10 @@ def authorize_index_read(
 
     Stored visibility is write-time metadata: a repository indexed while
     public may since have been made private, and nothing invalidates the
-    shared index when that happens. Every read therefore re-probes GitHub
-    with the reader's own installation token — success means GitHub still
-    shows this user the repository today, public or not.
+    shared index when that happens. Every read therefore re-probes GitHub;
+    private repositories are always denied.
     """
-    if index_state.visibility not in ("public", "private"):
+    if index_state.visibility != "public":
         raise RepoAccessDenied("Repository index has invalid visibility")
     access = resolve_repo_access(session, user_id, index_state.repo_name)
     if access.visibility != index_state.visibility:

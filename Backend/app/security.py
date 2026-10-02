@@ -1,21 +1,8 @@
 from clerk_backend_api.security import authenticate_request_async
 from clerk_backend_api.security.types import AuthenticateRequestOptions
-from cryptography.fernet import Fernet
 from fastapi import HTTPException, Request
 
 from app.config import settings
-
-
-def get_fernet() -> Fernet:
-    return Fernet(settings.encryption_key.encode())
-
-
-def encrypt_token(token: str) -> str:
-    return get_fernet().encrypt(token.encode()).decode()
-
-
-def decrypt_token(token: str) -> str:
-    return get_fernet().decrypt(token.encode()).decode()
 
 
 async def get_authenticated_user_id(request: Request) -> str:

@@ -1,6 +1,8 @@
 import datetime as dt
-from sqlmodel import SQLModel, Field
-from sqlalchemy import Column, DateTime, func
+
+from sqlalchemy import Boolean, Column, DateTime, func, true
+from sqlmodel import Field, SQLModel
+
 
 class GithubConnections(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
@@ -8,13 +10,9 @@ class GithubConnections(SQLModel, table=True):
     githubUsername: str
     githubUserId: int = Field(index=True)
     installationId: int
-    encryptedAccessToken: str
-    encryptedRefreshToken: str
-    tokenExpiresAt: dt.datetime = Field(
-        sa_column=Column(DateTime(timezone=True), nullable=False)
-    )
-    refreshTokenExpiresAt: dt.datetime = Field(
-        sa_column=Column(DateTime(timezone=True), nullable=False),
+    active: bool = Field(
+        default=True,
+        sa_column=Column(Boolean, nullable=False, server_default=true()),
     )
     createdAt: dt.datetime = Field(
         sa_column=Column[dt.datetime](

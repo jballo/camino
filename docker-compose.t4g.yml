@@ -86,7 +86,6 @@ services:
       - GH_APP_CLIENT_ID
       - GH_APP_SECRET
       - GH_APP_PRIVATE_KEY
-      - ENCRYPTION_KEY
       - GH_WEBHOOK_SECRET
       - OPENAI_API_KEY
       - AGENT_MODEL

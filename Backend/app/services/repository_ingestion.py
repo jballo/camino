@@ -28,7 +28,11 @@ from app.services.embeddings import (
     embed_all,
 )
 from app.services.jobs import normalize_repository_name
-from app.services.github_app import github_integration, installation_access_token
+from app.services.github_app import (
+    GithubConnectionInvalid,
+    github_integration,
+    installation_access_token,
+)
 from app.services.parser import (
     LANGUAGES,
     MAX_FILE_BYTES,
@@ -110,6 +114,10 @@ class TransientRepositoryIngestionError(RepositoryIngestionError):
 
 class PermanentRepositoryIngestionError(RepositoryIngestionError):
     """Invalid input or deterministic failure that should not be retried."""
+
+
+class SponsorInstallationInvalidError(PermanentRepositoryIngestionError):
+    """The installation the ingest runs under can no longer mint tokens."""
 
 
 class IngestionCancelledError(RepositoryIngestionError):
@@ -282,10 +290,14 @@ def _prepare_repository(
         raise PermanentRepositoryIngestionError(
             "GitHub repository response was invalid"
         )
+    if repo_payload.get("private") is True:
+        raise PermanentRepositoryIngestionError(
+            "Private repositories are not supported"
+        )
     canonical_name = normalize_repository_name(
         repo_payload.get("full_name") or normalized_repo_name
     )
-    visibility = "private" if repo_payload.get("private") else "public"
+    visibility = "public"
     archive_path = temp_path / "repo.tar.gz"
     _download_tarball(canonical_name, ref, token, archive_path)
     repo_root, commit_sha = _extract_tarball(archive_path, temp_path)
@@ -634,6 +646,16 @@ async def ingest_repository(
             error,
         )
         raise TransientRepositoryIngestionError(str(error)) from error
+    except GithubConnectionInvalid as error:
+        session.rollback()
+        if generation is not None:
+            _cleanup_failed_generation(
+                session,
+                repo_name=repo_name,
+                ref=ref,
+                generation=generation,
+            )
+        raise SponsorInstallationInvalidError(str(error)) from error
     except GithubException as error:
         session.rollback()
         if generation is not None:
