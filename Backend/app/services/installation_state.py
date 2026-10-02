@@ -22,9 +22,9 @@ def set_installation_active(
 
     ``active`` represents installation suspension only. Users who revoked their
     authorization have no connection row and cannot be restored by unsuspend.
-    Suspension hands shared ingests owned by the installation's users to an
-    authorized dependent, then cancels the suspended users' remaining active
-    jobs. Unsuspend only makes the users eligible to run new work.
+    Suspension cancels the suspended users' active jobs; shared ingests they
+    were waiting on are untouched. Unsuspend only makes the users eligible to
+    run new work.
     """
     try:
         user_ids = set(

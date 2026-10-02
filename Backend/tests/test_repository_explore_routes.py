@@ -264,12 +264,14 @@ async def test_follow_attaches_an_indexed_repository_without_enqueuing():
 
 
 @pytest.mark.asyncio
-async def test_follow_requests_an_unindexed_repository_once():
+@pytest.mark.parametrize("created", [True, False])
+async def test_follow_reports_whether_this_request_queued_a_job(created):
     session = MagicMock()
     indexed_result = MagicMock()
     indexed_result.first.return_value = None
     session.exec.return_value = indexed_result
-    requester_job = MagicMock(userId=USER_ID)
+    waiting = MagicMock(userId=USER_ID)
+    shared = MagicMock(userId=None)
 
     with (
         patch(
@@ -283,7 +285,7 @@ async def test_follow_requests_an_unindexed_repository_once():
         ),
         patch(
             "app.api.repositories.enqueue_shared_ingest",
-            return_value=(requester_job, requester_job, True),
+            return_value=(waiting, shared, created),
         ) as enqueue,
     ):
         result = await follow_repository(
@@ -293,7 +295,7 @@ async def test_follow_requests_an_unindexed_repository_once():
         )
 
     assert result.indexed is False
-    assert result.jobQueued is True
+    assert result.jobQueued is created
     assert enqueue.call_args.kwargs["ref"] == "main"
     assert enqueue.call_args.kwargs["waiting_row"] is True
     assert enqueue.call_args.kwargs["commit"] is False

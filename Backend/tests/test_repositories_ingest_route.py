@@ -7,10 +7,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from app.db import get_session
 from app.main import app
+from app.models.code import RepoIndexState
 from app.models.github_connection import GithubConnections
 from app.models.job import Job, JobStatus, JobType
 from app.rate_limit import REPOSITORY_INGEST_RATE_LIMIT
@@ -58,6 +59,7 @@ def _job(**overrides):
     job.attempts = overrides.get("attempts", 0)
     job.artifact = overrides.get("artifact")
     job.error = overrides.get("error")
+    job.blocked_by_job_id = overrides.get("blocked_by_job_id")
     return job
 
 
@@ -88,8 +90,9 @@ def test_post_enqueues_repository_ingestion_job():
     }
 
 
-def test_post_returns_owned_primary_for_same_user_duplicate_enqueue():
-    job = _job(id=15, status=JobStatus.RUNNING)
+def test_post_returns_requesters_waiting_row_not_shared_ingest():
+    shared = _job(id=15, userId=None, status=JobStatus.RUNNING)
+    waiting = _job(id=21, status=JobStatus.PENDING, blocked_by_job_id=15)
     with (
         patch(
             "app.api.repositories.resolve_repo_access",
@@ -97,28 +100,7 @@ def test_post_returns_owned_primary_for_same_user_duplicate_enqueue():
         ),
         patch(
             "app.api.repositories.enqueue_shared_ingest",
-            return_value=(job, job, False),
-        ),
-    ):
-        response = client.post(
-            URL, json={"repoName": "org/repo", "ref": "main"}
-        )
-
-    assert response.status_code == 200
-    assert response.json() == {"id": 15, "status": JobStatus.RUNNING}
-
-
-def test_post_returns_requesters_waiting_row_for_other_users_ingest():
-    primary = _job(id=15, userId="other_user", status=JobStatus.RUNNING)
-    waiting = _job(id=21, status=JobStatus.PENDING)
-    with (
-        patch(
-            "app.api.repositories.resolve_repo_access",
-            return_value=RepoAccess(INSTALLATION_ID, "public"),
-        ),
-        patch(
-            "app.api.repositories.enqueue_shared_ingest",
-            return_value=(waiting, primary, True),
+            return_value=(waiting, shared, False),
         ),
     ):
         response = client.post(
@@ -308,7 +290,7 @@ def test_cancel_rejects_non_owner_with_repository_access():
             "app.api.repositories.resolve_repo_access",
             return_value=RepoAccess(INSTALLATION_ID, "public"),
         ),
-        patch("app.api.repositories.cancel_shared_ingest") as cancel,
+        patch("app.api.repositories.cancel_job") as cancel,
     ):
         response = client.post(f"{URL}/12/cancel")
 
@@ -328,13 +310,14 @@ def test_cancel_transitions_active_ingestion_job(status):
         session.get.return_value = job
         yield session
 
-    def transition(_session, cancelled):
-        assert cancelled is job
+    def transition(_session, job_id):
+        assert job_id == job.id
         job.status = JobStatus.CANCELLED
+        return True
 
     app.dependency_overrides[get_session] = session_with_job
     with patch(
-        "app.api.repositories.cancel_shared_ingest", side_effect=transition
+        "app.api.repositories.cancel_job", side_effect=transition
     ) as cancel:
         response = client.post(f"{URL}/12/cancel")
 
@@ -352,7 +335,7 @@ def test_cancel_is_idempotent_for_cancelled_ingestion_job():
         yield session
 
     app.dependency_overrides[get_session] = session_with_job
-    with patch("app.api.repositories.cancel_shared_ingest") as cancel:
+    with patch("app.api.repositories.cancel_job") as cancel:
         response = client.post(f"{URL}/12/cancel")
 
     assert response.status_code == 200
@@ -425,6 +408,7 @@ def sqlite_session():
     )
     GithubConnections.__table__.create(engine)
     Job.__table__.create(engine)
+    RepoIndexState.__table__.create(engine)
     with Session(engine) as session:
         for index, (user_id, installation_id) in enumerate(
             [(USER_ID, INSTALLATION_ID), ("other_user", 789)]
@@ -447,103 +431,143 @@ def sqlite_session():
     engine.dispose()
 
 
-def _ingest_row(user_id: str, installation_id: int, **overrides) -> Job:
-    return Job(
+SHARED_KEY = "repository_ingest:org/repo:main"
+
+
+def _shared_ingest(session: Session, **values) -> Job:
+    shared = Job(
+        userId=None,
+        installation_id=None,
+        repo_name="org/repo",
+        ref="main",
+        job_type=JobType.REPOSITORY_INGEST,
+        dedupe_key=SHARED_KEY,
+        **values,
+    )
+    session.add(shared)
+    session.flush()
+    return shared
+
+
+def _waiting_row(session: Session, shared: Job, user_id: str, installation_id: int) -> Job:
+    waiting = Job(
         userId=user_id,
         installation_id=installation_id,
         repo_name="org/repo",
         ref="main",
-        job_type=overrides.get("job_type", JobType.REPOSITORY_INGEST),
-        dedupe_key=overrides.get("dedupe_key", "repository_ingest:org/repo:main"),
-        status=overrides.get("status", JobStatus.RUNNING),
-        claimed_by="worker" if overrides.get("status") is None else None,
-        blocked_by_job_id=overrides.get("blocked_by_job_id"),
-    )
-
-
-def test_owner_cancel_hands_ingest_to_other_users_waiting_brief(sqlite_session):
-    session = sqlite_session
-    primary = _ingest_row(USER_ID, INSTALLATION_ID)
-    session.add(primary)
-    session.flush()
-    own_brief = _ingest_row(
-        USER_ID,
-        INSTALLATION_ID,
-        job_type=JobType.ISSUE_BRIEF,
-        dedupe_key=None,
+        job_type=JobType.REPOSITORY_INGEST,
+        dedupe_key=f"{SHARED_KEY}:user:{user_id}",
         status=JobStatus.PENDING,
-        blocked_by_job_id=primary.id,
-    )
-    other_brief = _ingest_row(
-        "other_user",
-        789,
-        job_type=JobType.ISSUE_BRIEF,
-        dedupe_key=None,
-        status=JobStatus.PENDING,
-        blocked_by_job_id=primary.id,
-    )
-    session.add_all([own_brief, other_brief])
-    session.commit()
-    primary_id, own_brief_id, other_brief_id = (
-        primary.id,
-        own_brief.id,
-        other_brief.id,
-    )
-
-    response = client.post(f"{URL}/{primary_id}/cancel")
-
-    assert response.status_code == 200
-    assert response.json()["id"] == primary_id
-    assert response.json()["status"] == JobStatus.CANCELLED
-    replacement = session.exec(
-        select(Job).where(
-            Job.dedupe_key == "repository_ingest:org/repo:main",
-            Job.status == JobStatus.PENDING,
-        )
-    ).one()
-    assert replacement.userId == "other_user"
-    assert replacement.installation_id == 789
-    other_brief = session.get(Job, other_brief_id)
-    assert other_brief.status == JobStatus.PENDING
-    assert other_brief.blocked_by_job_id == replacement.id
-    assert session.get(Job, own_brief_id).blocked_by_job_id == primary_id
-
-
-def test_owner_cancel_without_other_users_cancels_ingest(sqlite_session):
-    session = sqlite_session
-    primary = _ingest_row(USER_ID, INSTALLATION_ID, status=JobStatus.PENDING)
-    session.add(primary)
-    session.commit()
-    primary_id = primary.id
-
-    response = client.post(f"{URL}/{primary_id}/cancel")
-
-    assert response.status_code == 200
-    assert response.json()["status"] == JobStatus.CANCELLED
-    assert session.exec(select(Job)).all() == [session.get(Job, primary_id)]
-
-
-def test_waiting_row_owner_cancel_leaves_primary_active(sqlite_session):
-    session = sqlite_session
-    primary = _ingest_row("other_user", 789)
-    session.add(primary)
-    session.flush()
-    waiting = _ingest_row(
-        USER_ID,
-        INSTALLATION_ID,
-        dedupe_key=f"repository_ingest:org/repo:main:user:{USER_ID}",
-        status=JobStatus.PENDING,
-        blocked_by_job_id=primary.id,
+        blocked_by_job_id=shared.id,
     )
     session.add(waiting)
     session.commit()
-    primary_id, waiting_id = primary.id, waiting.id
+    return waiting
 
-    response = client.post(f"{URL}/{waiting_id}/cancel")
+
+def test_first_requester_gets_waiting_row_on_ownerless_shared_ingest(sqlite_session):
+    session = sqlite_session
+    with patch(
+        "app.api.repositories.resolve_repo_access",
+        return_value=RepoAccess(INSTALLATION_ID, "public"),
+    ):
+        response = client.post(URL, json={"repoName": "org/repo", "ref": "main"})
+
+    assert response.status_code == 200
+    waiting = session.get(Job, response.json()["id"])
+    assert waiting.userId == USER_ID
+    assert waiting.installation_id == INSTALLATION_ID
+    shared = session.get(Job, waiting.blocked_by_job_id)
+    assert shared.userId is None
+    assert shared.dedupe_key == SHARED_KEY
+
+
+def test_get_waiting_row_reports_shared_ingest_running_state(sqlite_session):
+    session = sqlite_session
+    shared = _shared_ingest(
+        session, status=JobStatus.RUNNING, claimed_by="worker", attempts=1
+    )
+    waiting = _waiting_row(session, shared, USER_ID, INSTALLATION_ID)
+
+    response = client.get(f"{URL}/{waiting.id}")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": waiting.id,
+        "status": JobStatus.RUNNING,
+        "repoName": "org/repo",
+        "ref": "main",
+        "attempts": 1,
+        "result": None,
+        "error": None,
+    }
+    assert session.get(Job, waiting.id).status == JobStatus.PENDING
+
+
+@pytest.mark.parametrize(
+    ("shared_values", "expected"),
+    [
+        (
+            {"status": JobStatus.COMPLETE, "artifact": {"chunks_inserted": 4}},
+            {
+                "status": JobStatus.COMPLETE,
+                "result": {"chunks_inserted": 4},
+                "error": None,
+            },
+        ),
+        (
+            {"status": JobStatus.FAILED, "error": "Repository not found"},
+            {
+                "status": JobStatus.FAILED,
+                "result": None,
+                "error": "ingest failed: Repository not found",
+            },
+        ),
+    ],
+)
+def test_get_waiting_row_reports_finished_shared_ingest_before_it_settles(
+    sqlite_session, shared_values, expected
+):
+    session = sqlite_session
+    shared = _shared_ingest(session, **shared_values)
+    waiting = _waiting_row(session, shared, USER_ID, INSTALLATION_ID)
+
+    response = client.get(f"{URL}/{waiting.id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {key: body[key] for key in expected} == expected
+    assert session.get(Job, waiting.id).status == JobStatus.PENDING
+
+
+def test_cancel_rejects_shared_ingest(sqlite_session):
+    session = sqlite_session
+    shared = _shared_ingest(session, status=JobStatus.RUNNING, claimed_by="worker")
+    session.commit()
+
+    with patch(
+        "app.api.repositories.resolve_repo_access",
+        return_value=RepoAccess(INSTALLATION_ID, "public"),
+    ):
+        response = client.post(f"{URL}/{shared.id}/cancel")
+
+    assert response.status_code == 403
+    assert session.get(Job, shared.id).status == JobStatus.RUNNING
+
+
+def test_cancel_waiting_row_leaves_shared_ingest_active(sqlite_session):
+    session = sqlite_session
+    shared = _shared_ingest(session, status=JobStatus.RUNNING, claimed_by="worker")
+    own = _waiting_row(session, shared, USER_ID, INSTALLATION_ID)
+    other = _waiting_row(session, shared, "other_user", 789)
+    shared_id, own_id, other_id = shared.id, own.id, other.id
+
+    response = client.post(f"{URL}/{own_id}/cancel")
 
     assert response.status_code == 200
     assert response.json()["status"] == JobStatus.CANCELLED
-    primary = session.get(Job, primary_id)
-    assert primary.status == JobStatus.RUNNING
-    assert primary.userId == "other_user"
-    assert primary.claimed_by == "worker"
+    shared = session.get(Job, shared_id)
+    assert shared.status == JobStatus.RUNNING
+    assert shared.userId is None
+    assert shared.claimed_by == "worker"
+    assert session.get(Job, other_id).status == JobStatus.PENDING

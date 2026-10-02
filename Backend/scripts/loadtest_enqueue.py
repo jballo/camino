@@ -12,7 +12,10 @@ A repo may pin a ref with ``owner/name@ref``; otherwise the ref is resolved
 from GitHub the same way the endpoint does. Jobs dedupe on (repo, ref), so
 pass distinct repos to get distinct jobs.
 
-The last line of output is machine-readable: ``JOB_IDS=<id> <id> ...``.
+Each repo gets a shared ingest plus this user's waiting row on it; workers
+only run a shared ingest while someone is waiting. The last line of output is
+machine-readable: ``JOB_IDS=<id> <id> ...``, the shared ingest IDs, which are
+the rows that actually run.
 """
 
 import argparse
@@ -22,20 +25,19 @@ from sqlmodel import Session, select
 
 from app.db import engine
 from app.models.github_connection import GithubConnections
-from app.models.job import JobType
-from app.services.jobs import enqueue_job, repository_ingest_dedupe_key
+from app.services.shared_ingests import enqueue_shared_ingest
 from app.services.target_branch import resolve_target_branch
 
 
 def ensure_installation_connection(
     session: Session, *, user_id: str, installation_id: int
 ) -> None:
-    """Seed the githubconnections row the worker's ownership guard requires.
+    """Seed the githubconnections row the worker's ingestion guard requires.
 
-    Workers refuse to claim or commit ingestion without an active connection
-    for the job's exact owner and installation. Production rows come from the
-    GitHub-app connect flow; a throwaway load-test database has none, so seed a
-    placeholder. Ingestion mints installation tokens from the app credentials
+    Workers refuse to claim or commit a shared ingest unless a waiting user has
+    an active connection for the waiting row's installation. Production rows
+    come from the GitHub-app connect flow; a throwaway load-test database has
+    none, so seed a placeholder. Ingestion mints installation tokens from the app credentials
     and never reads this row's token fields.
     """
     existing = session.exec(
@@ -94,8 +96,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # Resolve every ref before enqueueing anything: enqueue_job commits per
-    # job, so failing mid-loop would leave committed jobs missing from JOB_IDS.
+    # Resolve every ref before enqueueing anything: each enqueue commits, so
+    # failing mid-loop would leave committed jobs missing from JOB_IDS.
     targets: list[tuple[str, str]] = []
     for spec in args.repos:
         repo_name, _, ref = spec.partition("@")
@@ -112,20 +114,18 @@ def main() -> int:
             session, user_id=args.user_id, installation_id=args.installation_id
         )
         for repo_name, ref in targets:
-            job, created = enqueue_job(
+            _, shared, created = enqueue_shared_ingest(
                 session,
                 user_id=args.user_id,
                 installation_id=args.installation_id,
                 repo_name=repo_name,
                 ref=ref,
-                job_type=JobType.REPOSITORY_INGEST,
-                dedupe_key=repository_ingest_dedupe_key(repo_name=repo_name, ref=ref),
             )
             print(
-                f"job {job.id} {'queued' if created else 'deduplicated (already active)'}"
+                f"job {shared.id} {'queued' if created else 'deduplicated (already active)'}"
                 f" | {repo_name}@{ref}"
             )
-            job_ids.append(job.id)
+            job_ids.append(shared.id)
 
     print("JOB_IDS=" + " ".join(str(i) for i in job_ids))
     return 0

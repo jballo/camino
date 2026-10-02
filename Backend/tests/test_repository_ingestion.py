@@ -11,9 +11,11 @@ from requests.exceptions import Timeout
 from app.config import settings
 from app.services.embeddings import EmbeddingError
 from app.services.parser import CodeChunk, MAX_FILE_BYTES
+from app.services.github_app import GithubConnectionInvalid
 from app.services.repository_ingestion import (
     IngestionCancelledError,
     PermanentRepositoryIngestionError,
+    SponsorInstallationInvalidError,
     TransientRepositoryIngestionError,
     _extract_tarball,
     _prepare_repository,
@@ -977,6 +979,27 @@ async def test_cleanup_failure_does_not_mask_original_error():
 
     assert session.rollback.call_count == 2
     assert session.commit.call_count == 2
+
+
+async def test_invalid_installation_is_a_distinct_permanent_error():
+    session = MagicMock()
+
+    with (
+        patch(
+            "app.services.repository_ingestion._prepare_repository",
+            side_effect=GithubConnectionInvalid("reconnect"),
+        ),
+        pytest.raises(SponsorInstallationInvalidError, match="reconnect"),
+    ):
+        await ingest_repository(
+            session,
+            repo_name="org/repo",
+            installation_id=123,
+            ref="main",
+        )
+
+    failed_cleanup_call = session.execute.call_args_list[-1]
+    assert "generation = :generation" in str(failed_cleanup_call.args[0])
 
 
 async def test_internal_error_message_includes_phase():

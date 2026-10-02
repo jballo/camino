@@ -24,13 +24,9 @@ from app.rate_limit import (
     REPOSITORY_SEARCH_RATE_LIMIT,
 )
 from app.security import get_authenticated_user_id
-from app.services.jobs import normalize_repository_name
+from app.services.jobs import cancel_job, normalize_repository_name
 from app.services.search import hybrid_search
-from app.services.shared_ingests import (
-    SharedIngestRaceError,
-    cancel_shared_ingest,
-    enqueue_shared_ingest,
-)
+from app.services.shared_ingests import enqueue_shared_ingest, waiting_row_outcome
 from app.services.repo_access import (
     RepoAccessDenied,
     RepoAccessUnavailable,
@@ -300,6 +296,45 @@ def _repository_ingest_response(job: Job) -> RepoIngestStatusResponse:
     )
 
 
+def _repository_ingest_status(session: Session, job: Job) -> RepoIngestStatusResponse:
+    """Report a pending waiting row with its shared ingest's live state.
+
+    The waiting row itself only settles at its next claim. Read-only.
+    """
+    if job.userId is None or job.status != JobStatus.PENDING:
+        return _repository_ingest_response(job)
+    try:
+        shared = (
+            session.get(Job, job.blocked_by_job_id)
+            if job.blocked_by_job_id is not None
+            else None
+        )
+    except exc.SQLAlchemyError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+
+    outcome = waiting_row_outcome(shared)
+    if outcome is None:
+        status, attempts, artifact, error = (
+            shared.status,
+            shared.attempts,
+            None,
+            None,
+        )
+    else:
+        status, artifact, error = outcome
+        attempts = job.attempts
+    return RepoIngestStatusResponse(
+        id=job.id,
+        status=status,
+        repoName=job.repo_name,
+        ref=job.ref,
+        attempts=attempts,
+        result=artifact,
+        error=error,
+    )
+
+
 @router.get("")
 async def list_repositories(
     session: SessionDep,
@@ -505,7 +540,7 @@ async def follow_repository(
             followed = True
 
         if resolution is not None:
-            requester_job, _, _ = enqueue_shared_ingest(
+            _, _, job_queued = enqueue_shared_ingest(
                 session,
                 user_id=auth_user_id,
                 installation_id=access.installation_id,
@@ -514,9 +549,8 @@ async def follow_repository(
                 waiting_row=True,
                 commit=False,
             )
-            job_queued = requester_job.userId == auth_user_id
         session.commit()
-    except (exc.SQLAlchemyError, SharedIngestRaceError):
+    except exc.SQLAlchemyError:
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
 
@@ -632,7 +666,7 @@ async def process_repository(
             ref=ref,
             waiting_row=True,
         )
-    except (exc.SQLAlchemyError, SharedIngestRaceError):
+    except exc.SQLAlchemyError:
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
 
@@ -656,7 +690,7 @@ async def get_repository_ingest(
         job_id,
         auth_user_id,
     )
-    return _repository_ingest_response(job)
+    return _repository_ingest_status(session, job)
 
 
 @router.post("/ingest/{job_id}/cancel")
@@ -685,8 +719,7 @@ async def cancel_repository_ingest(
         )
 
     try:
-        cancel_shared_ingest(session, job)
-        session.commit()
+        cancel_job(session, job.id)
         session.refresh(job)
     except exc.SQLAlchemyError:
         session.rollback()

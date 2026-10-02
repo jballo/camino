@@ -125,58 +125,8 @@ def test_deletes_connections_and_cancels_only_revoked_users_active_jobs():
     engine.dispose()
 
 
-def test_transfers_pending_shared_ingest_to_oldest_authorized_dependent_owner():
-    engine = _engine()
-    with Session(engine) as session:
-        session.add_all(
-            [
-                _connection("revoked", 501, 101),
-                _connection("oldest", 601, 101),
-                _connection("newer", 602, 101),
-            ]
-        )
-        ingest = _job(
-            "revoked",
-            101,
-            status=JobStatus.PENDING,
-            job_type=JobType.REPOSITORY_INGEST,
-        )
-        session.add(ingest)
-        session.flush()
-        session.add_all(
-            [
-                _job(
-                    "oldest",
-                    101,
-                    status=JobStatus.PENDING,
-                    blocked_by_job_id=ingest.id,
-                    created_at=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
-                ),
-                _job(
-                    "newer",
-                    101,
-                    status=JobStatus.PENDING,
-                    blocked_by_job_id=ingest.id,
-                    created_at=dt.datetime(2026, 2, 1, tzinfo=dt.timezone.utc),
-                ),
-            ]
-        )
-        session.commit()
-        ingest_id = ingest.id
-
-        revoke_user_authorization(session, 501)
-
-        transferred = session.get(Job, ingest_id)
-        assert transferred is not None
-        assert transferred.userId == "oldest"
-        assert transferred.installation_id == 101
-        assert transferred.status == JobStatus.PENDING
-        assert transferred.error is None
-
-    engine.dispose()
-
-
-def test_running_shared_ingest_is_replaced_and_dependents_are_repointed():
+@pytest.mark.parametrize("shared_status", [JobStatus.PENDING, JobStatus.RUNNING])
+def test_revocation_leaves_shared_ingest_for_other_waiting_users(shared_status):
     engine = _engine()
     with Session(engine) as session:
         session.add_all(
@@ -185,41 +135,41 @@ def test_running_shared_ingest_is_replaced_and_dependents_are_repointed():
                 _connection("teammate", 601, 101),
             ]
         )
-        ingest = _job(
+        shared = _job(
             "revoked",
             101,
-            status=JobStatus.RUNNING,
+            status=shared_status,
             job_type=JobType.REPOSITORY_INGEST,
         )
-        session.add(ingest)
+        shared.userId = None
+        shared.installation_id = None
+        session.add(shared)
         session.flush()
-        dependent = _job(
+        revoked_brief = _job(
+            "revoked",
+            101,
+            status=JobStatus.PENDING,
+            blocked_by_job_id=shared.id,
+        )
+        teammate_brief = _job(
             "teammate",
             101,
             status=JobStatus.PENDING,
-            blocked_by_job_id=ingest.id,
+            blocked_by_job_id=shared.id,
         )
-        session.add(dependent)
+        session.add_all([revoked_brief, teammate_brief])
         session.commit()
-        ingest_id = ingest.id
-        dependent_id = dependent.id
+        ids = (shared.id, revoked_brief.id, teammate_brief.id)
 
         revoke_user_authorization(session, 501)
 
-        old_ingest = session.get(Job, ingest_id)
-        assert old_ingest is not None
-        assert old_ingest.status == JobStatus.CANCELLED
-        replacement = session.exec(
-            select(Job).where(
-                Job.job_type == JobType.REPOSITORY_INGEST,
-                Job.status == JobStatus.PENDING,
-            )
-        ).one()
-        assert replacement.userId == "teammate"
-        assert replacement.id != old_ingest.id
-        repointed = session.get(Job, dependent_id)
-        assert repointed is not None
-        assert repointed.blocked_by_job_id == replacement.id
+        shared, revoked_brief, teammate_brief = (session.get(Job, i) for i in ids)
+        assert shared.status == shared_status
+        assert shared.error is None
+        assert revoked_brief.status == JobStatus.CANCELLED
+        assert revoked_brief.error == REVOCATION_ERROR
+        assert teammate_brief.status == JobStatus.PENDING
+        assert teammate_brief.blocked_by_job_id == shared.id
 
     engine.dispose()
 

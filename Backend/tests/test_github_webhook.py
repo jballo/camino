@@ -438,7 +438,7 @@ def test_invalid_signature_is_rejected(client_and_session):
     assert response.status_code == 401
 
 
-def test_installation_deleted_hands_shared_ingest_to_waiting_brief_owner():
+def test_installation_deleted_leaves_shared_ingest_for_waiting_teammate():
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -465,8 +465,8 @@ def test_installation_deleted_hands_shared_ingest_to_waiting_brief_owner():
             ]
         )
         ingest = Job(
-            userId="departing",
-            installation_id=INSTALLATION_ID,
+            userId=None,
+            installation_id=None,
             repo_name="org/repo",
             ref="main",
             job_type=JobType.REPOSITORY_INGEST,
@@ -485,9 +485,18 @@ def test_installation_deleted_hands_shared_ingest_to_waiting_brief_owner():
             status=JobStatus.PENDING,
             blocked_by_job_id=ingest.id,
         )
-        session.add(brief)
+        departing_brief = Job(
+            userId="departing",
+            installation_id=INSTALLATION_ID,
+            repo_name="org/repo",
+            ref="main",
+            job_type=JobType.ISSUE_BRIEF,
+            status=JobStatus.PENDING,
+            blocked_by_job_id=ingest.id,
+        )
+        session.add_all([brief, departing_brief])
         session.commit()
-        brief_id = brief.id
+        ingest_id, brief_id = ingest.id, brief.id
 
         def _session():
             yield session
@@ -510,16 +519,11 @@ def test_installation_deleted_hands_shared_ingest_to_waiting_brief_owner():
         assert session.exec(
             select(Job).where(Job.installation_id == INSTALLATION_ID)
         ).all() == []
-        replacement = session.exec(
-            select(Job).where(
-                Job.job_type == JobType.REPOSITORY_INGEST,
-                Job.status == JobStatus.PENDING,
-            )
-        ).one()
-        assert replacement.userId == "teammate"
-        assert replacement.installation_id == 202
+        ingest = session.get(Job, ingest_id)
+        assert ingest.status == JobStatus.RUNNING
+        assert ingest.claimed_by == "worker"
         brief = session.get(Job, brief_id)
         assert brief.status == JobStatus.PENDING
-        assert brief.blocked_by_job_id == replacement.id
+        assert brief.blocked_by_job_id == ingest_id
 
     engine.dispose()

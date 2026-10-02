@@ -11,7 +11,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from app.db import get_session
 from app.main import app
@@ -281,11 +281,11 @@ def sqlite_client_and_session():
     engine.dispose()
 
 
-def _seed_reconnect_jobs(session) -> tuple[int, int, int]:
-    """Seed a running shared ingest, a pending brief, and a teammate's brief."""
-    ingest = Job(
-        userId="user_123",
-        installation_id=98,
+def _seed_reconnect_jobs(session) -> tuple[int, int, int, int]:
+    """Seed a running shared ingest, a running tour, and a brief per user."""
+    shared = Job(
+        userId=None,
+        installation_id=None,
         repo_name="org/repo",
         ref="main",
         job_type=JobType.REPOSITORY_INGEST,
@@ -293,9 +293,21 @@ def _seed_reconnect_jobs(session) -> tuple[int, int, int]:
         status=JobStatus.RUNNING,
         claimed_at=dt.datetime(2026, 9, 1, tzinfo=dt.UTC),
         claimed_by="worker",
+        attempts=1,
+    )
+    tour = Job(
+        userId="user_123",
+        installation_id=98,
+        repo_name="org/repo",
+        ref="main",
+        job_type=JobType.TOUR,
+        topic="routing",
+        status=JobStatus.RUNNING,
+        claimed_at=dt.datetime(2026, 9, 1, tzinfo=dt.UTC),
+        claimed_by="worker",
         attempts=2,
     )
-    session.add(ingest)
+    session.add_all([shared, tour])
     session.flush()
     own_brief = Job(
         userId="user_123",
@@ -304,7 +316,7 @@ def _seed_reconnect_jobs(session) -> tuple[int, int, int]:
         ref="main",
         job_type=JobType.ISSUE_BRIEF,
         status=JobStatus.PENDING,
-        blocked_by_job_id=ingest.id,
+        blocked_by_job_id=shared.id,
     )
     teammate_brief = Job(
         userId="teammate",
@@ -313,18 +325,29 @@ def _seed_reconnect_jobs(session) -> tuple[int, int, int]:
         ref="main",
         job_type=JobType.ISSUE_BRIEF,
         status=JobStatus.PENDING,
-        blocked_by_job_id=ingest.id,
+        blocked_by_job_id=shared.id,
     )
     session.add_all([own_brief, teammate_brief])
     session.commit()
-    return ingest.id, own_brief.id, teammate_brief.id
+    return shared.id, tour.id, own_brief.id, teammate_brief.id
+
+
+def _assert_shared_ingest_untouched(session, shared_id: int) -> None:
+    shared = session.get(Job, shared_id)
+    assert shared.userId is None
+    assert shared.installation_id is None
+    assert shared.status == JobStatus.RUNNING
+    assert shared.claimed_by == "worker"
+    assert shared.attempts == 1
 
 
 def test_reconnect_to_different_active_installation_moves_jobs(
     sqlite_client_and_session,
 ):
     client, session = sqlite_client_and_session
-    ingest_id, own_brief_id, teammate_brief_id = _seed_reconnect_jobs(session)
+    shared_id, tour_id, own_brief_id, teammate_brief_id = _seed_reconnect_jobs(
+        session
+    )
 
     with _patch_github():
         response = client.post(
@@ -333,27 +356,30 @@ def test_reconnect_to_different_active_installation_moves_jobs(
         )
 
     assert response.status_code == 200
-    ingest = session.get(Job, ingest_id)
-    assert ingest.userId == "user_123"
-    assert ingest.installation_id == 99
-    assert ingest.status == JobStatus.PENDING
-    assert ingest.claimed_at is None
-    assert ingest.claimed_by is None
-    assert ingest.attempts == 1
+    tour = session.get(Job, tour_id)
+    assert tour.userId == "user_123"
+    assert tour.installation_id == 99
+    assert tour.status == JobStatus.PENDING
+    assert tour.claimed_at is None
+    assert tour.claimed_by is None
+    assert tour.attempts == 1
     own_brief = session.get(Job, own_brief_id)
     assert own_brief.installation_id == 99
     assert own_brief.status == JobStatus.PENDING
-    assert own_brief.blocked_by_job_id == ingest_id
+    assert own_brief.blocked_by_job_id == shared_id
     teammate_brief = session.get(Job, teammate_brief_id)
     assert teammate_brief.installation_id == 202
-    assert teammate_brief.blocked_by_job_id == ingest_id
+    assert teammate_brief.blocked_by_job_id == shared_id
+    _assert_shared_ingest_untouched(session, shared_id)
 
 
-def test_reconnect_to_suspended_installation_cancels_jobs_and_hands_over_ingest(
+def test_reconnect_to_suspended_installation_cancels_only_users_jobs(
     sqlite_client_and_session,
 ):
     client, session = sqlite_client_and_session
-    ingest_id, own_brief_id, teammate_brief_id = _seed_reconnect_jobs(session)
+    shared_id, tour_id, own_brief_id, teammate_brief_id = _seed_reconnect_jobs(
+        session
+    )
 
     with _patch_github(suspended_at=dt.datetime(2026, 9, 1, tzinfo=dt.UTC)):
         response = client.post(
@@ -362,28 +388,21 @@ def test_reconnect_to_suspended_installation_cancels_jobs_and_hands_over_ingest(
         )
 
     assert response.status_code == 200
-    for job_id in (ingest_id, own_brief_id):
+    for job_id in (tour_id, own_brief_id):
         job = session.get(Job, job_id)
         assert job.status == JobStatus.CANCELLED
         assert job.error == SUSPENSION_ERROR
-    replacement = session.exec(
-        select(Job).where(
-            Job.job_type == JobType.REPOSITORY_INGEST,
-            Job.status == JobStatus.PENDING,
-        )
-    ).one()
-    assert replacement.userId == "teammate"
-    assert replacement.installation_id == 202
     teammate_brief = session.get(Job, teammate_brief_id)
     assert teammate_brief.status == JobStatus.PENDING
-    assert teammate_brief.blocked_by_job_id == replacement.id
+    assert teammate_brief.blocked_by_job_id == shared_id
+    _assert_shared_ingest_untouched(session, shared_id)
 
 
 def test_reconnect_to_same_installation_leaves_jobs_untouched(
     sqlite_client_and_session,
 ):
     client, session = sqlite_client_and_session
-    ingest_id, own_brief_id, _ = _seed_reconnect_jobs(session)
+    shared_id, tour_id, own_brief_id, _ = _seed_reconnect_jobs(session)
 
     with _patch_github(installation_ids=(98,)):
         response = client.post(
@@ -392,11 +411,12 @@ def test_reconnect_to_same_installation_leaves_jobs_untouched(
         )
 
     assert response.status_code == 200
-    ingest = session.get(Job, ingest_id)
-    assert ingest.installation_id == 98
-    assert ingest.status == JobStatus.RUNNING
-    assert ingest.claimed_by == "worker"
-    assert ingest.attempts == 2
+    tour = session.get(Job, tour_id)
+    assert tour.installation_id == 98
+    assert tour.status == JobStatus.RUNNING
+    assert tour.claimed_by == "worker"
+    assert tour.attempts == 2
     own_brief = session.get(Job, own_brief_id)
     assert own_brief.installation_id == 98
     assert own_brief.status == JobStatus.PENDING
+    _assert_shared_ingest_untouched(session, shared_id)

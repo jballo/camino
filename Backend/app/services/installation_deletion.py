@@ -17,8 +17,7 @@ def delete_installation_local_data(session: Session, installation_id: int) -> No
     """Delete all local rows for a GitHub App installation.
 
     Set-based so shared org installations and webhook replays are safe. Shared
-    ingests owned by the installation's users are handed to an authorized
-    dependent before the users' job rows are deleted.
+    ingests have no installation, so they survive for other waiting users.
     """
     try:
         user_ids = set(

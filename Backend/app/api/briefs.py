@@ -32,7 +32,7 @@ from app.services.repo_access import (
     authorize_index_read,
     resolve_repo_access,
 )
-from app.services.shared_ingests import SharedIngestRaceError, enqueue_shared_ingest
+from app.services.shared_ingests import enqueue_shared_ingest
 from app.services.target_branch import TargetBranchResolution, resolve_target_branch
 
 router = APIRouter()
@@ -249,7 +249,7 @@ async def create_brief(
                 state,
             )
         else:
-            _, primary, _ = enqueue_shared_ingest(
+            _, shared, _ = enqueue_shared_ingest(
                 session,
                 user_id=auth_user_id,
                 installation_id=installation_id,
@@ -258,7 +258,7 @@ async def create_brief(
                 waiting_row=False,
                 commit=False,
             )
-            dependency_id = primary.id
+            dependency_id = shared.id
         brief, _ = enqueue_job(
             session,
             user_id=auth_user_id,
@@ -284,7 +284,7 @@ async def create_brief(
         raise HTTPException(status_code=404, detail="Repository index not found")
     except RepoAccessUnavailable:
         raise HTTPException(status_code=502, detail="Github access check failed")
-    except (exc.SQLAlchemyError, SharedIngestRaceError):
+    except exc.SQLAlchemyError:
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
     return BriefCreatedResponse(id=brief.id, status=brief.status)

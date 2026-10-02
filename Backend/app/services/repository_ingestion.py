@@ -116,6 +116,10 @@ class PermanentRepositoryIngestionError(RepositoryIngestionError):
     """Invalid input or deterministic failure that should not be retried."""
 
 
+class SponsorInstallationInvalidError(PermanentRepositoryIngestionError):
+    """The installation the ingest runs under can no longer mint tokens."""
+
+
 class IngestionCancelledError(RepositoryIngestionError):
     """Ingestion stopped because its job is no longer valid or owned."""
 
@@ -651,7 +655,7 @@ async def ingest_repository(
                 ref=ref,
                 generation=generation,
             )
-        raise PermanentRepositoryIngestionError(str(error)) from error
+        raise SponsorInstallationInvalidError(str(error)) from error
     except GithubException as error:
         session.rollback()
         if generation is not None:

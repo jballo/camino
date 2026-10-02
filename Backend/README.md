@@ -215,13 +215,26 @@ with `asyncio.to_thread`; embedding calls and job orchestration remain asynchron
 
 Parsing, embedding, and inserts run in bounded waves of `INGEST_WAVE_CHUNKS`. Each
 ingest writes a new generation that remains invisible while its waves commit. Once
-complete, one short transaction updates `repo_index_state`, marks the owning job
+complete, one short transaction updates `repo_index_state`, marks the ingest job
 complete, and deletes the old rows; failed waves leave the previous complete index live. The
 `INGEST_MAX_CHUNKS` cap rejects oversized repositories before further embedding. Each
 wave and the final publication revalidate and lock the worker's job ownership, so a
 reclaimed or deleted job cannot commit more data. Single-statement reads use the
 `live_code_chunks` view; multi-statement hybrid search resolves one active generation
 and binds every retrieval and hydration query to it.
+
+One shared ingest job does the work for each repository and ref. It belongs to nobody:
+it stores no user or installation. Every requester, including the first, gets their own
+waiting row blocked on it, and briefs block on it directly. A worker claims the shared
+ingest only while at least one waiting job's owner still has an active GitHub connection,
+and runs it under that owner's installation, oldest waiting job first. If GitHub refuses
+that installation, the next one is tried. Before each wave commit and the final
+publication, the worker checks that someone eligible is still waiting on that
+installation; if not, it stops and returns the ingest to `pending` without spending an
+attempt. The shared ingest only ends as `complete` or `failed`, and waiting rows take its
+outcome. Revoking, suspending, deleting, or reconnecting a user only cancels, deletes, or
+moves that user's own rows, so other users waiting on the same ingest are unaffected. A
+shared ingest nobody is waiting on stays `pending` until someone requests it again.
 
 Indexes are keyed by normalized repository and ref, so a contribution branch can live
 beside another indexed branch without collisions. Search, Q&A, tours, and briefs resolve
@@ -246,9 +259,9 @@ scans every 60 seconds.
 
 Pending or running jobs can be cancelled through their type-specific API endpoint.
 Cancellation changes the row to `cancelled` and clears its claim. The heartbeat then
-causes in-flight tour or brief generation to cancel its LangGraph task; ingestion
-rechecks ownership before each wave commit and during atomic publication, preventing a
-cancelled or reclaimed job from publishing more data. Cancelling a completed or failed
+causes in-flight tour or brief generation to cancel its LangGraph task. Cancelling an
+ingestion request cancels only the requester's waiting row; when nobody else is waiting,
+the running shared ingest stops at its next wave commit and goes back to `pending`. Cancelling a completed or failed
 job returns `409`, while cancelling an already-cancelled job is idempotent.
 
 Keep `RUN_WORKER=false` in API processes and supervise the separate worker process.
@@ -369,9 +382,11 @@ ingestion polls include the current `attempts` count. Equivalent active ingestio
 tour, and issue-brief requests reuse an existing job instead of racing. Brief responses
 add a phase so clients can distinguish `blocked_on_ingest`, `queued`, and `generating`.
 
-An ingestion job owner can always poll it. Another user connected to the same
-installation can poll only while GitHub still reports that repository as accessible,
-and only the owner can cancel it. Journey and issue-brief polling, listing, and
+`POST /repositories/ingest` returns the requester's waiting row. Polling it reports the
+shared ingest's live status and attempts until the waiting row settles. The row's owner
+can always poll it; another user can poll a row only while GitHub still reports that
+repository as accessible to them, and only the owner can cancel it. The shared ingest
+itself has no owner and cannot be cancelled through the API. Journey and issue-brief polling, listing, and
 cancellation remain strictly owner-scoped.
 
 GitHub connect requires expiring user-to-server OAuth credentials with a refresh token;

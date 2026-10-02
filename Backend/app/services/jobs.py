@@ -30,9 +30,9 @@ def repository_ingest_dedupe_key(
 def repository_ingest_waiter_dedupe_key(
     *, user_id: str, repo_name: str, ref: str
 ) -> str:
-    """Identity of one user's waiting row on another user's primary ingest."""
-    primary_key = repository_ingest_dedupe_key(repo_name=repo_name, ref=ref)
-    return f"{primary_key}:user:{user_id}"
+    """Identity of one user's waiting row on the shared ingest for ``repo@ref``."""
+    shared_key = repository_ingest_dedupe_key(repo_name=repo_name, ref=ref)
+    return f"{shared_key}:user:{user_id}"
 
 
 def issue_brief_dedupe_key(
@@ -83,8 +83,8 @@ def _active_job(session: Session, dedupe_key: str) -> Job | None:
 def enqueue_job(
     session: Session,
     *,
-    user_id: str,
-    installation_id: int,
+    user_id: str | None,
+    installation_id: int | None,
     repo_name: str,
     ref: str,
     job_type: str,

@@ -15,7 +15,7 @@ class AuthorizationRevocationError(Exception):
 
 
 def revoke_user_authorization(session: Session, github_user_id: int) -> None:
-    """Remove a GitHub user and cancel or transfer their active work."""
+    """Remove a GitHub user and cancel their active work."""
     try:
         user_ids = set(
             session.exec(

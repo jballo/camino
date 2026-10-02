@@ -21,6 +21,14 @@ def github_integration() -> GithubIntegration:
     return GithubIntegration(auth=app_auth)
 
 
+def _is_suspended_installation(error: GithubException) -> bool:
+    """GitHub refuses tokens for a suspended installation with a 403."""
+    if error.status != 403 or not isinstance(error.data, dict):
+        return False
+    message = error.data.get("message")
+    return isinstance(message, str) and "suspended" in message.casefold()
+
+
 def installation_access_token(
     installation_id: int,
     *,
@@ -31,6 +39,6 @@ def installation_access_token(
     try:
         return client.get_access_token(installation_id).token
     except GithubException as error:
-        if error.status == 404:
+        if error.status == 404 or _is_suspended_installation(error):
             raise GithubConnectionInvalid(INVALID_CONNECTION_MESSAGE) from error
         raise

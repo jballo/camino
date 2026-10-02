@@ -120,7 +120,7 @@ def test_invalid_signature_is_rejected(webhook_class, client_and_session):
 
 
 @patch("app.webhooks.clerk.Webhook")
-def test_deleted_user_hands_shared_ingest_to_waiting_brief_owner(webhook_class):
+def test_deleted_user_leaves_shared_ingest_for_waiting_teammate(webhook_class):
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -151,8 +151,8 @@ def test_deleted_user_hands_shared_ingest_to_waiting_brief_owner(webhook_class):
             ]
         )
         ingest = Job(
-            userId=USER_ID,
-            installation_id=101,
+            userId=None,
+            installation_id=None,
             repo_name="org/repo",
             ref="main",
             job_type=JobType.REPOSITORY_INGEST,
@@ -197,8 +197,7 @@ def test_deleted_user_hands_shared_ingest_to_waiting_brief_owner(webhook_class):
         assert response.status_code == 200
         assert session.exec(select(Job).where(Job.userId == USER_ID)).all() == []
         ingest = session.get(Job, ingest_id)
-        assert ingest.userId == "teammate"
-        assert ingest.installation_id == 202
+        assert ingest.userId is None
         assert ingest.status == JobStatus.PENDING
         brief = session.get(Job, brief_id)
         assert brief.status == JobStatus.PENDING

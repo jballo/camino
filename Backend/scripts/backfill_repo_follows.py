@@ -18,6 +18,7 @@ BACKFILL = text(
     JOIN repo_index_state AS s
       ON s.repo_name = j.repo_name
     WHERE j.job_type = 'repository_ingest'
+      AND j."userId" IS NOT NULL
       AND s.visibility = 'public'
     ON CONFLICT ("userId", repo_name) DO NOTHING
     """

@@ -18,11 +18,10 @@ import os
 import subprocess
 import sys
 import threading
-import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -31,6 +30,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, select
 
+from app import main as app_main
 from app.config import settings
 from app.db import get_session
 from app.main import app
@@ -45,13 +45,22 @@ from app.services.installation_state import (
     set_installation_active,
 )
 from app.services.repo_access import RepoAccess
-from app.services.repository_ingestion import IngestionCancelledError
-from app.services.shared_ingests import enqueue_shared_ingest, release_user_jobs
+from app.services.jobs import cancel_job
+from app.services.repository_ingestion import (
+    IngestionCancelledError,
+    SponsorInstallationInvalidError,
+)
+from app.services.shared_ingests import (
+    MISSING_SHARED_INGEST_ERROR,
+    enqueue_shared_ingest,
+    release_user_jobs,
+)
 from app.worker import (
     _ensure_ingestion_owned,
     claim_next_job,
     park_job,
     recover_stale_jobs,
+    release_shared_ingest,
     run_job,
 )
 
@@ -215,7 +224,7 @@ def _insert_job(session: Session, **overrides) -> Job:
     now = dt.datetime.now(dt.timezone.utc)
     user_id = overrides.get("userId", "user_1")
     installation_id = overrides.get("installation_id", 1)
-    if overrides.get("with_connection", True):
+    if overrides.get("with_connection", user_id is not None):
         connection = session.exec(
             select(GithubConnections).where(
                 GithubConnections.userId == user_id,
@@ -263,6 +272,96 @@ def _reload(engine, job_id: int) -> Job:
         assert job is not None
         session.expunge(job)
         return job
+
+
+SHARED_KEY = "repository_ingest:org/repo:main"
+
+
+def _insert_shared_ingest(session: Session, **overrides) -> Job:
+    """The ownerless ingest for org/repo@main that waiting jobs block on."""
+    return _insert_job(
+        session,
+        userId=None,
+        installation_id=None,
+        job_type=JobType.REPOSITORY_INGEST,
+        dedupe_key=SHARED_KEY,
+        **overrides,
+    )
+
+
+def _insert_waiting_row(session: Session, shared: Job, **overrides) -> Job:
+    user_id = overrides.pop("userId", "waiter")
+    return _insert_job(
+        session,
+        userId=user_id,
+        installation_id=overrides.pop("installation_id", 202),
+        job_type=JobType.REPOSITORY_INGEST,
+        dedupe_key=f"{SHARED_KEY}:user:{user_id}",
+        blocked_by_job_id=shared.id,
+        **overrides,
+    )
+
+
+def _add_connection(
+    session: Session, user_id: str, installation_id: int
+) -> None:
+    session.add(
+        GithubConnections(
+            userId=user_id,
+            githubUsername=f"github-{user_id}",
+            githubUserId=uuid.uuid4().int % 2_000_000_000,
+            installationId=installation_id,
+        )
+    )
+    session.commit()
+
+
+def _deactivate_user(session: Session, user_id: str) -> None:
+    session.execute(
+        text('UPDATE githubconnections SET active = false WHERE "userId" = :user_id'),
+        {"user_id": user_id},
+    )
+    session.commit()
+
+
+def _fake_ingest(
+    result: dict,
+    calls: list[int],
+    *,
+    before_guard=None,
+    rejected: frozenset[int] = frozenset(),
+):
+    """Stand-in for ``ingest_repository`` that saves once through the guard."""
+
+    async def fake_ingest(
+        session,
+        *,
+        installation_id,
+        ensure_owned,
+        finalize_publication,
+        **_kwargs,
+    ):
+        calls.append(installation_id)
+        if installation_id in rejected:
+            raise SponsorInstallationInvalidError(
+                f"installation {installation_id} is gone"
+            )
+        if before_guard is not None:
+            before_guard(installation_id)
+        ensure_owned(session)
+        finalize_publication(session, result)
+        session.commit()
+        return result
+
+    return fake_ingest
+
+
+async def _run_with_ingest(engine, job_id: int, fake_ingest) -> None:
+    with (
+        patch("app.worker.engine", engine),
+        patch("app.worker.ingest_repository", side_effect=fake_ingest),
+    ):
+        await run_job(job_id, WORKER_A)
 
 
 # ── C. Claim atomicity ──────────────────────────────────────────────
@@ -438,7 +537,7 @@ def test_inactive_owner_at_queue_head_does_not_block_others(pg_engine_clean):
 
 def test_claim_skips_job_while_dependency_is_active(pg_engine_clean):
     with Session(pg_engine_clean) as session:
-        dependency = _insert_job(session, job_type=JobType.REPOSITORY_INGEST)
+        dependency = _insert_shared_ingest(session)
         blocked = _insert_job(session, blocked_by_job_id=dependency.id)
 
     with Session(pg_engine_clean) as session:
@@ -492,30 +591,92 @@ def test_missing_dependency_fails_open(pg_engine_clean):
         assert claim_next_job(session, WORKER_A) == blocked.id
 
 
-def test_suspended_owners_brief_is_cancelled_while_teammate_follows_replacement(
+# ── Shared ingest eligibility ───────────────────────────────────────
+
+def test_shared_ingest_is_claimable_with_one_eligible_waiting_row(pg_engine_clean):
+    with Session(pg_engine_clean) as session:
+        shared = _insert_shared_ingest(session)
+        waiting = _insert_waiting_row(session, shared)
+
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) == shared.id
+        assert claim_next_job(session, WORKER_B) is None
+    row = _reload(pg_engine_clean, shared.id)
+    assert row.status == JobStatus.RUNNING
+    assert row.userId is None
+    assert row.installation_id is None
+    assert _reload(pg_engine_clean, waiting.id).status == JobStatus.PENDING
+
+
+@pytest.mark.parametrize(
+    "waiter", ["none", "inactive", "mismatched_installation", "cancelled"]
+)
+def test_shared_ingest_is_not_claimable_without_eligible_waiting_job(
+    pg_engine_clean, waiter
+):
+    with Session(pg_engine_clean) as session:
+        shared = _insert_shared_ingest(session)
+        if waiter == "inactive":
+            _insert_waiting_row(session, shared)
+            _deactivate_user(session, "waiter")
+        elif waiter == "mismatched_installation":
+            # The user is connected, but not through the job's installation.
+            _insert_waiting_row(
+                session, shared, installation_id=202, with_connection=False
+            )
+            _add_connection(session, "waiter", 303)
+        elif waiter == "cancelled":
+            _insert_waiting_row(session, shared, status=JobStatus.CANCELLED)
+
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) is None
+    row = _reload(pg_engine_clean, shared.id)
+    assert row.status == JobStatus.PENDING
+    assert row.attempts == 0
+
+
+def test_idle_shared_ingest_at_queue_head_does_not_block_others(pg_engine_clean):
+    older = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    newer = dt.datetime(2026, 2, 1, tzinfo=dt.timezone.utc)
+    with Session(pg_engine_clean) as session:
+        idle = _insert_shared_ingest(session, createdAt=older, updatedAt=older)
+        claimable = _insert_job(session, createdAt=newer, updatedAt=newer)
+
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) == claimable.id
+        assert claim_next_job(session, WORKER_A) is None
+    assert _reload(pg_engine_clean, idle.id).status == JobStatus.PENDING
+
+
+def test_brief_alone_makes_shared_ingest_claimable(pg_engine_clean):
+    with Session(pg_engine_clean) as session:
+        shared = _insert_shared_ingest(session)
+        brief = _insert_job(
+            session,
+            userId="briefer",
+            installation_id=303,
+            job_type=JobType.ISSUE_BRIEF,
+            blocked_by_job_id=shared.id,
+        )
+
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) == shared.id
+    assert _reload(pg_engine_clean, brief.id).status == JobStatus.PENDING
+
+
+def test_suspended_users_brief_is_cancelled_while_teammate_keeps_shared_ingest(
     pg_engine_clean,
 ):
     older = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
     newer = dt.datetime(2026, 2, 1, tzinfo=dt.timezone.utc)
     with Session(pg_engine_clean) as session:
-        ingest = _insert_job(
-            session,
-            userId="suspended",
-            installation_id=101,
-            job_type=JobType.REPOSITORY_INGEST,
-            dedupe_key="repository_ingest:org/repo:main",
-            status=JobStatus.RUNNING,
-            claimed_at=older,
-            claimed_by=WORKER_B,
-            createdAt=older,
-            updatedAt=older,
-        )
+        shared = _insert_shared_ingest(session, createdAt=older, updatedAt=older)
         own_brief = _insert_job(
             session,
             userId="suspended",
             installation_id=101,
             job_type=JobType.ISSUE_BRIEF,
-            blocked_by_job_id=ingest.id,
+            blocked_by_job_id=shared.id,
             createdAt=older,
             updatedAt=older,
         )
@@ -524,7 +685,7 @@ def test_suspended_owners_brief_is_cancelled_while_teammate_follows_replacement(
             userId="teammate",
             installation_id=202,
             job_type=JobType.ISSUE_BRIEF,
-            blocked_by_job_id=ingest.id,
+            blocked_by_job_id=shared.id,
             createdAt=newer,
             updatedAt=newer,
         )
@@ -535,21 +696,15 @@ def test_suspended_owners_brief_is_cancelled_while_teammate_follows_replacement(
     own = _reload(pg_engine_clean, own_brief.id)
     assert own.status == JobStatus.CANCELLED
     assert own.error == SUSPENSION_ERROR
+    untouched = _reload(pg_engine_clean, shared.id)
+    assert untouched.status == JobStatus.PENDING
+    assert untouched.updatedAt == older
 
     with Session(pg_engine_clean) as session:
-        replacement_id = claim_next_job(session, WORKER_A)
-    replacement = _reload(pg_engine_clean, replacement_id)
-    assert replacement.job_type == JobType.REPOSITORY_INGEST
-    assert replacement.userId == "teammate"
-    assert (
-        _reload(pg_engine_clean, teammate_brief.id).blocked_by_job_id
-        == replacement_id
-    )
-
-    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) == shared.id
         session.execute(
             text("UPDATE jobs SET status = 'complete' WHERE id = :id"),
-            {"id": replacement_id},
+            {"id": shared.id},
         )
         session.commit()
         assert claim_next_job(session, WORKER_A) == teammate_brief.id
@@ -561,34 +716,18 @@ def test_suspended_owners_brief_is_cancelled_while_teammate_follows_replacement(
     assert _reload(pg_engine_clean, own_brief.id).status == JobStatus.CANCELLED
 
 
-def _insert_waiting_row(session: Session, primary: Job, **overrides) -> Job:
-    user_id = overrides.pop("userId", "waiter")
-    return _insert_job(
-        session,
-        userId=user_id,
-        installation_id=overrides.pop("installation_id", 202),
-        job_type=JobType.REPOSITORY_INGEST,
-        dedupe_key=f"repository_ingest:org/repo:main:user:{user_id}",
-        blocked_by_job_id=primary.id,
-        **overrides,
-    )
+# ── Waiting rows settle at claim ────────────────────────────────────
 
-
-def test_waiting_row_completes_from_primary_without_running(pg_engine_clean):
+def test_waiting_row_completes_from_shared_ingest_without_running(pg_engine_clean):
     artifact = {"chunks_inserted": 12, "embeddings_created": 12}
     with Session(pg_engine_clean) as session:
-        primary = _insert_job(
-            session,
-            job_type=JobType.REPOSITORY_INGEST,
-            dedupe_key="repository_ingest:org/repo:main",
-            status=JobStatus.COMPLETE,
-        )
+        shared = _insert_shared_ingest(session, status=JobStatus.COMPLETE)
         session.execute(
             text("UPDATE jobs SET artifact = CAST(:artifact AS JSONB) WHERE id = :id"),
-            {"artifact": json.dumps(artifact), "id": primary.id},
+            {"artifact": json.dumps(artifact), "id": shared.id},
         )
         session.commit()
-        waiting = _insert_waiting_row(session, primary, attempts=1)
+        waiting = _insert_waiting_row(session, shared, attempts=1)
 
     with Session(pg_engine_clean) as session:
         assert claim_next_job(session, WORKER_A) is None
@@ -601,16 +740,14 @@ def test_waiting_row_completes_from_primary_without_running(pg_engine_clean):
     assert row.claimed_by is None
 
 
-def test_waiting_row_fails_when_primary_failed(pg_engine_clean):
+def test_waiting_row_fails_when_shared_ingest_failed(pg_engine_clean):
     with Session(pg_engine_clean) as session:
-        primary = _insert_job(
+        shared = _insert_shared_ingest(
             session,
-            job_type=JobType.REPOSITORY_INGEST,
-            dedupe_key="repository_ingest:org/repo:main",
             status=JobStatus.FAILED,
             error="ref not found",
         )
-        waiting = _insert_waiting_row(session, primary)
+        waiting = _insert_waiting_row(session, shared)
 
     with Session(pg_engine_clean) as session:
         assert claim_next_job(session, WORKER_A) is None
@@ -620,9 +757,148 @@ def test_waiting_row_fails_when_primary_failed(pg_engine_clean):
     assert row.error == "ingest failed: ref not found"
 
 
+def test_legacy_owned_ingest_without_dependency_fails_instead_of_running(
+    pg_engine_clean,
+):
+    with Session(pg_engine_clean) as session:
+        legacy = _insert_job(
+            session,
+            job_type=JobType.REPOSITORY_INGEST,
+            attempts=1,
+        )
+
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) is None
+
+    row = _reload(pg_engine_clean, legacy.id)
+    assert row.status == JobStatus.FAILED
+    assert row.error == MISSING_SHARED_INGEST_ERROR
+    assert "request it again" in row.error
+    assert row.attempts == 1
+
+
+async def _lifespan_conversion_sql() -> str:
+    """The startup statement that converts owned shared ingests."""
+    connection = MagicMock()
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value.__enter__.return_value = connection
+    with (
+        patch.object(app_main, "engine", mock_engine),
+        patch.object(app_main.SQLModel.metadata, "create_all"),
+        patch.object(app_main, "verify_embedding_schema"),
+    ):
+        async with app_main.lifespan(app_main.app):
+            pass
+    (statement,) = [
+        str(call.args[0])
+        for call in connection.execute.call_args_list
+        if "WITH owned AS" in str(call.args[0])
+    ]
+    return statement
+
+
+def _jobs_snapshot(engine) -> list[tuple]:
+    with Session(engine) as session:
+        return [
+            (
+                job.id,
+                job.userId,
+                job.installation_id,
+                job.status,
+                job.dedupe_key,
+                job.blocked_by_job_id,
+                job.claimed_by,
+                job.attempts,
+            )
+            for job in session.exec(select(Job).order_by(Job.id)).all()
+        ]
+
+
+async def test_lifespan_converts_owned_shared_ingest_once(pg_engine_clean):
+    conversion = text(await _lifespan_conversion_sql())
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session(pg_engine_clean) as session:
+        owned = _insert_job(
+            session,
+            userId="owner",
+            installation_id=101,
+            job_type=JobType.REPOSITORY_INGEST,
+            dedupe_key=SHARED_KEY,
+            status=JobStatus.RUNNING,
+            claimed_at=now,
+            claimed_by=WORKER_A,
+            attempts=1,
+        )
+        # Not converted: no global dedupe key, already finished, or already
+        # a waiting row.
+        legacy = _insert_job(
+            session,
+            userId="owner",
+            installation_id=101,
+            repo_name="org/legacy",
+            job_type=JobType.REPOSITORY_INGEST,
+        )
+        finished = _insert_job(
+            session,
+            userId="owner",
+            installation_id=101,
+            job_type=JobType.REPOSITORY_INGEST,
+            dedupe_key=SHARED_KEY,
+            status=JobStatus.COMPLETE,
+        )
+        existing_waiter = _insert_waiting_row(session, owned)
+
+    with Session(pg_engine_clean) as session:
+        session.execute(conversion)
+        session.commit()
+
+    converted = _reload(pg_engine_clean, owned.id)
+    assert converted.userId is None
+    assert converted.installation_id is None
+    assert converted.status == JobStatus.RUNNING
+    assert converted.claimed_by == WORKER_A
+    assert converted.attempts == 1
+    for unchanged in (legacy, finished, existing_waiter):
+        row = _reload(pg_engine_clean, unchanged.id)
+        assert row.userId == unchanged.userId
+        assert row.installation_id == unchanged.installation_id
+        assert row.status == unchanged.status
+    with Session(pg_engine_clean) as session:
+        waiting_rows = session.exec(
+            select(Job).where(
+                Job.blocked_by_job_id == owned.id,
+                Job.userId == "owner",
+            )
+        ).all()
+    assert len(waiting_rows) == 1
+    (owner_row,) = waiting_rows
+    assert owner_row.installation_id == 101
+    assert owner_row.job_type == JobType.REPOSITORY_INGEST
+    assert owner_row.dedupe_key == f"{SHARED_KEY}:user:owner"
+    assert owner_row.status == JobStatus.PENDING
+
+    # The run in flight keeps passing its guard under the owner's installation.
+    with Session(pg_engine_clean) as session:
+        _ensure_ingestion_owned(
+            session,
+            job_id=owned.id,
+            worker_id=WORKER_A,
+            installation_id=101,
+            lease_lost=threading.Event(),
+        )
+        session.rollback()
+
+    snapshot = _jobs_snapshot(pg_engine_clean)
+    with Session(pg_engine_clean) as session:
+        session.execute(conversion)
+        session.commit()
+    assert _jobs_snapshot(pg_engine_clean) == snapshot
+
+
 ORPHANED_ACTIVE_JOBS_SQL = text("""
 SELECT j.id FROM jobs AS j
 WHERE j.status IN ('pending', 'running')
+  AND j."userId" IS NOT NULL
   AND NOT EXISTS (
       SELECT 1 FROM githubconnections AS c
       WHERE c."userId" = j."userId"
@@ -632,160 +908,301 @@ WHERE j.status IN ('pending', 'running')
 """)
 
 
-def _wait_for_lock_waiter(engine, timeout: float = 5.0) -> None:
-    deadline = time.monotonic() + timeout
-    with engine.connect() as conn:
-        while time.monotonic() < deadline:
-            waiting = conn.execute(
-                text("SELECT count(*) FROM pg_locks WHERE NOT granted")
-            ).scalar_one()
-            conn.rollback()
-            if waiting:
-                return
-            time.sleep(0.02)
-    raise AssertionError("second removal never waited on a row lock")
-
-
-@pytest.mark.parametrize("first_removed", ["owner", "waiter"])
-def test_concurrent_removals_never_leave_ingest_with_removed_owner(
-    pg_engine_clean, first_removed
+def test_concurrent_removals_of_every_waiting_user_leave_shared_ingest_idle(
+    pg_engine_clean,
 ):
+    older = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
     with Session(pg_engine_clean) as session:
-        primary = _insert_job(
-            session,
-            userId="owner",
-            installation_id=101,
-            job_type=JobType.REPOSITORY_INGEST,
-            dedupe_key="repository_ingest:org/repo:main",
+        shared = _insert_shared_ingest(session, createdAt=older, updatedAt=older)
+        first_row = _insert_waiting_row(
+            session, shared, userId="first", installation_id=101
         )
-        _insert_waiting_row(session, primary)
+        second_row = _insert_waiting_row(
+            session, shared, userId="second", installation_id=202
+        )
 
-    first_installation, second_installation = (
-        (101, 202) if first_removed == "owner" else (202, 101)
-    )
     first = Session(pg_engine_clean)
     try:
-        # Hold the first removal's locks uncommitted while the second runs.
+        # Hold the first removal uncommitted while the second runs. Neither
+        # touches the shared ingest or the other user's rows, so the second
+        # never waits on the first.
         first.execute(
             update(GithubConnections)
-            .where(GithubConnections.installationId == first_installation)
+            .where(GithubConnections.installationId == 101)
             .values(active=False)
         )
         release_user_jobs(
-            first,
-            {"owner" if first_removed == "owner" else "waiter"},
-            error=SUSPENSION_ERROR,
-            dispose="cancel",
+            first, {"first"}, error=SUSPENSION_ERROR, dispose="cancel"
         )
         errors: list[BaseException] = []
 
         def remove_second() -> None:
             try:
                 with Session(pg_engine_clean) as session:
-                    set_installation_active(
-                        session, second_installation, active=False
-                    )
+                    session.execute(text("SET LOCAL lock_timeout = '2s'"))
+                    set_installation_active(session, 202, active=False)
             except BaseException as error:  # pragma: no cover - surfaced below
                 errors.append(error)
 
         thread = threading.Thread(target=remove_second)
         thread.start()
-        _wait_for_lock_waiter(pg_engine_clean)
-        first.commit()
         thread.join(timeout=10)
         assert not thread.is_alive()
         assert errors == []
+        first.commit()
     finally:
         first.close()
 
+    for waiting in (first_row, second_row):
+        row = _reload(pg_engine_clean, waiting.id)
+        assert row.status == JobStatus.CANCELLED
+        assert row.error == SUSPENSION_ERROR
+    idle = _reload(pg_engine_clean, shared.id)
+    assert idle.status == JobStatus.PENDING
+    assert idle.userId is None
+    assert idle.installation_id is None
+    assert idle.attempts == 0
+    assert idle.updatedAt == older
     with Session(pg_engine_clean) as session:
         assert session.execute(ORPHANED_ACTIVE_JOBS_SQL).all() == []
-        statuses = {
-            job.status for job in session.exec(select(Job)).all()
-        }
-    assert statuses == {JobStatus.CANCELLED}
+        assert claim_next_job(session, WORKER_A) is None
 
 
-async def test_waiting_user_takes_over_and_completes_after_owner_suspension(
+# ── Running a shared ingest ─────────────────────────────────────────
+
+def _connect_users(engine, *users: tuple[str, int]) -> None:
+    with Session(engine) as session:
+        for user_id, installation_id in users:
+            _add_connection(session, user_id, installation_id)
+
+
+def _request_ingest(engine, user_id: str, installation_id: int) -> tuple[int, int]:
+    """Return ``(waiting_row_id, shared_id)`` for a user's ingest request."""
+    with Session(engine) as session:
+        waiting, shared, _ = enqueue_shared_ingest(
+            session,
+            user_id=user_id,
+            installation_id=installation_id,
+            repo_name="org/repo",
+            ref="main",
+        )
+        return waiting.id, shared.id
+
+
+def test_release_returns_shared_ingest_to_pending_with_attempt_refunded(
+    pg_engine_clean,
+):
+    with Session(pg_engine_clean) as session:
+        shared = _insert_shared_ingest(session)
+        _insert_waiting_row(session, shared)
+        assert claim_next_job(session, WORKER_A) == shared.id
+        assert release_shared_ingest(session, shared.id, WORKER_B) is False
+        assert _reload(pg_engine_clean, shared.id).status == JobStatus.RUNNING
+        assert release_shared_ingest(session, shared.id, WORKER_A) is True
+
+    row = _reload(pg_engine_clean, shared.id)
+    assert row.status == JobStatus.PENDING
+    assert row.attempts == 0
+    assert row.claimed_at is None
+    assert row.claimed_by is None
+    assert row.error is None
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) == shared.id
+
+
+async def test_run_releases_shared_ingest_when_nobody_is_waiting(pg_engine_clean):
+    with Session(pg_engine_clean) as session:
+        shared = _insert_shared_ingest(session)
+        waiting = _insert_waiting_row(session, shared)
+        assert claim_next_job(session, WORKER_A) == shared.id
+        assert cancel_job(session, waiting.id)
+
+    calls: list[int] = []
+    await _run_with_ingest(pg_engine_clean, shared.id, _fake_ingest({}, calls))
+
+    assert calls == []
+    row = _reload(pg_engine_clean, shared.id)
+    assert row.status == JobStatus.PENDING
+    assert row.attempts == 0
+    assert row.claimed_by is None
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) is None
+
+
+async def test_shared_ingest_restarts_for_second_waiter_after_sponsor_suspension(
     pg_engine_clean,
 ):
     result = {"chunks_inserted": 3, "embeddings_created": 3}
-    with Session(pg_engine_clean) as session:
-        for github_user_id, (user_id, installation_id) in enumerate(
-            (("owner", 101), ("waiter", 202)), start=1
-        ):
-            session.add(
-                GithubConnections(
-                    userId=user_id,
-                    githubUsername=f"github-{user_id}",
-                    githubUserId=github_user_id,
-                    installationId=installation_id,
-                )
-            )
-        session.commit()
-        _, primary, _ = enqueue_shared_ingest(
-            session,
-            user_id="owner",
-            installation_id=101,
-            repo_name="org/repo",
-            ref="main",
-        )
-        waiting, joined, created = enqueue_shared_ingest(
-            session,
-            user_id="waiter",
-            installation_id=202,
-            repo_name="org/repo",
-            ref="main",
-        )
-        primary_id, waiting_id = primary.id, waiting.id
-    assert created is True
-    assert joined.id == primary_id
+    _connect_users(pg_engine_clean, ("first", 101), ("second", 202))
+    first_id, shared_id = _request_ingest(pg_engine_clean, "first", 101)
+    second_id, joined_id = _request_ingest(pg_engine_clean, "second", 202)
+    assert joined_id == shared_id
 
     with Session(pg_engine_clean) as session:
-        set_installation_active(session, 101, active=False)
-    handed_over = _reload(pg_engine_clean, primary_id)
-    assert handed_over.userId == "waiter"
-    assert handed_over.installation_id == 202
+        assert claim_next_job(session, WORKER_A) == shared_id
+
+    def suspend_sponsor(installation_id: int) -> None:
+        if installation_id == 101:
+            with Session(pg_engine_clean) as session:
+                set_installation_active(session, 101, active=False)
+
+    calls: list[int] = []
+    fake = _fake_ingest(result, calls, before_guard=suspend_sponsor)
+    await _run_with_ingest(pg_engine_clean, shared_id, fake)
+
+    assert calls == [101]
+    released = _reload(pg_engine_clean, shared_id)
+    assert released.status == JobStatus.PENDING
+    assert released.attempts == 0
+    assert released.claimed_by is None
+    first = _reload(pg_engine_clean, first_id)
+    assert first.status == JobStatus.CANCELLED
+    assert first.error == SUSPENSION_ERROR
+    assert _reload(pg_engine_clean, second_id).status == JobStatus.PENDING
 
     with Session(pg_engine_clean) as session:
-        assert claim_next_job(session, WORKER_A) == primary_id
+        assert claim_next_job(session, WORKER_A) == shared_id
+    await _run_with_ingest(pg_engine_clean, shared_id, fake)
 
-    ingested_with: list[int] = []
-
-    async def fake_ingest(
-        session,
-        *,
-        installation_id,
-        ensure_owned,
-        finalize_publication,
-        **_kwargs,
-    ):
-        ingested_with.append(installation_id)
-        ensure_owned(session)
-        finalize_publication(session, result)
-        session.commit()
-        return result
-
-    with (
-        patch("app.worker.engine", pg_engine_clean),
-        patch("app.worker.ingest_repository", side_effect=fake_ingest),
-    ):
-        await run_job(primary_id, WORKER_A)
-
-    assert ingested_with == [202]
-    assert _reload(pg_engine_clean, primary_id).status == JobStatus.COMPLETE
-
+    assert calls == [101, 202]
+    completed = _reload(pg_engine_clean, shared_id)
+    assert completed.status == JobStatus.COMPLETE
+    assert completed.attempts == 1
     with Session(pg_engine_clean) as session:
         assert claim_next_job(session, WORKER_A) is None
-    row = _reload(pg_engine_clean, waiting_id)
-    assert row.status == JobStatus.COMPLETE
-    assert row.artifact == result
+    second = _reload(pg_engine_clean, second_id)
+    assert second.status == JobStatus.COMPLETE
+    assert second.artifact == result
+    assert second.error is None
+
+
+@pytest.mark.parametrize(
+    ("joiner_installation", "expected_calls"),
+    [
+        # A teammate on the sponsor's installation keeps the run going.
+        (101, [101]),
+        # Anyone else releases it; it restarts under their installation.
+        (202, [101, 202]),
+    ],
+)
+async def test_join_racing_last_cancel_never_fails_new_requester(
+    pg_engine_clean, joiner_installation, expected_calls
+):
+    result = {"chunks_inserted": 5, "embeddings_created": 5}
+    _connect_users(pg_engine_clean, ("first", 101), ("joiner", joiner_installation))
+    first_id, shared_id = _request_ingest(pg_engine_clean, "first", 101)
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) == shared_id
+
+    joined: list[tuple[int, int]] = []
+    errors: list[BaseException] = []
+
+    def join_and_cancel(installation_id: int) -> None:
+        if installation_id != 101 or joined:
+            return
+        barrier = threading.Barrier(2)
+
+        def cancel() -> None:
+            try:
+                barrier.wait()
+                with Session(pg_engine_clean) as session:
+                    assert cancel_job(session, first_id)
+            except BaseException as error:  # pragma: no cover - surfaced below
+                errors.append(error)
+
+        def join() -> None:
+            try:
+                barrier.wait()
+                joined.append(
+                    _request_ingest(pg_engine_clean, "joiner", joiner_installation)
+                )
+            except BaseException as error:  # pragma: no cover - surfaced below
+                errors.append(error)
+
+        threads = [threading.Thread(target=cancel), threading.Thread(target=join)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+    calls: list[int] = []
+    fake = _fake_ingest(result, calls, before_guard=join_and_cancel)
+    await _run_with_ingest(pg_engine_clean, shared_id, fake)
+    assert errors == []
+    (joiner_id, joined_shared_id), = joined
+    assert joined_shared_id == shared_id
+    assert _reload(pg_engine_clean, joiner_id).status == JobStatus.PENDING
+
+    if _reload(pg_engine_clean, shared_id).status == JobStatus.PENDING:
+        with Session(pg_engine_clean) as session:
+            assert claim_next_job(session, WORKER_A) == shared_id
+        await _run_with_ingest(pg_engine_clean, shared_id, fake)
+
+    assert calls == expected_calls
+    assert _reload(pg_engine_clean, shared_id).status == JobStatus.COMPLETE
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) is None
+    joiner = _reload(pg_engine_clean, joiner_id)
+    assert joiner.status == JobStatus.COMPLETE
+    assert joiner.artifact == result
+    assert _reload(pg_engine_clean, first_id).status == JobStatus.CANCELLED
+
+
+async def test_dead_sponsor_installation_falls_back_to_next_waiting_user(
+    pg_engine_clean,
+):
+    result = {"chunks_inserted": 2, "embeddings_created": 2}
+    _connect_users(pg_engine_clean, ("first", 101), ("second", 202))
+    first_id, shared_id = _request_ingest(pg_engine_clean, "first", 101)
+    second_id, _ = _request_ingest(pg_engine_clean, "second", 202)
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) == shared_id
+
+    calls: list[int] = []
+    fake = _fake_ingest(result, calls, rejected=frozenset({101}))
+    await _run_with_ingest(pg_engine_clean, shared_id, fake)
+
+    assert calls == [101, 202]
+    completed = _reload(pg_engine_clean, shared_id)
+    assert completed.status == JobStatus.COMPLETE
+    assert completed.attempts == 1
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) is None
+    for waiting_id in (first_id, second_id):
+        row = _reload(pg_engine_clean, waiting_id)
+        assert row.status == JobStatus.COMPLETE
+        assert row.artifact == result
+
+
+async def test_shared_ingest_fails_only_when_every_sponsor_is_rejected(
+    pg_engine_clean,
+):
+    _connect_users(pg_engine_clean, ("first", 101), ("second", 202))
+    first_id, shared_id = _request_ingest(pg_engine_clean, "first", 101)
+    second_id, _ = _request_ingest(pg_engine_clean, "second", 202)
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) == shared_id
+
+    calls: list[int] = []
+    fake = _fake_ingest({}, calls, rejected=frozenset({101, 202}))
+    await _run_with_ingest(pg_engine_clean, shared_id, fake)
+
+    assert calls == [101, 202]
+    failed = _reload(pg_engine_clean, shared_id)
+    assert failed.status == JobStatus.FAILED
+    assert failed.error == "installation 202 is gone"
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) is None
+    for waiting_id in (first_id, second_id):
+        row = _reload(pg_engine_clean, waiting_id)
+        assert row.status == JobStatus.FAILED
+        assert row.error == "ingest failed: installation 202 is gone"
 
 
 def test_parking_preserves_retry_budget_and_created_at(pg_engine_clean):
     created = dt.datetime(2026, 2, 1, tzinfo=dt.timezone.utc)
     with Session(pg_engine_clean) as session:
-        dependency = _insert_job(session, job_type=JobType.REPOSITORY_INGEST)
+        dependency = _insert_shared_ingest(session)
         job = _insert_job(
             session,
             status=JobStatus.RUNNING,
@@ -905,41 +1322,43 @@ def test_fresh_generating_job_is_untouched(pg_engine_clean):
     assert row.claimed_at is not None
 
 
-def test_ingestion_guard_requires_current_claim_and_installation(pg_engine_clean):
-    now = dt.datetime.now(dt.timezone.utc)
+def _running_shared_ingest(session: Session) -> Job:
+    return _insert_shared_ingest(
+        session,
+        status=JobStatus.RUNNING,
+        claimed_at=dt.datetime.now(dt.timezone.utc),
+        claimed_by=WORKER_A,
+        attempts=1,
+    )
+
+
+def _guard(engine, job_id: int, installation_id: int) -> None:
+    with Session(engine) as session:
+        _ensure_ingestion_owned(
+            session,
+            job_id=job_id,
+            worker_id=WORKER_A,
+            installation_id=installation_id,
+            lease_lost=threading.Event(),
+        )
+        session.rollback()
+
+
+def test_ingestion_guard_requires_current_claim_and_waiting_user(pg_engine_clean):
     installation_id = uuid.uuid4().int % 2_000_000_000
     with Session(pg_engine_clean) as session:
-        session.add(
-            GithubConnections(
-                userId=f"guard_{uuid.uuid4().hex}",
-                githubUsername="octocat",
-                githubUserId=installation_id,
-                installationId=installation_id,
-            )
-        )
-        session.add(
-            RepoIndexState(
-                repo_name="org/repo",
-                ref="main",
-                visibility="public",
-                active_generation="generation-1",
-            )
-        )
-        session.commit()
-        job_id = _insert_job(
+        job_id = _running_shared_ingest(session).id
+        _insert_waiting_row(
             session,
+            _reload(pg_engine_clean, job_id),
             installation_id=installation_id,
-            status=JobStatus.RUNNING,
-            claimed_at=now,
-            claimed_by=WORKER_A,
-        ).id
+        )
 
     with Session(pg_engine_clean) as session:
         _ensure_ingestion_owned(
             session,
             job_id=job_id,
             worker_id=WORKER_A,
-            user_id="user_1",
             installation_id=installation_id,
             lease_lost=threading.Event(),
         )
@@ -959,6 +1378,10 @@ def test_ingestion_guard_requires_current_claim_and_installation(pg_engine_clean
 
         session.rollback()
 
+    # Nobody waiting on the ingest uses another installation.
+    with pytest.raises(IngestionCancelledError, match="Nobody eligible"):
+        _guard(pg_engine_clean, job_id, installation_id + 1)
+
     with Session(pg_engine_clean) as session:
         session.execute(
             text("UPDATE jobs SET claimed_by = :worker WHERE id = :job_id"),
@@ -966,18 +1389,8 @@ def test_ingestion_guard_requires_current_claim_and_installation(pg_engine_clean
         )
         session.commit()
 
-    with (
-        Session(pg_engine_clean) as session,
-        pytest.raises(IngestionCancelledError, match="no longer active"),
-    ):
-        _ensure_ingestion_owned(
-            session,
-            job_id=job_id,
-            worker_id=WORKER_A,
-            user_id="user_1",
-            installation_id=installation_id,
-            lease_lost=threading.Event(),
-        )
+    with pytest.raises(IngestionCancelledError, match="no longer active"):
+        _guard(pg_engine_clean, job_id, installation_id)
 
     with Session(pg_engine_clean) as session:
         session.execute(
@@ -993,62 +1406,64 @@ def test_ingestion_guard_requires_current_claim_and_installation(pg_engine_clean
         )
         session.commit()
 
-    with (
-        Session(pg_engine_clean) as session,
-        pytest.raises(IngestionCancelledError, match="no longer active"),
-    ):
-        _ensure_ingestion_owned(
-            session,
-            job_id=job_id,
-            worker_id=WORKER_A,
-            user_id="user_1",
-            installation_id=installation_id,
-            lease_lost=threading.Event(),
+    with pytest.raises(IngestionCancelledError, match="Nobody eligible"):
+        _guard(pg_engine_clean, job_id, installation_id)
+
+
+def test_ingestion_guard_fails_when_only_waiting_user_cancels(pg_engine_clean):
+    with Session(pg_engine_clean) as session:
+        shared = _running_shared_ingest(session)
+        waiting = _insert_waiting_row(session, shared, installation_id=101)
+
+    _guard(pg_engine_clean, shared.id, 101)
+
+    with Session(pg_engine_clean) as session:
+        assert cancel_job(session, waiting.id)
+
+    with pytest.raises(IngestionCancelledError, match="Nobody eligible"):
+        _guard(pg_engine_clean, shared.id, 101)
+
+
+def test_ingestion_guard_passes_when_teammate_on_installation_is_waiting(
+    pg_engine_clean,
+):
+    with Session(pg_engine_clean) as session:
+        shared = _running_shared_ingest(session)
+        _insert_waiting_row(session, shared, userId="sponsor", installation_id=101)
+        _insert_waiting_row(session, shared, userId="teammate", installation_id=101)
+
+    # The sponsor revokes: their connection and their rows go away.
+    with Session(pg_engine_clean) as session:
+        session.execute(
+            text('DELETE FROM githubconnections WHERE "userId" = :user_id'),
+            {"user_id": "sponsor"},
         )
+        release_user_jobs(
+            session, {"sponsor"}, error="revoked", dispose="cancel"
+        )
+        session.commit()
+
+    _guard(pg_engine_clean, shared.id, 101)
 
 
-def test_ingestion_guard_rejects_inactive_owner_when_teammate_is_active(
+def test_ingestion_guard_rejects_inactive_sponsor_when_teammate_is_not_waiting(
     pg_engine_clean,
 ):
     installation_id = uuid.uuid4().int % 2_000_000_000
     with Session(pg_engine_clean) as session:
-        job = _insert_job(
+        shared = _running_shared_ingest(session)
+        _insert_waiting_row(
             session,
-            userId="inactive_owner",
+            shared,
+            userId="inactive_sponsor",
             installation_id=installation_id,
-            status=JobStatus.RUNNING,
-            claimed_at=dt.datetime.now(dt.timezone.utc),
-            claimed_by=WORKER_A,
         )
-        owner_connection = session.exec(
-            select(GithubConnections).where(
-                GithubConnections.userId == "inactive_owner"
-            )
-        ).one()
-        owner_connection.active = False
-        session.add(owner_connection)
-        session.add(
-            GithubConnections(
-                userId="active_teammate",
-                githubUsername="teammate",
-                githubUserId=installation_id + 1,
-                installationId=installation_id,
-            )
-        )
-        session.commit()
+        _deactivate_user(session, "inactive_sponsor")
+        # Active on the same installation, but not waiting on this ingest.
+        _add_connection(session, "active_teammate", installation_id)
 
-    with (
-        Session(pg_engine_clean) as session,
-        pytest.raises(IngestionCancelledError, match="no longer active"),
-    ):
-        _ensure_ingestion_owned(
-            session,
-            job_id=job.id,
-            worker_id=WORKER_A,
-            user_id="inactive_owner",
-            installation_id=installation_id,
-            lease_lost=threading.Event(),
-        )
+    with pytest.raises(IngestionCancelledError, match="Nobody eligible"):
+        _guard(pg_engine_clean, shared.id, installation_id)
 
 
 # ── E. Happy-path DB-queue handoff ──────────────────────────────────
