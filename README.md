@@ -229,8 +229,10 @@ at `http://127.0.0.1:3000` or another origin, add that exact value to the backen
 - GitHub App callback URL: `{NEXT_PUBLIC_APP_URL}/api/github/authorize`
 - GitHub App setup URL: `{NEXT_PUBLIC_APP_URL}/api/github/setup` with **Redirect on
   update** enabled
-- GitHub App webhook URL: `{public-backend-origin}/webhooks/github`, subscribed to
-  installation events so delete, suspend, and unsuspend lifecycle updates are delivered
+- GitHub App webhook URL: `{public-backend-origin}/webhooks/github`, with the webhook
+  set to **Active**. No event subscription is needed: GitHub sends every App the
+  `installation` events (delete, suspend, unsuspend) and the
+  `github_app_authorization` event (revoked) that the backend handles
 - Clerk webhook URL: `{public-backend-origin}/webhooks/clerk`, subscribed to
   `user.created`, `user.updated`, and `user.deleted` (the backend syncs local user
   profiles from the first two and runs account cleanup on the third)
@@ -364,7 +366,8 @@ Before the first backend deployment:
   → generate issue brief.
 - [ ] Register `https://<backend>/webhooks/clerk` for Clerk user lifecycle events
   (`user.created`, `user.updated`, `user.deleted`) and
-  `https://<backend>/webhooks/github` for GitHub installation events.
+  `https://<backend>/webhooks/github` for GitHub installation and
+  authorization-revoked events.
 
 ### Pre-deployment checklist: security & operations
 
