@@ -312,6 +312,35 @@ def _sponsor_installations(session: Session, job_id: int) -> list[int]:
     )
 
 
+def _fail_rejected_sponsor_waiters(
+    session: Session,
+    *,
+    job_id: int,
+    installation_id: int,
+    error: str,
+) -> None:
+    """Fail jobs waiting on ``job_id`` under an installation GitHub rejected.
+
+    The rejection says nothing about the repository, so the shared ingest
+    itself goes back to pending instead of failing. Commits.
+    """
+    session.execute(
+        update(Job)
+        .where(
+            Job.blocked_by_job_id == job_id,
+            Job.installation_id == installation_id,
+            Job.status.in_(JobStatus.ACTIVE),
+        )
+        .values(
+            status=JobStatus.FAILED,
+            error=error,
+            claimed_at=None,
+            claimed_by=None,
+        )
+    )
+    session.commit()
+
+
 def recover_stale_jobs(
     session: Session,
     *,
@@ -818,11 +847,34 @@ async def run_job(job_id: int, worker_id: str) -> None:
                         artifact=artifact,
                     )
 
-                sponsors = _sponsor_installations(session, job_id)
-                session.commit()
-                if not sponsors:
-                    raise IngestionCancelledError("Nobody eligible is waiting")
-                for position, sponsor in enumerate(sponsors, start=1):
+                # Re-read sponsors after every rejection so requesters who join
+                # mid-run are tried too. Running out releases the ingest back to
+                # pending, where anyone joining later makes it claimable again.
+                rejections: dict[int, str] = {}
+                while True:
+                    sponsor = next(
+                        (
+                            installation
+                            for installation in _sponsor_installations(
+                                session, job_id
+                            )
+                            if installation not in rejections
+                        ),
+                        None,
+                    )
+                    session.commit()
+                    if sponsor is None:
+                        # Waiters on a rejected installation still share a
+                        # result someone else sponsors, so they only fail here.
+                        for installation, error in rejections.items():
+                            _fail_rejected_sponsor_waiters(
+                                session,
+                                job_id=job_id,
+                                installation_id=installation,
+                                error=error,
+                            )
+                        raise IngestionCancelledError("Nobody eligible is waiting")
+
                     def ensure_ingestion_owned(
                         guard_session: Session,
                         sponsor: int = sponsor,
@@ -845,17 +897,14 @@ async def run_job(job_id: int, worker_id: str) -> None:
                             finalize_publication=finalize_ingestion_publication,
                         )
                         break
-                    except SponsorInstallationInvalidError:
-                        # Every waiting user is on a dead installation only
-                        # when the last candidate fails too.
-                        if position == len(sponsors):
-                            raise
+                    except SponsorInstallationInvalidError as error:
                         logger.warning(
                             "sponsor installation rejected; trying next "
                             "| id=%s installation=%s",
                             job_id,
                             sponsor,
                         )
+                        rejections[sponsor] = str(error)
                 ingestion_completed = True
             else:
                 permanent_error = f"Unsupported job type: {job_type}"

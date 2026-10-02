@@ -22,6 +22,7 @@ from app.worker import (
     JobAuthorizationRevokedError,
     _run_standalone,
     _ensure_ingestion_owned,
+    _fail_rejected_sponsor_waiters,
     _requeue_or_fail,
     _stage_owned_ingestion_completion,
     release_shared_ingest,
@@ -681,6 +682,7 @@ async def test_run_job_tries_next_sponsor_when_installation_is_invalid():
         _patch_sponsors(111, 222),
         patch("app.worker._renew_job_lease", return_value=True),
         patch("app.worker._mark_failed", mark_failed),
+        patch("app.worker._fail_rejected_sponsor_waiters") as fail_waiters,
         patch("app.worker.ingest_repository", side_effect=ingest) as ingest_mock,
     ):
         await run_job(1, WORKER_ID)
@@ -689,20 +691,58 @@ async def test_run_job_tries_next_sponsor_when_installation_is_invalid():
         call.kwargs["installation_id"] for call in ingest_mock.await_args_list
     ] == [111, 222]
     assert guarded_installations == [111, 222]
+    # 111's waiters share the result 222 sponsored.
+    fail_waiters.assert_not_called()
     mark_failed.assert_not_called()
 
 
-async def test_run_job_fails_when_every_sponsor_installation_is_invalid():
+async def test_run_job_tries_sponsor_who_joined_after_the_others_were_rejected():
+    job = _shared_ingest_job()
+    session = MagicMock()
+    session.get.return_value = job
+    result = {"chunks_inserted": 12, "embeddings_created": 12}
+    mark_failed = MagicMock(return_value=True)
+    # 111 is rejected; 222 joins while 111 is being tried.
+    sponsor_reads = iter([[111], [111, 222]])
+
+    async def ingest(_session, *, installation_id, **_kwargs):
+        if installation_id == 111:
+            raise SponsorInstallationInvalidError(INVALID_CONNECTION_MESSAGE)
+        return result
+
+    with (
+        _patch_session(session),
+        patch(
+            "app.worker._sponsor_installations",
+            side_effect=lambda *_args: next(sponsor_reads),
+        ),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._mark_failed", mark_failed),
+        patch("app.worker._fail_rejected_sponsor_waiters"),
+        patch("app.worker.ingest_repository", side_effect=ingest) as ingest_mock,
+    ):
+        await run_job(1, WORKER_ID)
+
+    assert [
+        call.kwargs["installation_id"] for call in ingest_mock.await_args_list
+    ] == [111, 222]
+    mark_failed.assert_not_called()
+
+
+async def test_run_job_releases_shared_ingest_when_every_sponsor_is_rejected():
     job = _shared_ingest_job()
     session = MagicMock()
     session.get.return_value = job
     mark_failed = MagicMock(return_value=True)
+    release = MagicMock(return_value=True)
 
     with (
         _patch_session(session),
         _patch_sponsors(111, 222),
         patch("app.worker._renew_job_lease", return_value=True),
         patch("app.worker._mark_failed", mark_failed),
+        patch("app.worker.release_shared_ingest", release),
+        patch("app.worker._fail_rejected_sponsor_waiters") as fail_waiters,
         patch(
             "app.worker.ingest_repository",
             new_callable=AsyncMock,
@@ -712,12 +752,37 @@ async def test_run_job_fails_when_every_sponsor_installation_is_invalid():
         await run_job(1, WORKER_ID)
 
     assert ingest.await_count == 2
-    mark_failed.assert_called_once_with(
+    assert [call.kwargs for call in fail_waiters.call_args_list] == [
+        {"job_id": 1, "installation_id": 111, "error": INVALID_CONNECTION_MESSAGE},
+        {"job_id": 1, "installation_id": 222, "error": INVALID_CONNECTION_MESSAGE},
+    ]
+    # The shared ingest never fails over an installation; it goes back to
+    # pending so a later requester can still sponsor it.
+    mark_failed.assert_not_called()
+    release.assert_called_once_with(session, 1, WORKER_ID)
+
+
+def test_fail_rejected_sponsor_waiters_targets_only_that_installation():
+    session = MagicMock()
+
+    _fail_rejected_sponsor_waiters(
         session,
-        1,
-        WORKER_ID,
-        INVALID_CONNECTION_MESSAGE,
+        job_id=1,
+        installation_id=111,
+        error=INVALID_CONNECTION_MESSAGE,
     )
+
+    statement = session.execute.call_args.args[0]
+    compiled = str(statement.compile(compile_kwargs={"literal_binds": False}))
+    assert "jobs.blocked_by_job_id = :blocked_by_job_id_1" in compiled
+    assert "jobs.installation_id = :installation_id_1" in compiled
+    assert "jobs.status IN" in compiled
+    params = statement.compile().params
+    assert params["blocked_by_job_id_1"] == 1
+    assert params["installation_id_1"] == 111
+    assert params["status"] == JobStatus.FAILED
+    assert params["error"] == INVALID_CONNECTION_MESSAGE
+    session.commit.assert_called_once()
 
 
 async def test_run_job_releases_shared_ingest_nobody_eligible_is_waiting_on():

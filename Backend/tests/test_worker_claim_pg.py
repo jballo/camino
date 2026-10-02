@@ -1174,29 +1174,83 @@ async def test_dead_sponsor_installation_falls_back_to_next_waiting_user(
         assert row.artifact == result
 
 
-async def test_shared_ingest_fails_only_when_every_sponsor_is_rejected(
+async def test_sponsor_joining_after_others_are_rejected_is_tried(
     pg_engine_clean,
 ):
+    result = {"chunks_inserted": 3, "embeddings_created": 3}
     _connect_users(pg_engine_clean, ("first", 101), ("second", 202))
+    first_id, shared_id = _request_ingest(pg_engine_clean, "first", 101)
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) == shared_id
+
+    calls: list[int] = []
+    joined: list[tuple[int, int]] = []
+    sponsor_ingest = _fake_ingest(result, calls, rejected=frozenset({101}))
+
+    async def fake_ingest(session, *, installation_id, **kwargs):
+        # "second" joins after the sponsor list was read and while the only
+        # listed installation is being rejected.
+        if installation_id == 101:
+            joined.append(_request_ingest(pg_engine_clean, "second", 202))
+        return await sponsor_ingest(
+            session, installation_id=installation_id, **kwargs
+        )
+
+    await _run_with_ingest(pg_engine_clean, shared_id, fake_ingest)
+
+    (second_id, joined_shared_id), = joined
+    assert joined_shared_id == shared_id
+    assert calls == [101, 202]
+    assert _reload(pg_engine_clean, shared_id).status == JobStatus.COMPLETE
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) is None
+    for waiting_id in (first_id, second_id):
+        row = _reload(pg_engine_clean, waiting_id)
+        assert row.status == JobStatus.COMPLETE
+        assert row.artifact == result
+
+
+async def test_shared_ingest_is_released_when_every_sponsor_is_rejected(
+    pg_engine_clean,
+):
+    result = {"chunks_inserted": 4, "embeddings_created": 4}
+    _connect_users(
+        pg_engine_clean, ("first", 101), ("second", 202), ("third", 303)
+    )
     first_id, shared_id = _request_ingest(pg_engine_clean, "first", 101)
     second_id, _ = _request_ingest(pg_engine_clean, "second", 202)
     with Session(pg_engine_clean) as session:
         assert claim_next_job(session, WORKER_A) == shared_id
 
     calls: list[int] = []
-    fake = _fake_ingest({}, calls, rejected=frozenset({101, 202}))
+    fake = _fake_ingest(result, calls, rejected=frozenset({101, 202}))
     await _run_with_ingest(pg_engine_clean, shared_id, fake)
 
     assert calls == [101, 202]
-    failed = _reload(pg_engine_clean, shared_id)
-    assert failed.status == JobStatus.FAILED
-    assert failed.error == "installation 202 is gone"
-    with Session(pg_engine_clean) as session:
-        assert claim_next_job(session, WORKER_A) is None
-    for waiting_id in (first_id, second_id):
+    released = _reload(pg_engine_clean, shared_id)
+    assert released.status == JobStatus.PENDING
+    assert released.attempts == 0
+    for waiting_id, installation_id in ((first_id, 101), (second_id, 202)):
         row = _reload(pg_engine_clean, waiting_id)
         assert row.status == JobStatus.FAILED
-        assert row.error == "ingest failed: installation 202 is gone"
+        assert row.error == f"installation {installation_id} is gone"
+    # Idle until someone eligible waits, not spinning on the dead waiters.
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) is None
+
+    third_id, third_shared_id = _request_ingest(pg_engine_clean, "third", 303)
+    assert third_shared_id == shared_id
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) == shared_id
+    await _run_with_ingest(pg_engine_clean, shared_id, fake)
+
+    assert calls == [101, 202, 303]
+    assert _reload(pg_engine_clean, shared_id).status == JobStatus.COMPLETE
+    with Session(pg_engine_clean) as session:
+        assert claim_next_job(session, WORKER_A) is None
+    third = _reload(pg_engine_clean, third_id)
+    assert third.status == JobStatus.COMPLETE
+    assert third.artifact == result
 
 
 def test_parking_preserves_retry_budget_and_created_at(pg_engine_clean):
