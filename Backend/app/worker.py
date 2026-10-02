@@ -400,6 +400,10 @@ def _ensure_ingestion_owned(
     The shared ingest may only save while an eligible job is still waiting on
     it under ``installation_id``. Locking those connection rows makes a
     removal either commit before the save, failing this check, or wait for it.
+
+    A user cancel is deliberately not ordered this way: it can land between
+    this check and the save, and the run then stops at the next save point
+    (#72).
     """
     if lease_lost.is_set():
         raise IngestionCancelledError("Ingestion job lease was lost")
