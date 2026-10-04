@@ -8,6 +8,9 @@ generated `psql` command, once via `docker compose config` rendering the
 resolved environment. Treat every tool argument and every line of terminal
 output as permanently recorded.
 
+These rules apply regardless of how secrets are injected in your environment
+(env files, a secrets manager CLI, exported variables, or anything else).
+
 - Never read, display, summarize, or modify a real `.env` file (any
   `.env`/`.env.*` except `.env.example`, `.env.sample`, `.env.template`).
 - Never read private-key or credential files (`*.pem`, `*.key`, `*.p12`,
@@ -35,3 +38,10 @@ output as permanently recorded.
 - Never bypass a filesystem denial or a blocked command to complete a task.
 - If a secret does appear in any tool input/output, disclose it to the user
   immediately and prominently, with rotation steps.
+
+## Local overlay
+
+Environment-specific guidance (which secrets manager is in use, what agents
+may run against which environment) may exist in an untracked `AGENTS.local.md`
+next to this file. If present, read it too; it supplements these rules and
+never relaxes the section above.

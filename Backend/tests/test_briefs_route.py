@@ -188,8 +188,12 @@ def test_cold_start_wires_brief_to_ingestion_dependency():
             return_value=(fork_preview, 123),
         ),
         patch(
+            "app.api.briefs.enqueue_shared_ingest",
+            return_value=(ingest, ingest, True),
+        ) as enqueue_ingest,
+        patch(
             "app.api.briefs.enqueue_job",
-            side_effect=[(ingest, True), (brief_job, True)],
+            return_value=(brief_job, True),
         ) as enqueue,
     ):
         response = client.post(
@@ -201,12 +205,47 @@ def test_cold_start_wires_brief_to_ingestion_dependency():
         )
     assert response.status_code == 200
     assert response.json() == {"id": 8, "status": "pending"}
-    assert enqueue.call_args_list[0].kwargs["job_type"] == JobType.REPOSITORY_INGEST
-    assert enqueue.call_args_list[0].kwargs["repo_name"] == "org/repo"
-    assert enqueue.call_args_list[1].kwargs["job_type"] == JobType.ISSUE_BRIEF
-    assert enqueue.call_args_list[1].kwargs["repo_name"] == "org/repo"
-    assert enqueue.call_args_list[1].kwargs["issue_repo"] == "contributor/repo"
-    assert enqueue.call_args_list[1].kwargs["blocked_by_job_id"] == 7
+    assert enqueue_ingest.call_args.kwargs["repo_name"] == "org/repo"
+    assert enqueue_ingest.call_args.kwargs["waiting_row"] is False
+    assert enqueue.call_args.kwargs["job_type"] == JobType.ISSUE_BRIEF
+    assert enqueue.call_args.kwargs["repo_name"] == "org/repo"
+    assert enqueue.call_args.kwargs["issue_repo"] == "contributor/repo"
+    assert enqueue.call_args.kwargs["blocked_by_job_id"] == 7
+
+
+def test_create_brief_writes_ingest_and_brief_in_one_commit():
+    session = MagicMock()
+    session.exec.return_value.one_or_none.return_value = None
+
+    def custom_session():
+        yield session
+
+    app.dependency_overrides[get_session] = custom_session
+    ingest = MagicMock(id=7, status=JobStatus.PENDING)
+    brief_job = MagicMock(id=8, status=JobStatus.PENDING)
+    with (
+        patch(
+            "app.api.briefs._preview",
+            new_callable=AsyncMock,
+            return_value=(preview(), 123),
+        ),
+        patch(
+            "app.api.briefs.enqueue_shared_ingest",
+            return_value=(ingest, ingest, True),
+        ) as enqueue_ingest,
+        patch(
+            "app.api.briefs.enqueue_job",
+            return_value=(brief_job, True),
+        ) as enqueue,
+    ):
+        response = client.post(
+            "/api/v1/briefs",
+            json={"issueUrl": "https://github.com/org/repo/issues/44"},
+        )
+    assert response.status_code == 200
+    assert enqueue_ingest.call_args.kwargs["commit"] is False
+    assert enqueue.call_args.kwargs["commit"] is False
+    session.commit.assert_called_once_with()
 
 
 def test_get_brief_is_user_scoped_and_reports_refresh_phase():

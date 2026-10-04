@@ -1,4 +1,3 @@
-import datetime as dt
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -18,7 +17,12 @@ from sqlmodel import select
 from app.config import settings
 from app.db import SessionDep
 from app.models.github_connection import GithubConnections
-from app.security import encrypt_token, get_authenticated_user_id
+from app.security import get_authenticated_user_id
+from app.services.installation_state import SUSPENSION_ERROR
+from app.services.shared_ingests import (
+    move_user_jobs_to_installation,
+    release_user_jobs,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -44,7 +48,8 @@ async def get_github_connection(
 ) -> GithubConnectionStatus:
     try:
         statement = select(GithubConnections).where(
-            GithubConnections.userId == auth_user_id
+            GithubConnections.userId == auth_user_id,
+            GithubConnections.active.is_(True),
         )
         connection = session.exec(statement).one_or_none()
     except exc.OperationalError:
@@ -80,11 +85,9 @@ async def add_github_connection(
         github_user = g.get_user()
         username = github_user.login
         github_user_id = github_user.id
-        access_token: str = access_token_obj.token
         expires_in: int | None = access_token_obj.expires_in
         refresh_token: str | None = access_token_obj.refresh_token
         refresh_expires_in: int | None = access_token_obj.refresh_expires_in
-        created_at: dt.datetime = access_token_obj.created
     except BadCredentialsException:
         raise HTTPException(status_code=400, detail="Invalid Github code")
     except RateLimitExceededException:
@@ -93,6 +96,24 @@ async def add_github_connection(
         if e.status in (400, 401, 403):
             raise HTTPException(status_code=400, detail="Invalid Github code")
         raise HTTPException(status_code=502, detail="Github error")
+
+    try:
+        installation = next(
+            (
+                candidate
+                for candidate in github_user.get_installations()
+                if candidate.id == payload.installationId
+            ),
+            None,
+        )
+    except GithubException:
+        raise HTTPException(status_code=502, detail="Github error")
+    if installation is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Installation not accessible to this GitHub user",
+        )
+    installation_is_active = getattr(installation, "suspended_at", None) is None
 
     if (
         refresh_token is None
@@ -106,28 +127,34 @@ async def add_github_connection(
             detail="Github returned a non-expiring or already-expired token. Expected an expiring user-to-server token",
         )
 
-    encrypted_access_token = encrypt_token(access_token)
-    encrypted_refresh_token = encrypt_token(refresh_token)
-
     try:
-        token_expires_at = created_at + dt.timedelta(seconds=expires_in)
-        refresh_token_expires_at = created_at + dt.timedelta(seconds=refresh_expires_in)
-
         existing = session.exec(
-            select(GithubConnections).where(
-                GithubConnections.userId == auth_user_id
-            )
+            select(GithubConnections)
+            .where(GithubConnections.userId == auth_user_id)
+            .with_for_update()
         ).one_or_none()
 
         if existing is not None:
+            previous_installation_id = existing.installationId
             existing.githubUsername = username
             existing.githubUserId = github_user_id
             existing.installationId = payload.installationId
-            existing.encryptedAccessToken = encrypted_access_token
-            existing.encryptedRefreshToken = encrypted_refresh_token
-            existing.tokenExpiresAt = token_expires_at
-            existing.refreshTokenExpiresAt = refresh_token_expires_at
+            existing.active = installation_is_active
             session.add(existing)
+            session.flush()
+            if not installation_is_active:
+                release_user_jobs(
+                    session,
+                    {auth_user_id},
+                    error=SUSPENSION_ERROR,
+                    dispose="cancel",
+                )
+            elif previous_installation_id != payload.installationId:
+                move_user_jobs_to_installation(
+                    session,
+                    user_id=auth_user_id,
+                    installation_id=payload.installationId,
+                )
             session.commit()
             return "Successfully updated github connection"
 
@@ -136,10 +163,7 @@ async def add_github_connection(
             githubUsername=username,
             githubUserId=github_user_id,
             installationId=payload.installationId,
-            encryptedAccessToken=encrypted_access_token,
-            encryptedRefreshToken=encrypted_refresh_token,
-            tokenExpiresAt=token_expires_at,
-            refreshTokenExpiresAt=refresh_token_expires_at,
+            active=installation_is_active,
         )
         session.add(connection)
         session.commit()

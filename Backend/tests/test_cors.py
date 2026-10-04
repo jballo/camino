@@ -15,7 +15,6 @@ REQUIRED_SETTINGS = {
     "gh_app_client_id": "client",
     "gh_app_secret": "secret",
     "gh_app_private_key": "key",
-    "encryption_key": "key",
     "gh_webhook_secret": "secret",
     "openai_api_key": "sk-test",
 }
@@ -40,7 +39,6 @@ def test_cors_origins_accepts_comma_separated_dotenv(tmp_path, monkeypatch):
                 "GH_APP_CLIENT_ID=client",
                 "GH_APP_SECRET=secret",
                 "GH_APP_PRIVATE_KEY=key",
-                "ENCRYPTION_KEY=key",
                 "GH_WEBHOOK_SECRET=secret",
                 "OPENAI_API_KEY=sk-test",
                 "CORS_ORIGINS=http://localhost:3000, https://app.example.com",
