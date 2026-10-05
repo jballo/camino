@@ -2,6 +2,7 @@
 
 import { Button, Input } from "@headlessui/react";
 import { useAuth } from "@clerk/nextjs";
+import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
   ExternalLink,
@@ -64,9 +65,16 @@ function briefListErrorMessage(caught: unknown) {
     : "We couldn't load your briefs. Check your connection and try again.";
 }
 
-export default function BriefWorkbench() {
-  const { getToken } = useAuth();
-  const [issueUrl, setIssueUrl] = useState("");
+export default function BriefWorkbench({
+  initialIssueUrl,
+}: {
+  /** Already validated by parseIssueUrl; previewed once, never generated. */
+  initialIssueUrl?: string;
+}) {
+  const { getToken, isLoaded, isSignedIn } = useAuth();
+  const router = useRouter();
+  const [issueUrl, setIssueUrl] = useState(initialIssueUrl ?? "");
+  const handoffDoneRef = useRef(false);
   const [preview, setPreview] = useState<BriefPreview>();
   const [branch, setBranch] = useState("");
   const [loading, setLoading] = useState(false);
@@ -175,13 +183,24 @@ export default function BriefWorkbench() {
     ["pending", "running", "generating"].includes(brief.status),
   ).length;
 
-  async function inspectIssue() {
-    if (!issueUrl.trim()) return;
+  // Handoff from the landing page: preview the pasted issue once, then drop
+  // the query so a refresh does not repeat it.
+  useEffect(() => {
+    if (!initialIssueUrl || handoffDoneRef.current || !isLoaded || !isSignedIn) return;
+    handoffDoneRef.current = true;
+    router.replace("/briefs", { scroll: false });
+    void inspectIssue(initialIssueUrl);
+    // inspectIssue is recreated every render; the ref makes this run once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialIssueUrl, isLoaded, isSignedIn, router]);
+
+  async function inspectIssue(url = issueUrl) {
+    if (!url.trim()) return;
     setLoading(true);
     setError(undefined);
     setPreview(undefined);
     try {
-      const result = await previewIssueBrief(issueUrl.trim(), getToken);
+      const result = await previewIssueBrief(url.trim(), getToken);
       setPreview(result);
       setBranch(result.targetBranch.branch ?? "");
     } catch (caught) {
@@ -328,7 +347,7 @@ export default function BriefWorkbench() {
               className="field-control min-h-[42.25px] min-w-0 flex-1 px-[14px] font-mono text-[11.25px] placeholder:text-muted-foreground"
             />
             <Button
-              onClick={inspectIssue}
+              onClick={() => void inspectIssue()}
               disabled={loading || !issueUrl.trim()}
               className="button-primary min-h-[42.25px] w-full shrink-0 px-0 tracking-[.09em] sm:w-[143px]"
             >
