@@ -1,5 +1,5 @@
-import { redirect } from "next/navigation";
+import BriefWorkbench from "@/components/brief-workbench";
 
-export default function BriefsRedirect() {
-  redirect("/");
+export default function BriefsPage() {
+  return <BriefWorkbench />;
 }

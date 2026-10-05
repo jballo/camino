@@ -23,7 +23,7 @@ function safeRedirect(value: string | string[] | undefined): string {
   const raw = Array.isArray(value) ? value[0] : value;
   // Only allow same-origin relative paths to avoid open redirects.
   if (raw && raw.startsWith("/") && !raw.startsWith("//")) return raw;
-  return "/";
+  return "/briefs";
 }
 
 export default async function Page({
