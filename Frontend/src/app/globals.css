@@ -30,6 +30,8 @@
   --rail: rgb(223 144 88 / .6);
   --rail-tie: rgb(223 144 88 / .33);
   --rail-dim: rgb(223 144 88 / .5);
+  --faint: #5d5d62;
+  --dash: #2e3033;
   --radius: .625rem;
 }
 
@@ -38,7 +40,7 @@
   --color-popover: var(--popover); --color-popover-foreground: var(--popover-foreground); --color-primary: var(--primary); --color-primary-foreground: var(--primary-foreground);
   --color-secondary: var(--secondary); --color-secondary-foreground: var(--secondary-foreground); --color-muted: var(--muted); --color-muted-foreground: var(--muted-foreground);
   --color-accent: var(--accent); --color-accent-foreground: var(--accent-foreground); --color-destructive: var(--destructive); --color-destructive-foreground: var(--destructive-foreground);
-  --color-border: var(--border); --color-input: var(--input); --color-ring: var(--ring); --color-brand-accent: var(--brand-accent); --color-warning: var(--warning); --color-success: var(--success); --color-tile: var(--tile); --color-tile-border: var(--tile-border); --color-rail: var(--rail); --color-rail-dim: var(--rail-dim);
+  --color-border: var(--border); --color-input: var(--input); --color-ring: var(--ring); --color-brand-accent: var(--brand-accent); --color-warning: var(--warning); --color-success: var(--success); --color-tile: var(--tile); --color-tile-border: var(--tile-border); --color-rail: var(--rail); --color-rail-dim: var(--rail-dim); --color-faint: var(--faint); --color-dash: var(--dash);
   --font-sans: var(--font-sans); --font-mono: var(--font-mono); --font-display: var(--font-display); --font-shade: var(--font-shade);
   --radius-sm: calc(var(--radius) - 4px); --radius-md: calc(var(--radius) - 2px); --radius-lg: var(--radius); --radius-xl: calc(var(--radius) + 4px);
 }
@@ -72,5 +74,7 @@
 }
 
 @keyframes pulse-dot { 50% { opacity: .35; } }
+@keyframes llama-bob { 50% { transform: translateY(-2px); } }
+.llama-bob { animation: llama-bob 1.2s steps(2) infinite; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }
 ::-webkit-scrollbar { width: 5px; } ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; } ::-webkit-scrollbar-thumb:hover { background: var(--primary); }

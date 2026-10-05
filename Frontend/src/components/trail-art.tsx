@@ -47,6 +47,17 @@ const WEAVE = [
   "##......",
 ];
 
+const FLAG = [
+  "#.......",
+  "#####...",
+  "######..",
+  "#####...",
+  "#.......",
+  "#.......",
+  "#.......",
+  "#.......",
+];
+
 function Sprite({
   rows,
   size,
@@ -91,6 +102,10 @@ export function Llama({
   style?: CSSProperties;
 }) {
   return <Sprite rows={LLAMA} size={size} className={className} style={style} />;
+}
+
+export function Flag({ size, className }: { size: number; className?: string }) {
+  return <Sprite rows={FLAG} size={size} className={className} />;
 }
 
 /** Stepped-cross outline used as the eyebrow mark. */
@@ -240,16 +255,19 @@ const RAIL_LLAMAS = [
   { left: 813.5, size: 42, className: "text-brand-accent" },
 ];
 
-/** A caravan of llamas walking a railway track. */
-export function LlamaTrail({ className }: { className?: string }) {
+/** A caravan of llamas walking a railway track. `bob` makes them step in place. */
+export function LlamaTrail({ className, bob = false }: { className?: string; bob?: boolean }) {
   return (
     <div aria-hidden="true" className={`relative h-[61.5px] ${className ?? ""}`}>
-      {RAIL_LLAMAS.map((llama) => (
+      {RAIL_LLAMAS.map((llama, index) => (
         <Llama
           key={llama.left}
           size={llama.size}
-          className={`absolute bottom-[20px] ${llama.className}`}
-          style={{ left: `${(llama.left / 948) * 100}%` }}
+          className={`absolute bottom-[20px] ${llama.className} ${bob ? "llama-bob" : ""}`}
+          style={{
+            left: `${(llama.left / 948) * 100}%`,
+            animationDelay: bob && index % 2 ? "0.6s" : undefined,
+          }}
         />
       ))}
       <div
