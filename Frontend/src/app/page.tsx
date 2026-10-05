@@ -4,16 +4,15 @@ import { Button, Input } from "@headlessui/react";
 import { useAuth } from "@clerk/nextjs";
 import {
   AlertTriangle,
-  BookOpen,
   ExternalLink,
-  Link as LinkIcon,
   Loader2,
-  RefreshCw,
+  RotateCw,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import BriefPane from "@/components/brief-pane";
 import BriefRail from "@/components/brief-rail";
+import { ChakanaMark, LlamaTrail, Scribble, TileCluster } from "@/components/trail-art";
 import { ApiError } from "@/lib/api";
 import {
   cancelIssueBrief,
@@ -27,6 +26,24 @@ import {
 import type { BriefPreview, BriefResponse, BriefSummary } from "@/types/brief";
 
 const TERMINAL_STATUSES = new Set(["complete", "failed", "cancelled"]);
+
+const STEPS = [
+  {
+    number: "02",
+    title: "Contribution signals",
+    body: "Checked before anything is generated.",
+  },
+  {
+    number: "03",
+    title: "The right branch",
+    body: "Camino finds the branch to work from.",
+  },
+  {
+    number: "04",
+    title: "Implementation brief",
+    body: "A grounded brief, generated from the repository.",
+  },
+] as const;
 
 function createErrorMessage(caught: unknown, fallback: string) {
   if (caught instanceof ApiError && caught.status === 429) {
@@ -257,32 +274,48 @@ export default function Home() {
   }
 
   return (
-    <div className="page-shell max-w-[1180px] gap-8">
-      <header className="flex flex-col items-center gap-3 text-center">
-        <div className="flex items-center gap-3">
-          <BookOpen aria-hidden="true" className="size-5 text-brand-accent" />
+    <div className="mx-auto flex w-full max-w-[1080px] flex-col px-5 pb-32 pt-10 sm:px-8 lg:px-[66px] lg:pt-[42.25px]">
+      <header className="relative">
+        <div className="flex items-center gap-[9px]">
+          <ChakanaMark className="shrink-0 text-brand-accent" />
           <span className="eyebrow">Open-source contribution helper</span>
         </div>
-        <h1 className="display-title text-5xl font-black sm:text-7xl">
-          Solve your first issue<span className="text-brand-accent">.</span>
+        <h1 className="mt-[17.75px] font-shade text-[clamp(36px,8.2vw,88.5px)] uppercase leading-[1.04] tracking-[.01em] text-foreground">
+          <span className="block">Solve</span>
+          <span className="block">your first</span>
+          <span className="block text-brand-accent">issue</span>
         </h1>
-        <p className="max-w-2xl text-base text-muted-foreground">
+        <Scribble className="text-foreground" />
+        <p className="mt-[17.5px] max-w-[480px] text-[13.5px] leading-[20.25px] text-muted-foreground">
           Paste a GitHub issue. Camino checks contribution signals, finds the
           right branch, and generates a grounded implementation brief.
         </p>
+        <TileCluster className="absolute right-0 top-0 hidden size-0 lg:block" />
       </header>
 
-      <section className="console" aria-label="New brief">
-        <div className="console-bar gap-4">
-          <span>
-            <span className="text-brand-accent">01</span> · Paste a GitHub issue URL
+      <LlamaTrail className="mt-[40px]" />
+
+      <div className="mt-[39px] grid grid-cols-1 items-center gap-10 lg:grid-cols-[minmax(0,1fr)_319px] lg:gap-[45.5px]">
+        <section
+          className="relative rounded-[12px_14px_16px_12px] border-2 border-brand-accent bg-card"
+          aria-labelledby="new-brief-heading"
+        >
+          <span
+            aria-hidden="true"
+            className="absolute -left-[14px] -top-[15.75px] flex size-[36px] items-center justify-center rounded-full bg-brand-accent font-display text-[11.5px] text-background"
+          >
+            <span className="-rotate-[8deg]">01</span>
           </span>
-          <span className="hidden sm:inline">Any public repository</span>
-        </div>
-        <div className="flex flex-col items-stretch gap-3 p-5 min-[900px]:flex-row min-[900px]:items-center">
-          <label className="field-control flex min-w-0 flex-1 items-center gap-3">
-            <span className="sr-only">GitHub issue URL</span>
-            <LinkIcon aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
+          <div className="flex h-[47px] items-center justify-between gap-4 border-b border-border pl-[46px] pr-[24px]">
+            <h2 id="new-brief-heading" className="font-display text-[11.5px] uppercase tracking-[.045em]">
+              Paste a GitHub issue URL
+            </h2>
+            <span className="eyebrow hidden tracking-[.18em] sm:inline">Any public repository</span>
+          </div>
+          <div className="flex flex-col items-stretch gap-[9px] px-6 pt-[15.25px] sm:flex-row sm:items-center">
+            <label htmlFor="issue-url" className="sr-only">
+              GitHub issue URL
+            </label>
             <Input
               id="issue-url"
               type="url"
@@ -292,34 +325,59 @@ export default function Home() {
                 if (event.key === "Enter") void inspectIssue();
               }}
               placeholder="https://github.com/owner/repo/issues/123"
-              className="min-w-0 flex-1 bg-transparent font-mono text-sm outline-none placeholder:text-muted-foreground"
+              className="field-control min-h-[42.25px] min-w-0 flex-1 px-[14px] font-mono text-[11.25px] placeholder:text-muted-foreground"
             />
-          </label>
-          <Button
-            onClick={inspectIssue}
-            disabled={loading || !issueUrl.trim()}
-            className="button-primary shrink-0"
-          >
-            {loading && <Loader2 aria-hidden="true" className="size-4 animate-spin" />}
-            Preview issue
-          </Button>
-        </div>
-        <p className="px-5 pb-4 font-mono text-[11px] text-muted-foreground">
-          Preflight checks run before anything is generated.
-        </p>
-        {error && <p className="border-t border-border px-5 py-3 text-sm text-destructive">{error}</p>}
-      </section>
+            <Button
+              onClick={inspectIssue}
+              disabled={loading || !issueUrl.trim()}
+              className="button-primary min-h-[42.25px] w-full shrink-0 px-0 tracking-[.09em] sm:w-[143px]"
+            >
+              {loading && <Loader2 aria-hidden="true" className="size-4 animate-spin" />}
+              Preview issue
+            </Button>
+          </div>
+          <p className="px-6 pb-[18.25px] pt-[9.75px] font-mono text-[9px] text-muted-foreground">
+            Preflight checks run before anything is generated.
+          </p>
+          {error && (
+            <p role="alert" className="border-t border-border px-6 py-3 text-sm text-destructive">
+              {error}
+            </p>
+          )}
+        </section>
+
+        <ol className="relative flex flex-col gap-[23px] pb-[5px] pt-[10px]" aria-label="What happens next">
+          <span aria-hidden="true" className="absolute bottom-[2px] left-[11px] top-[5px] w-[12.5px] border-x-2 border-rail-dim" />
+          {STEPS.map((step, index) => (
+            <li key={step.number} className="relative flex items-center gap-[19.75px]">
+              {index > 0 && (
+                <span aria-hidden="true" className="absolute -top-[13px] left-[11px] h-[1.5px] w-[12.5px] bg-rail-dim" />
+              )}
+              <span
+                aria-hidden="true"
+                className="relative flex size-[35px] shrink-0 items-center justify-center rounded-full border-[2.25px] border-rail-dim bg-background font-display text-[12.5px] text-brand-accent"
+              >
+                {step.number}
+              </span>
+              <div className="flex flex-col gap-[4px]">
+                <h3 className="font-display text-[11.9px] uppercase leading-[15px]">{step.title}</h3>
+                <p className="text-[11.25px] leading-[15.5px] text-muted-foreground">{step.body}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
+      </div>
 
       {preview && (
-        <section className="console flex flex-col gap-5 p-6">
+        <section className="console mt-10 flex flex-col gap-5 p-6" aria-label="Issue preview">
           <div className="flex flex-col gap-2">
-            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+            <div className="eyebrow">
               {preview.issueRepo} · issue #{preview.issueNumber} · {preview.state}
             </div>
-            <h2 className="text-2xl font-semibold">{preview.title}</h2>
+            <h2 className="text-2xl font-medium">{preview.title}</h2>
             <div className="flex flex-wrap gap-2">
               {preview.labels.map((label) => (
-                <span key={label} className="rounded-full bg-accent px-2 py-1 text-xs">
+                <span key={label} className="rounded-[4px] border border-input px-2 py-1 font-mono text-[11px]">
                   {label}
                 </span>
               ))}
@@ -330,7 +388,7 @@ export default function Home() {
             <div className="flex flex-wrap gap-2">
               {preview.warnings.map((warning, index) => {
                 const chip = (
-                  <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-300">
+                  <span className="inline-flex items-center gap-1.5 rounded-[4px] border border-dashed border-warning/50 px-3 py-1.5 text-xs text-warning">
                     <AlertTriangle aria-hidden="true" className="size-3.5" />
                     {warning.message}
                     {warning.url && <ExternalLink aria-hidden="true" className="size-3" />}
@@ -352,8 +410,8 @@ export default function Home() {
             </div>
           )}
 
-          <div className="rounded-xl bg-muted p-4">
-            <label htmlFor="target-branch" className="text-sm font-medium">
+          <div className="rounded-[10px] border border-border bg-background/60 p-4">
+            <label htmlFor="target-branch" className="font-display text-[11.5px] uppercase">
               PRs to this project target
             </label>
             <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -390,8 +448,8 @@ export default function Home() {
         </section>
       )}
 
-      <section className="flex flex-col gap-3" aria-labelledby="briefs-heading">
-        <div className="flex flex-wrap items-baseline justify-between gap-2 px-0.5">
+      <section className="mt-[34.75px] flex flex-col gap-[9.25px]" aria-labelledby="briefs-heading">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 id="briefs-heading" className="eyebrow">
             Your briefs — {String(briefs.length).padStart(2, "0")}
           </h2>
@@ -448,19 +506,20 @@ function BriefListError({
   onRetry: () => void;
 }) {
   return (
-    <div className="console console-cell flex min-h-32 flex-col items-start justify-center gap-4 sm:flex-row sm:items-center sm:justify-between">
-      <div role="alert" className="flex items-start gap-3">
+    <div className="flex min-h-[86.25px] flex-col items-start justify-center gap-4 border-[1.5px] border-dashed border-[#2e3033] bg-card px-[22px] pb-[18px] pt-[14px] sm:flex-row sm:items-center sm:justify-between">
+      <div role="alert" className="flex items-start gap-[13px]">
         <AlertTriangle
           aria-hidden="true"
-          className="mt-0.5 size-5 shrink-0 text-destructive"
+          strokeWidth={2.25}
+          className="mt-[1px] size-[15px] shrink-0 text-destructive"
         />
-        <div className="flex flex-col gap-1">
-          <p className="text-sm font-medium">Your briefs are unavailable</p>
-          <p className="max-w-2xl text-sm text-muted-foreground">{message}</p>
+        <div className="flex flex-col gap-[5px]">
+          <p className="text-[12.8px] font-medium leading-[16px]">Your briefs are unavailable</p>
+          <p className="max-w-2xl text-[12px] leading-[16px] text-muted-foreground">{message}</p>
         </div>
       </div>
-      <Button onClick={onRetry} className="button-ghost shrink-0">
-        <RefreshCw aria-hidden="true" className="size-4" />
+      <Button onClick={onRetry} className="button-ghost h-[36.25px] w-[92px] shrink-0 gap-[6px] px-0 sm:mt-[6px]">
+        <RotateCw aria-hidden="true" strokeWidth={2.25} className="size-[12px]" />
         Retry
       </Button>
     </div>
