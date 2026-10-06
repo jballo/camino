@@ -4,6 +4,7 @@ import { Fragment, type ReactNode } from "react";
 import {
   SAMPLE_BRANCH,
   SAMPLE_BRANCH_EVIDENCE,
+  SAMPLE_DEFAULT_BRANCH,
   SAMPLE_BRIEF,
   SAMPLE_CHECKED_ON,
   SAMPLE_ISSUE_URL,
@@ -90,54 +91,25 @@ function Code({ children }: { children: ReactNode }) {
 
 function SignalsArt() {
   return (
-    <div className="overflow-hidden rounded-[12px] border border-border bg-card">
-      {SAMPLE_SIGNALS.map((issue) => (
-        <div key={issue.number} className="flex flex-col gap-2.5 border-b border-border px-5 py-4">
-          <div className="flex items-start justify-between gap-3">
-            <p className="text-[13px] leading-[18px]">
-              <span className="mr-1.5 font-mono text-[11px] text-muted-foreground">
-                #{issue.number}
-              </span>
-              {issue.title}
-            </p>
-            <span
-              className={`shrink-0 rounded-[4px] border px-2 py-0.5 font-mono text-[9.5px] uppercase tracking-[.14em] ${
-                issue.verdict === "taken"
-                  ? "border-warning/50 text-warning"
-                  : "border-success/50 text-success"
-              }`}
-            >
-              {issue.verdict === "taken" ? "Taken" : "Up for grabs"}
-            </span>
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {issue.labels.map((label) => (
-              <span
-                key={label}
-                className="rounded-[4px] border border-input px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
-              >
-                {label}
-              </span>
-            ))}
-          </div>
-          {issue.warnings.length > 0 ? (
-            <ul className="flex flex-col gap-1.5">
-              {issue.warnings.map((warning) => (
-                <li key={warning} className="flex gap-2 font-mono text-[10.5px] leading-[15px] text-warning">
-                  <span aria-hidden="true">▲</span>
-                  {warning}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="flex gap-2 font-mono text-[10.5px] text-success">
-              <span aria-hidden="true">●</span>No warnings
-            </p>
-          )}
-        </div>
-      ))}
-      <p className="px-5 py-3 font-mono text-[10px] text-muted-foreground">
-        First pick was taken. The second was up for grabs.
+    <div className="rounded-[12px] border border-border bg-card px-5 py-[18px]">
+      <span className="eyebrow">
+        {SAMPLE_REPO} · issue #{SAMPLE_SIGNALS.number} · {SAMPLE_SIGNALS.state}
+      </span>
+      <h3 className="mt-2 text-[15px] font-medium">{SAMPLE_SIGNALS.title}</h3>
+      <ul className="mt-3 flex flex-col gap-1.5">
+        {SAMPLE_SIGNALS.warnings.map((warning) => (
+          <li
+            key={warning}
+            className="flex w-fit gap-2 rounded-[4px] border border-dashed border-warning/50 px-3 py-1.5 font-mono text-[10.5px] leading-[15px] text-warning"
+          >
+            <span aria-hidden="true">▲</span>
+            {warning}
+          </li>
+        ))}
+      </ul>
+      <p className="mt-3 text-[12px] leading-[17px] text-muted-foreground">
+        Someone is already on it — in this case the maintainer. A good moment to pick another
+        issue, before any work is done.
       </p>
     </div>
   );
@@ -147,10 +119,14 @@ function BranchArt() {
   return (
     <div className="rounded-[12px] border border-border bg-card px-5 py-[18px]">
       <span className="eyebrow">PRs to this project target</span>
-      <p className="mt-3 border-l-2 border-brand-accent pl-3.5 font-mono text-[13px] leading-[20px] text-brand-accent [overflow-wrap:anywhere]">
-        <Breakable text={SAMPLE_BRANCH} />
+      <p className="mt-3 border-l-2 border-brand-accent pl-3.5 font-mono text-[13px] leading-[20px] text-brand-accent">
+        {SAMPLE_BRANCH}
       </p>
       <p className="mt-3 text-[12px] text-muted-foreground">{SAMPLE_BRANCH_EVIDENCE}</p>
+      <p className="mt-1.5 text-[12px] text-muted-foreground">
+        The repository&apos;s default branch is <Code>{SAMPLE_DEFAULT_BRANCH}</Code>. A pull
+        request opened there would have been the wrong one.
+      </p>
     </div>
   );
 }
@@ -180,10 +156,16 @@ function BriefArt() {
               {step.kind}
             </span>
             <span className="text-muted-foreground">
-              {step.title}
-              {"path" in step && (
-                <span className="mt-0.5 block font-mono text-[10.5px] text-foreground [overflow-wrap:anywhere]">
-                  <Breakable text={step.path} />
+              {step.kind === "Read" ? (
+                <span className="font-mono text-[10.5px] text-foreground [overflow-wrap:anywhere]">
+                  <Breakable text={step.title} />
+                </span>
+              ) : (
+                step.title
+              )}
+              {"detail" in step && (
+                <span className="mt-0.5 block text-[11.5px] [overflow-wrap:anywhere]">
+                  <Breakable text={step.detail} />
                 </span>
               )}
             </span>
@@ -205,10 +187,8 @@ function ArrivalArt() {
         <Flag size={34} className="text-muted-foreground" />
       </div>
       <p className="min-w-0 text-[12.5px] leading-[18px] text-muted-foreground">
-        Open your pull request against
-        <span className="mt-0.5 block font-mono text-[11px] text-foreground [overflow-wrap:anywhere]">
-          <Breakable text={SAMPLE_BRANCH} />
-        </span>
+        This one is already taken. Paste your own issue, and when the trail ends, open your pull
+        request against the branch Camino found — here, <Code>{SAMPLE_BRANCH}</Code>.
       </p>
     </div>
   );
@@ -273,8 +253,9 @@ export default function Landing() {
             already looking at.
           </Station>
           <Station ring="02" eyebrow="Station two" title="Read the signals" art={<SignalsArt />}>
-            Before anything is generated, Camino checks whether an issue is actually up for grabs —
-            so you don&apos;t spend a weekend on work someone already claimed.
+            Before anything is generated, Camino checks whether the issue is actually up for grabs —
+            assignees, open pull requests, maintainer notes — so you don&apos;t spend a weekend on
+            work someone already claimed.
           </Station>
           <Station ring="03" eyebrow="Station three" title="Find the right branch" art={<BranchArt />}>
             Many projects don&apos;t merge into <Code>main</Code>. Camino checks where recent pull
@@ -291,13 +272,14 @@ export default function Landing() {
             title="Open your pull request"
             art={<ArrivalArt />}
           >
-            The last stretch is yours. Camino keeps the brief so you can come back to it.
+            The last stretch is yours. Camino keeps the brief so you can come back to it while you
+            work.
           </Station>
         </section>
 
         <p className="mt-14 text-center font-mono text-[10px] leading-[16px] text-muted-foreground">
-          Stations 2–4 show real Camino output for {SAMPLE_REPO} #322 and #316, checked{" "}
-          {SAMPLE_CHECKED_ON}. The other contributor&apos;s name is removed.
+          Stations 2–4 show real Camino output for {SAMPLE_REPO} #{SAMPLE_BRIEF.number}, an issue
+          in Camino&apos;s own repository, checked {SAMPLE_CHECKED_ON}.
         </p>
 
         <section className="mt-[110px] flex flex-col items-center text-center">

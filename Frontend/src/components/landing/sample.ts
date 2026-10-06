@@ -1,81 +1,62 @@
 // Real Camino output shown on the landing page. Every value below was copied
-// from the issue previews and the brief Camino produced for these issues,
-// checked 5 October 2026. Do not add values the product did not show; remove a
-// slot instead. The other contributor's username is deliberately left out.
+// from the issue preview and the brief Camino produced for jballo/camino #53,
+// checked 6 October 2026. Do not add values the product did not show; remove a
+// slot instead. The issue belongs to Camino's own repository, so the only
+// person named is its maintainer.
 
-export const SAMPLE_REPO = "orthogonalhq/nous-core";
-export const SAMPLE_CHECKED_ON = "5 October 2026";
+export const SAMPLE_REPO = "jballo/camino";
+export const SAMPLE_CHECKED_ON = "6 October 2026";
 
-export const SAMPLE_ISSUE_URL = "https://github.com/orthogonalhq/nous-core/issues/316";
+export const SAMPLE_ISSUE_URL = "https://github.com/jballo/camino/issues/53";
 
-export const SAMPLE_BRANCH = "feat/contributor-friendly-inference-provider-surface";
-export const SAMPLE_BRANCH_EVIDENCE = "9 of 10 recently merged PRs targeted this branch.";
+export const SAMPLE_DEFAULT_BRANCH = "main";
+export const SAMPLE_BRANCH = "dev";
+export const SAMPLE_BRANCH_EVIDENCE = "10 of 10 recently merged PRs targeted `dev`";
 
-export type SampleSignal = {
-  number: number;
-  title: string;
-  labels: string[];
-  warnings: string[];
-  verdict: "taken" | "open";
+/** Station 2: what the preview showed before anything was generated. */
+export const SAMPLE_SIGNALS = {
+  number: 53,
+  title: "Allow users to delete issue briefs",
+  state: "open",
+  warnings: ["This issue is already assigned (jballo)."],
 };
 
-/** Station 2: the issue that was taken, then the one that was not. */
-export const SAMPLE_SIGNALS: SampleSignal[] = [
-  {
-    number: 322,
-    title: "Adapter: Cloudflare Workers AI Model Provider",
-    labels: ["good first issue", "adapter"],
-    warnings: [
-      "This issue is already assigned (another contributor).",
-      "Someone already has an open PR for this issue (#418).",
-    ],
-    verdict: "taken",
-  },
-  {
-    number: 316,
-    title: "Adapter: LM Studio Model Provider",
-    labels: ["good first issue", "adapter"],
-    warnings: [],
-    verdict: "open",
-  },
-];
-
-/** Station 4: an excerpt of the brief for #316. */
+/** Station 4: an excerpt of the brief for #53. */
 export const SAMPLE_BRIEF = {
-  number: 316,
-  title: "Adapter: LM Studio Model Provider",
+  number: 53,
+  title: "Allow users to delete issue briefs",
   summary:
-    "The task is to implement the LM Studio Model Provider as a certified provider leaf, adhering to the OpenAI-compatible API and following the updated provider adapter specifications.",
+    "Implement a feature that allows users to delete their own issue briefs from the home-page workbench. This will require creating a deletion endpoint in the backend and adding UI elements for confirming and executing the deletion in the frontend.",
   counts: [
-    { label: "Reading steps", value: "05" },
-    { label: "Plan checklist", value: "3 items" },
-    { label: "Warnings", value: "00" },
+    { label: "Reading steps", value: "06" },
+    { label: "Plan checklist", value: "4 items" },
+    { label: "Warnings", value: "01" },
+    { label: "Confidence", value: "high" },
   ],
   steps: [
     {
       kind: "Read",
-      title: "Provider Definition Resolution",
-      path: "self/subcortex/providers/src/provider-definitions.ts:63-71",
+      title: "Backend/app/api/briefs.py:359-365",
+      detail: "The GET endpoint for one brief: path parameter, session, authenticated user, ownership check.",
     },
     {
       kind: "Read",
-      title: "Ollama Provider Creation",
-      path: "self/subcortex/providers/src/providers/ollama/provider.ts:6-8",
+      title: "POST /api/v1/briefs",
+      detail: "Backend/app/api/briefs.py:225-230",
     },
     {
       kind: "Read",
-      title: "ChatCompletionsProvider Class Definition",
-      path: "self/subcortex/providers/src/protocols/openai-api/provider.ts:55-88",
+      title: "Frontend/src/app/briefs/[id]/page.tsx:52-61",
+      detail: "The reader's stop() handler: the cancel call a delete button would sit beside.",
     },
     {
-      kind: "Setup",
-      title: "Create a new directory for the LM Studio Model Provider in",
-      path: "self/subcortex/providers/src/providers/",
+      kind: "Test",
+      title: "Test the DELETE endpoint to ensure it correctly removes a brief when the user is authorized.",
     },
     {
-      kind: "Ask",
-      title: "Clarify any additional requirements for the provider leaf with the maintainer.",
+      kind: "Plan",
+      title: "Clarify behavior for deleting briefs that are currently being processed.",
     },
   ],
-  indexedAt: "839df36",
+  indexedAt: "31afb7e",
 } as const;
