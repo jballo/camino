@@ -4,8 +4,8 @@ import { parseIssueUrl } from "./issue-url";
 
 describe("parseIssueUrl", () => {
   it("accepts a GitHub issue URL", () => {
-    expect(parseIssueUrl("https://github.com/orthogonalhq/nous-core/issues/316")).toBe(
-      "https://github.com/orthogonalhq/nous-core/issues/316",
+    expect(parseIssueUrl("https://github.com/jballo/camino/issues/53")).toBe(
+      "https://github.com/jballo/camino/issues/53",
     );
   });
 
