@@ -124,7 +124,7 @@ an issue brief, and poll both jobs to completion.
 
 | Route | Status | Description |
 |---|---|---|
-| `/` | live | Landing page for signed-out visitors ("Trail Stations": real sample output for `orthogonalhq/nous-core` #316/#322). Signed-in users are redirected to `/briefs` |
+| `/` | live | Landing page for signed-out visitors ("Trail Stations": real sample output for `jballo/camino` #53). Signed-in users are redirected to `/briefs` |
 | `/briefs` | **live** | Workbench: preview a GitHub issue, verify/override its target branch, generate a brief, and browse/poll past briefs in a rail + inline pane. `?issue=<url>` (from the landing page) fills the field and runs the read-only preview once |
 | `/briefs/{id}` | live | Full-page reader: poll/cancel generation and read the grounded contribution brief |
 | `/explore` | live | Select repo → queue/poll/cancel ingest → ask questions with cited sources |
