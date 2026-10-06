@@ -5,7 +5,8 @@ issue URL and get a **grounded implementation brief**. It checks contribution si
 (assignees, open PRs, maintainer instructions), finds the right target branch, and maps
 the setup, code reading, tests, and implementation steps needed to land the change.
 
-Issue orientation is the product and the home page. Two supporting tools help when you
+Issue orientation is the product, at `/briefs`; `/` is a landing page for new visitors.
+Two supporting tools help when you
 need more context on the repository behind the issue: ask-the-codebase Q&A on
 `/explore` and guided code tours on `/tours`.
 
@@ -18,7 +19,7 @@ even start?"
 
 **Phase 2 — Issue briefs + supporting tours** · `✅ M6 implemented`
 
-The contribution flow is end to end: the home page previews a GitHub issue thread,
+The contribution flow is end to end: the briefs workbench previews a GitHub issue thread,
 surfaces warnings, discovers the repository's preferred target branch, indexes code by
 ref, and turns the issue into a grounded, cancellable implementation brief. Underneath
 it, the core indexing and hybrid-search pipeline is **built and tuned**, and a durable
@@ -567,7 +568,8 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 
 ### Web app
 
-- [x] Issue brief home page — GitHub issue preflight, branch override, and recent briefs
+- [x] Issue brief workbench (`/briefs`) — GitHub issue preflight, branch override, and recent briefs
+- [x] Landing page (`/`) — signed-out introduction with real sample output; hands a pasted issue to `/briefs` after sign-in
 - [x] Issue brief reader — polling, cancellation, and grounded implementation guidance
 - [x] Explore page — repo list, ingest, ask-the-codebase with source citations
 - [x] Tours library + generator — select repo, enter topic, create journey, route to `/generate`

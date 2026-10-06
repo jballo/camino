@@ -1,21 +1,22 @@
 # Camino — Frontend
 
-Next.js web app for Camino, an open source contribution tool. The home page is the
-product: paste a GitHub issue URL and get a grounded implementation brief. Clerk
+Next.js web app for Camino, an open source contribution tool. The product is the brief
+workbench at `/briefs`: paste a GitHub issue URL and get a grounded implementation
+brief. `/` is a landing page for signed-out visitors. Clerk
 handles auth, and browser pages call the FastAPI backend directly with Clerk session
 JWTs. Next.js routes remain only for the GitHub App install and OAuth redirect flow.
 
-**What works:** the issue-brief flow on the home page (`/briefs` redirects to `/`),
+**What works:** the landing page at `/`, the issue-brief workbench at `/briefs`,
 sign-in, account deletion through Clerk's UserButton, GitHub connection management,
 queued repo ingest/reprocess with progress and cancellation, processed-repo status,
 ask-the-codebase on `/explore`, and guided-tour generation from `/tours` through
 `/generate` and `/tours/{id}`. Costly API operations are protected by per-user rate
 limits.
 
-**Issue brief flow (the main feature):** paste a full GitHub issue URL on the home
-page. The preview shows the issue state, labels, assignment/discussion/open-PR
+**Issue brief flow (the main feature):** paste a full GitHub issue URL on `/briefs`.
+The preview shows the issue state, labels, assignment/discussion/open-PR
 warnings, resolved upstream, target branch evidence, and measurable fork drift, and the
-branch can be overridden before generation. The home page is a workbench: a searchable
+branch can be overridden before generation. `/briefs` is a workbench: a searchable
 rail lists past briefs by status (queued, generating, ready, failed, cancelled), and
 selecting one polls it live in an inline summary pane with regenerate/cancel actions.
 **Open full brief** on the pane routes to `/briefs/{id}`, a full-page reader that polls
@@ -123,15 +124,21 @@ an issue brief, and poll both jobs to completion.
 
 | Route | Status | Description |
 |---|---|---|
-| `/` | **live** | Home workbench: preview a GitHub issue, verify/override its target branch, generate a brief, and browse/poll past briefs in a rail + inline pane |
+| `/` | live | Landing page for signed-out visitors ("Trail Stations": real sample output for `jballo/camino` #53). Signed-in users are redirected to `/briefs` |
+| `/briefs` | **live** | Workbench: preview a GitHub issue, verify/override its target branch, generate a brief, and browse/poll past briefs in a rail + inline pane. `?issue=<url>` (from the landing page) fills the field and runs the read-only preview once |
 | `/briefs/{id}` | live | Full-page reader: poll/cancel generation and read the grounded contribution brief |
-| `/briefs` | live | Redirects to `/` |
 | `/explore` | live | Select repo → queue/poll/cancel ingest → ask questions with cited sources |
-| `/sign-in` | live | Clerk sign-in |
+| `/sign-in` | live | Clerk sign-in. `redirect_url` is honoured only for same-origin paths; otherwise it falls back to `/briefs` |
 | `/tours` | live | Tour generator + repository processing dialog, plus a library with queued, generating, ready, failed, and cancelled statuses |
 | `/generate` | live | Poll, time out, resume, or cancel generation; redirect on completion |
 | `/tours/{id}` | live | Guided tour reader with TOC, explanations, why callouts, and snippets |
 | `/settings` | live | GitHub connection status plus install/manage-repositories entry point |
+
+`src/proxy.ts` (Clerk middleware) does the routing by auth state: signed-in visitors
+to `/` go to `/briefs`, and signed-out visitors to `/briefs` or `/briefs/{id}` go to
+`/sign-in?redirect_url=…` and come back afterwards. Explore, Tours and Settings are
+not gated there. The landing page's sample content lives in
+`src/components/landing/sample.ts` and must stay real Camino output.
 
 ---
 

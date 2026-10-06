@@ -1,6 +1,8 @@
 import { SignIn } from "@clerk/nextjs";
 import { FileCode, Map, Sparkles } from "lucide-react";
 
+import { safeRedirectPath } from "@/lib/safe-redirect";
+
 const HIGHLIGHTS = [
   {
     icon: FileCode,
@@ -19,20 +21,13 @@ const HIGHLIGHTS = [
   },
 ];
 
-function safeRedirect(value: string | string[] | undefined): string {
-  const raw = Array.isArray(value) ? value[0] : value;
-  // Only allow same-origin relative paths to avoid open redirects.
-  if (raw && raw.startsWith("/") && !raw.startsWith("//")) return raw;
-  return "/";
-}
-
 export default async function Page({
   searchParams,
 }: {
   searchParams: Promise<{ redirect_url?: string | string[] }>;
 }) {
   const { redirect_url } = await searchParams;
-  const fallbackRedirectUrl = safeRedirect(redirect_url);
+  const fallbackRedirectUrl = safeRedirectPath(redirect_url, "/briefs");
 
   return (
     <div className="flex min-h-full w-full items-center justify-center px-8 py-12">

@@ -1,468 +1,314 @@
-"use client";
+import type { Metadata } from "next";
+import { Fragment, type ReactNode } from "react";
 
-import { Button, Input } from "@headlessui/react";
-import { useAuth } from "@clerk/nextjs";
 import {
-  AlertTriangle,
-  BookOpen,
-  ExternalLink,
-  Link as LinkIcon,
-  Loader2,
-  RefreshCw,
-} from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+  SAMPLE_BRANCH,
+  SAMPLE_BRANCH_EVIDENCE,
+  SAMPLE_DEFAULT_BRANCH,
+  SAMPLE_BRIEF,
+  SAMPLE_CHECKED_ON,
+  SAMPLE_ISSUE_URL,
+  SAMPLE_REPO,
+  SAMPLE_SIGNALS,
+} from "@/components/landing/sample";
+import StartButton from "@/components/landing/start-button";
+import StationIntake from "@/components/landing/station-intake";
+import { ChakanaMark, Flag, Llama, LlamaTrail, Scribble } from "@/components/trail-art";
 
-import BriefPane from "@/components/brief-pane";
-import BriefRail from "@/components/brief-rail";
-import { ApiError } from "@/lib/api";
-import {
-  cancelIssueBrief,
-  createIssueBrief,
-  getIssueBrief,
-  isAbortError,
-  listIssueBriefs,
-  pollIssueBrief,
-  previewIssueBrief,
-} from "@/lib/briefs";
-import type { BriefPreview, BriefResponse, BriefSummary } from "@/types/brief";
+const DESCRIPTION =
+  "Paste a GitHub issue. Camino checks whether it's up for grabs, finds the branch maintainers merge into, and writes a brief grounded in the code.";
 
-const TERMINAL_STATUSES = new Set(["complete", "failed", "cancelled"]);
+export const metadata: Metadata = {
+  title: "Camino — every issue has a trail",
+  description: DESCRIPTION,
+  openGraph: {
+    title: "Camino — every issue has a trail",
+    description: DESCRIPTION,
+    type: "website",
+  },
+};
 
-function createErrorMessage(caught: unknown, fallback: string) {
-  if (caught instanceof ApiError && caught.status === 429) {
-    return "Too many brief requests right now. Please wait a minute and try again.";
-  }
-  return caught instanceof Error ? caught.message : fallback;
-}
+const REPO_URL = "https://github.com/jballo/camino";
 
-function briefListErrorMessage(caught: unknown) {
-  if (
-    caught instanceof ApiError &&
-    (caught.status === 401 || caught.status === 403)
-  ) {
-    return "We couldn't load your briefs because your session is unavailable. Sign in again, then retry.";
-  }
-  return caught instanceof ApiError
-    ? `We couldn't load your briefs: ${caught.message}`
-    : "We couldn't load your briefs. Check your connection and try again.";
-}
-
-export default function Home() {
-  const { getToken } = useAuth();
-  const [issueUrl, setIssueUrl] = useState("");
-  const [preview, setPreview] = useState<BriefPreview>();
-  const [branch, setBranch] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [creating, setCreating] = useState(false);
-  const [error, setError] = useState<string>();
-  const [briefs, setBriefs] = useState<BriefSummary[]>([]);
-  const [briefsLoading, setBriefsLoading] = useState(true);
-  const [briefsError, setBriefsError] = useState<string>();
-  const [selectedId, setSelectedIdState] = useState<number>();
-  const [selectionVersion, setSelectionVersion] = useState(0);
-  const [selectedBrief, setSelectedBrief] = useState<BriefResponse>();
-  const [paneLoading, setPaneLoading] = useState(false);
-  const [paneError, setPaneError] = useState<string>();
-  const paneAbortRef = useRef<AbortController | undefined>(undefined);
-  const selectedIdRef = useRef<number | undefined>(undefined);
-
-  const setSelectedId = useCallback((id: number) => {
-    selectedIdRef.current = id;
-    setSelectedIdState(id);
-  }, []);
-
-  const loadBriefs = useCallback(
-    async (signal?: AbortSignal) => {
-      try {
-        const result = await listIssueBriefs(getToken, signal);
-        setBriefs(result);
-        setBriefsError(undefined);
-        setSelectedIdState((current) => {
-          const next = current ?? result[0]?.id;
-          selectedIdRef.current = next;
-          return next;
-        });
-      } catch (caught) {
-        if (isAbortError(caught)) return;
-        setBriefsError(briefListErrorMessage(caught));
-      } finally {
-        if (!signal?.aborted) setBriefsLoading(false);
-      }
-    },
-    [getToken],
-  );
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void loadBriefs(controller.signal);
-    return () => controller.abort();
-  }, [loadBriefs]);
-
-  useEffect(() => {
-    paneAbortRef.current?.abort();
-    if (selectedId === undefined) {
-      setSelectedBrief(undefined);
-      setPaneError(undefined);
-      setPaneLoading(false);
-      return;
-    }
-
-    const controller = new AbortController();
-    paneAbortRef.current = controller;
-    setSelectedBrief(undefined);
-    setPaneError(undefined);
-    setPaneLoading(true);
-
-    async function loadSelectedBrief() {
-      try {
-        const initial = await getIssueBrief(selectedId!, getToken, controller.signal);
-        if (controller.signal.aborted) return;
-        setSelectedBrief(initial);
-        setPaneLoading(false);
-
-        if (TERMINAL_STATUSES.has(initial.status)) {
-          await loadBriefs(controller.signal);
-          return;
-        }
-
-        const terminal = await pollIssueBrief(selectedId!, getToken, {
-          signal: controller.signal,
-          onUpdate: (update) => {
-            if (!controller.signal.aborted) setSelectedBrief(update);
-          },
-        });
-        if (controller.signal.aborted) return;
-        setSelectedBrief(terminal);
-        await loadBriefs(controller.signal);
-      } catch (caught) {
-        if (isAbortError(caught)) return;
-        setPaneError(
-          caught instanceof ApiError
-            ? caught.message
-            : "Failed to load this issue brief.",
-        );
-      } finally {
-        if (!controller.signal.aborted) setPaneLoading(false);
-      }
-    }
-
-    void loadSelectedBrief();
-    return () => controller.abort();
-  }, [getToken, loadBriefs, selectedId, selectionVersion]);
-
-  const selectedSummary = useMemo(
-    () => briefs.find((brief) => brief.id === selectedId),
-    [briefs, selectedId],
-  );
-  const activeBriefCount = briefs.filter((brief) =>
-    ["pending", "running", "generating"].includes(brief.status),
-  ).length;
-
-  async function inspectIssue() {
-    if (!issueUrl.trim()) return;
-    setLoading(true);
-    setError(undefined);
-    setPreview(undefined);
-    try {
-      const result = await previewIssueBrief(issueUrl.trim(), getToken);
-      setPreview(result);
-      setBranch(result.targetBranch.branch ?? "");
-    } catch (caught) {
-      setError(
-        caught instanceof ApiError &&
-          (caught.status === 401 || caught.status === 403)
-          ? "Sign in to preview an issue."
-          : caught instanceof ApiError
-            ? caught.message
-            : "We couldn't inspect this issue.",
-      );
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function retryBriefs() {
-    setBriefsError(undefined);
-    setBriefsLoading(true);
-    void loadBriefs();
-  }
-
-  async function selectCreatedBrief(id: number) {
-    setPreview(undefined);
-    setIssueUrl("");
-    setBranch("");
-    await loadBriefs();
-    setSelectedId(id);
-    setSelectionVersion((current) => current + 1);
-  }
-
-  async function generate() {
-    if (!preview || !branch.trim()) return;
-    setCreating(true);
-    setError(undefined);
-    try {
-      const result = await createIssueBrief(
-        preview.issueUrl,
-        branch.trim(),
-        getToken,
-      );
-      await selectCreatedBrief(result.id);
-    } catch (caught) {
-      setError(createErrorMessage(caught, "Failed to start the issue brief."));
-    } finally {
-      setCreating(false);
-    }
-  }
-
-  async function cancelBrief(brief: BriefResponse) {
-    setPaneError(undefined);
-    try {
-      const result = await cancelIssueBrief(brief.id, getToken);
-      if (selectedIdRef.current === brief.id) setSelectedBrief(result);
-      await loadBriefs();
-    } catch (caught) {
-      if (selectedIdRef.current !== brief.id) return;
-      setPaneError(
-        caught instanceof ApiError
-          ? caught.message
-          : "Failed to cancel this issue brief.",
-      );
-    }
-  }
-
-  async function regenerateBrief(brief: BriefResponse) {
-    setPaneError(undefined);
-    const reconstructedUrl = `https://github.com/${brief.issueRepo}/issues/${brief.issueNumber}`;
-    try {
-      let targetBranch = brief.ref;
-      if (!targetBranch) {
-        const branchPreview = await previewIssueBrief(reconstructedUrl, getToken);
-        targetBranch = branchPreview.targetBranch.branch;
-      }
-      if (!targetBranch) {
-        throw new Error("Camino couldn't resolve a target branch for this issue.");
-      }
-
-      const result = await createIssueBrief(
-        reconstructedUrl,
-        targetBranch,
-        getToken,
-      );
-      await selectCreatedBrief(result.id);
-    } catch (caught) {
-      setPaneError(
-        createErrorMessage(caught, "Failed to regenerate this issue brief."),
-      );
-    }
-  }
-
-  return (
-    <div className="page-shell max-w-[1180px] gap-8">
-      <header className="flex flex-col items-center gap-3 text-center">
-        <div className="flex items-center gap-3">
-          <BookOpen aria-hidden="true" className="size-5 text-brand-accent" />
-          <span className="eyebrow">Open-source contribution helper</span>
-        </div>
-        <h1 className="display-title text-5xl font-black sm:text-7xl">
-          Solve your first issue<span className="text-brand-accent">.</span>
-        </h1>
-        <p className="max-w-2xl text-base text-muted-foreground">
-          Paste a GitHub issue. Camino checks contribution signals, finds the
-          right branch, and generates a grounded implementation brief.
-        </p>
-      </header>
-
-      <section className="console" aria-label="New brief">
-        <div className="console-bar gap-4">
-          <span>
-            <span className="text-brand-accent">01</span> · Paste a GitHub issue URL
-          </span>
-          <span className="hidden sm:inline">Any public repository</span>
-        </div>
-        <div className="flex flex-col items-stretch gap-3 p-5 min-[900px]:flex-row min-[900px]:items-center">
-          <label className="field-control flex min-w-0 flex-1 items-center gap-3">
-            <span className="sr-only">GitHub issue URL</span>
-            <LinkIcon aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
-            <Input
-              id="issue-url"
-              type="url"
-              value={issueUrl}
-              onChange={(event) => setIssueUrl(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") void inspectIssue();
-              }}
-              placeholder="https://github.com/owner/repo/issues/123"
-              className="min-w-0 flex-1 bg-transparent font-mono text-sm outline-none placeholder:text-muted-foreground"
-            />
-          </label>
-          <Button
-            onClick={inspectIssue}
-            disabled={loading || !issueUrl.trim()}
-            className="button-primary shrink-0"
-          >
-            {loading && <Loader2 aria-hidden="true" className="size-4 animate-spin" />}
-            Preview issue
-          </Button>
-        </div>
-        <p className="px-5 pb-4 font-mono text-[11px] text-muted-foreground">
-          Preflight checks run before anything is generated.
-        </p>
-        {error && <p className="border-t border-border px-5 py-3 text-sm text-destructive">{error}</p>}
-      </section>
-
-      {preview && (
-        <section className="console flex flex-col gap-5 p-6">
-          <div className="flex flex-col gap-2">
-            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-              {preview.issueRepo} · issue #{preview.issueNumber} · {preview.state}
-            </div>
-            <h2 className="text-2xl font-semibold">{preview.title}</h2>
-            <div className="flex flex-wrap gap-2">
-              {preview.labels.map((label) => (
-                <span key={label} className="rounded-full bg-accent px-2 py-1 text-xs">
-                  {label}
-                </span>
-              ))}
-            </div>
-          </div>
-
-          {preview.warnings.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              {preview.warnings.map((warning, index) => {
-                const chip = (
-                  <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-300">
-                    <AlertTriangle aria-hidden="true" className="size-3.5" />
-                    {warning.message}
-                    {warning.url && <ExternalLink aria-hidden="true" className="size-3" />}
-                  </span>
-                );
-                return warning.url ? (
-                  <a
-                    key={`${warning.kind}-${index}`}
-                    href={warning.url}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    {chip}
-                  </a>
-                ) : (
-                  <span key={`${warning.kind}-${index}`}>{chip}</span>
-                );
-              })}
-            </div>
-          )}
-
-          <div className="rounded-xl bg-muted p-4">
-            <label htmlFor="target-branch" className="text-sm font-medium">
-              PRs to this project target
-            </label>
-            <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-center">
-              <Input
-                id="target-branch"
-                value={branch}
-                onChange={(event) => setBranch(event.target.value)}
-                className="field-control w-full font-mono text-sm sm:w-64"
-              />
-              <span className="text-xs text-muted-foreground">
-                {branch === preview.targetBranch.branch
-                  ? preview.targetBranch.evidence ?? preview.targetBranch.source
-                  : "Changed by you"}
-              </span>
-            </div>
-            {branch === preview.targetBranch.branch &&
-              preview.forkStatus.measurable &&
-              preview.forkStatus.forkRepo && (
-                <p className="mt-3 text-xs text-muted-foreground">
-                  Your fork is {preview.forkStatus.commitsBehind} commits behind
-                  upstream/{branch}.
-                </p>
-              )}
-          </div>
-
-          <Button
-            onClick={generate}
-            disabled={creating || !branch.trim()}
-            className="button-primary w-fit"
-          >
-            {creating && <Loader2 aria-hidden="true" className="size-4 animate-spin" />}
-            Generate brief
-          </Button>
-        </section>
-      )}
-
-      <section className="flex flex-col gap-3" aria-labelledby="briefs-heading">
-        <div className="flex flex-wrap items-baseline justify-between gap-2 px-0.5">
-          <h2 id="briefs-heading" className="eyebrow">
-            Your briefs — {String(briefs.length).padStart(2, "0")}
-          </h2>
-          <span className="eyebrow">
-            {String(activeBriefCount).padStart(2, "0")} generating
-          </span>
-        </div>
-
-        {briefsError && briefs.length > 0 && (
-          <BriefListError message={briefsError} onRetry={retryBriefs} />
-        )}
-
-        {briefsLoading && briefs.length === 0 ? (
-          <div className="console console-cell flex min-h-40 items-center justify-center gap-3 text-sm text-muted-foreground">
-            <Loader2 aria-hidden="true" className="size-5 animate-spin" />
-            Loading your briefs
-          </div>
-        ) : briefsError && briefs.length === 0 ? (
-          <BriefListError message={briefsError} onRetry={retryBriefs} />
-        ) : briefs.length === 0 ? (
-          <div className="console console-cell min-h-32">
-            <p className="text-sm text-muted-foreground">
-              No briefs yet — paste an issue URL to generate your first one.
-            </p>
-          </div>
-        ) : (
-          <div className="grid min-w-0 grid-cols-1 items-start gap-4 min-[900px]:grid-cols-[340px_minmax(0,1fr)]">
-            <BriefRail
-              briefs={briefs}
-              selectedId={selectedId}
-              onSelect={setSelectedId}
-            />
-            <BriefPane
-              key={selectedId}
-              brief={selectedBrief}
-              createdAt={selectedSummary?.createdAt}
-              loading={paneLoading}
-              error={paneError}
-              onCancel={cancelBrief}
-              onRegenerate={regenerateBrief}
-            />
-          </div>
-        )}
-      </section>
-    </div>
-  );
-}
-
-function BriefListError({
-  message,
-  onRetry,
+function Station({
+  ring,
+  ringStyle = "default",
+  eyebrow,
+  title,
+  children,
+  art,
 }: {
-  message: string;
-  onRetry: () => void;
+  ring: string;
+  ringStyle?: "lit" | "default" | "dashed";
+  eyebrow: string;
+  title: string;
+  children: ReactNode;
+  art: ReactNode;
 }) {
+  const ringClass = {
+    lit: "border-brand-accent bg-brand-accent text-background",
+    default: "border-rail-dim bg-background text-brand-accent",
+    dashed: "border-dashed border-rail-dim bg-background text-brand-accent",
+  }[ringStyle];
+
   return (
-    <div className="console console-cell flex min-h-32 flex-col items-start justify-center gap-4 sm:flex-row sm:items-center sm:justify-between">
-      <div role="alert" className="flex items-start gap-3">
-        <AlertTriangle
-          aria-hidden="true"
-          className="mt-0.5 size-5 shrink-0 text-destructive"
-        />
-        <div className="flex flex-col gap-1">
-          <p className="text-sm font-medium">Your briefs are unavailable</p>
-          <p className="max-w-2xl text-sm text-muted-foreground">{message}</p>
-        </div>
+    <article className="relative grid grid-cols-[52px_minmax(0,1fr)] gap-x-5 sm:gap-x-9 pb-[84px] last:pb-0 md:grid-cols-[52px_minmax(0,340px)_minmax(0,1fr)]">
+      <span
+        aria-hidden="true"
+        className={`relative flex size-[52px] items-center justify-center rounded-full border-[2.5px] font-display text-[15px] ${ringClass}`}
+      >
+        {ring}
+      </span>
+      <div className="pt-1.5">
+        <span className="eyebrow">{eyebrow}</span>
+        <h2 className="mt-2 font-display text-[22px] uppercase leading-[1.15] tracking-[.02em]">
+          {title}
+        </h2>
+        <p className="mt-2.5 text-[12.5px] leading-[18px] text-muted-foreground">{children}</p>
       </div>
-      <Button onClick={onRetry} className="button-ghost shrink-0">
-        <RefreshCw aria-hidden="true" className="size-4" />
-        Retry
-      </Button>
+      <div className="col-start-2 mt-5 min-w-0 md:col-start-auto md:mt-0">{art}</div>
+    </article>
+  );
+}
+
+/** Lets long paths and branch names wrap after `/`, `-` and `.`, not mid-word. */
+function Breakable({ text }: { text: string }) {
+  return text.split(/(?<=[/.-])/).map((part, index) => (
+    <Fragment key={index}>
+      {index > 0 && <wbr />}
+      {part}
+    </Fragment>
+  ));
+}
+
+function Code({ children }: { children: ReactNode }) {
+  return (
+    <span className="rounded-[4px] border border-input bg-muted px-1.5 py-px font-mono text-[11px] text-foreground">
+      {children}
+    </span>
+  );
+}
+
+function SignalsArt() {
+  return (
+    <div className="rounded-[12px] border border-border bg-card px-5 py-[18px]">
+      <span className="eyebrow">
+        {SAMPLE_REPO} · issue #{SAMPLE_SIGNALS.number} · {SAMPLE_SIGNALS.state}
+      </span>
+      <h3 className="mt-2 text-[15px] font-medium">{SAMPLE_SIGNALS.title}</h3>
+      <ul className="mt-3 flex flex-col gap-1.5">
+        {SAMPLE_SIGNALS.warnings.map((warning) => (
+          <li
+            key={warning}
+            className="flex w-fit gap-2 rounded-[4px] border border-dashed border-warning/50 px-3 py-1.5 font-mono text-[10.5px] leading-[15px] text-warning"
+          >
+            <span aria-hidden="true">▲</span>
+            {warning}
+          </li>
+        ))}
+      </ul>
+      <p className="mt-3 text-[12px] leading-[17px] text-muted-foreground">
+        Someone is already on it — in this case the maintainer. A good moment to pick another
+        issue, before any work is done.
+      </p>
     </div>
+  );
+}
+
+function BranchArt() {
+  return (
+    <div className="rounded-[12px] border border-border bg-card px-5 py-[18px]">
+      <span className="eyebrow">PRs to this project target</span>
+      <p className="mt-3 border-l-2 border-brand-accent pl-3.5 font-mono text-[13px] leading-[20px] text-brand-accent">
+        {SAMPLE_BRANCH}
+      </p>
+      <p className="mt-3 text-[12px] text-muted-foreground">{SAMPLE_BRANCH_EVIDENCE}</p>
+      <p className="mt-1.5 text-[12px] text-muted-foreground">
+        The repository&apos;s default branch is <Code>{SAMPLE_DEFAULT_BRANCH}</Code>. A pull
+        request opened there would have been the wrong one.
+      </p>
+    </div>
+  );
+}
+
+function BriefArt() {
+  return (
+    <div className="rounded-[12px] border border-border bg-card px-5 py-[18px]">
+      <span className="eyebrow">
+        Brief · {SAMPLE_REPO} #{SAMPLE_BRIEF.number}
+      </span>
+      <h3 className="mt-2 text-[15px] font-medium">{SAMPLE_BRIEF.title}</h3>
+      <p className="mt-2 text-[12.5px] leading-[18px] text-muted-foreground">{SAMPLE_BRIEF.summary}</p>
+      <dl className="mt-4 flex flex-wrap gap-x-6 gap-y-2">
+        {SAMPLE_BRIEF.counts.map((count) => (
+          <div key={count.label}>
+            <dt className="font-mono text-[9px] uppercase tracking-[.16em] text-muted-foreground">
+              {count.label}
+            </dt>
+            <dd className="mt-1 font-mono text-[13px]">{count.value}</dd>
+          </div>
+        ))}
+      </dl>
+      <ul className="mt-4 flex flex-col gap-2.5 border-t border-border pt-4">
+        {SAMPLE_BRIEF.steps.map((step) => (
+          <li key={step.title} className="grid grid-cols-[48px_minmax(0,1fr)] gap-2 text-[12px] leading-[17px]">
+            <span className="pt-px font-mono text-[9.5px] uppercase tracking-[.14em] text-brand-accent">
+              {step.kind}
+            </span>
+            <span className="text-muted-foreground">
+              {step.kind === "Read" ? (
+                <span className="font-mono text-[10.5px] text-foreground [overflow-wrap:anywhere]">
+                  <Breakable text={step.title} />
+                </span>
+              ) : (
+                step.title
+              )}
+              {"detail" in step && (
+                <span className="mt-0.5 block text-[11.5px] [overflow-wrap:anywhere]">
+                  <Breakable text={step.detail} />
+                </span>
+              )}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-4 font-mono text-[10px] text-muted-foreground">
+        Indexed at {SAMPLE_BRIEF.indexedAt} · head {SAMPLE_BRIEF.indexedAt}
+      </p>
+    </div>
+  );
+}
+
+function ArrivalArt() {
+  return (
+    <div className="flex items-end gap-[18px] border-[1.5px] border-dashed border-dash bg-card p-[22px]">
+      <div className="flex shrink-0 items-end gap-1.5">
+        <Llama size={42} className="text-brand-accent" />
+        <Flag size={34} className="text-muted-foreground" />
+      </div>
+      <p className="min-w-0 text-[12.5px] leading-[18px] text-muted-foreground">
+        This one is already taken. Paste your own issue, and when the trail ends, open your pull
+        request against the branch Camino found — here, <Code>{SAMPLE_BRANCH}</Code>.
+      </p>
+    </div>
+  );
+}
+
+export default function Landing() {
+  return (
+    <>
+      <div className="mx-auto flex w-full max-w-[1080px] flex-col px-5 sm:px-8 lg:px-[66px]">
+        <section className="flex flex-col items-center pt-16 text-center">
+          <div className="flex items-center gap-[9px]">
+            <ChakanaMark className="shrink-0 text-brand-accent" />
+            <span className="eyebrow">Open-source contribution helper</span>
+          </div>
+          <h1 className="mt-[18px] font-shade text-[clamp(36px,8vw,86px)] uppercase leading-[1.04] tracking-[.01em]">
+            <span className="block">Every issue</span>
+            <span className="block">
+              has a <span className="text-brand-accent">trail</span>
+            </span>
+          </h1>
+          <Scribble className="mt-1 max-w-full text-foreground" />
+          <p className="mt-5 max-w-[520px] text-[13.5px] leading-[20.25px] text-muted-foreground">
+            Camino walks it with you — from a GitHub issue URL to a grounded plan you can open a
+            pull request from. Four stations, no guesswork.
+          </p>
+          <div className="mt-[26px] flex flex-wrap justify-center gap-3">
+            <StartButton large>Start your trail</StartButton>
+            <a href="#trail" className="button-ghost min-h-[50px]">
+              Walk the stations ↓
+            </a>
+          </div>
+          <p className="eyebrow mt-4">Any public repository</p>
+        </section>
+
+        <LlamaTrail bob className="mt-14" />
+
+        <section
+          id="trail"
+          aria-label="How Camino works"
+          className="relative mt-[88px] scroll-mt-10"
+        >
+          <span
+            aria-hidden="true"
+            className="absolute bottom-0 left-[17px] top-0 w-[18px] border-x-[2.25px] border-rail-dim"
+            style={{
+              backgroundImage:
+                "repeating-linear-gradient(180deg, transparent 0 24px, var(--rail-tie) 24px 26px)",
+            }}
+          />
+          <Station
+            ring="01"
+            ringStyle="lit"
+            eyebrow="Station one"
+            title="Paste the issue"
+            art={
+              <div className="rounded-[12px] border border-border bg-card px-5 py-[18px]">
+                <StationIntake placeholder={SAMPLE_ISSUE_URL} />
+              </div>
+            }
+          >
+            Any issue on any public repository. No setup, no install — just the URL you were
+            already looking at.
+          </Station>
+          <Station ring="02" eyebrow="Station two" title="Read the signals" art={<SignalsArt />}>
+            Before anything is generated, Camino checks whether the issue is actually up for grabs —
+            assignees, open pull requests, maintainer notes — so you don&apos;t spend a weekend on
+            work someone already claimed.
+          </Station>
+          <Station ring="03" eyebrow="Station three" title="Find the right branch" art={<BranchArt />}>
+            Many projects don&apos;t merge into <Code>main</Code>. Camino checks where recent pull
+            requests actually landed and shows you the evidence.
+          </Station>
+          <Station ring="04" eyebrow="Station four" title="Get the brief" art={<BriefArt />}>
+            A plan grounded in the actual code: which files to read, how to set up, what to test,
+            and what to ask the maintainer.
+          </Station>
+          <Station
+            ring="PR"
+            ringStyle="dashed"
+            eyebrow="Arrival"
+            title="Open your pull request"
+            art={<ArrivalArt />}
+          >
+            The last stretch is yours. Camino keeps the brief so you can come back to it while you
+            work.
+          </Station>
+        </section>
+
+        <p className="mt-14 text-center font-mono text-[10px] leading-[16px] text-muted-foreground">
+          Stations 2–4 show real Camino output for {SAMPLE_REPO} #{SAMPLE_BRIEF.number}, an issue
+          in Camino&apos;s own repository, checked {SAMPLE_CHECKED_ON}.
+        </p>
+
+        <section className="mt-[110px] flex flex-col items-center text-center">
+          <h2 className="font-shade text-[clamp(30px,5.6vw,60px)] uppercase leading-[1.04] tracking-[.01em]">
+            <span className="block">Your llama</span>
+            <span className="block">
+              is <span className="text-brand-accent">waiting</span>
+            </span>
+          </h2>
+          <div className="mt-7">
+            <StartButton large>Sign in to start</StartButton>
+          </div>
+        </section>
+      </div>
+
+      <footer className="mt-24 border-t border-border">
+        <div className="mx-auto flex min-h-[84px] w-full max-w-[1080px] flex-wrap items-center justify-between gap-5 px-5 py-6 sm:px-8 lg:px-[66px]">
+          <span className="font-display text-[15px] uppercase leading-none">Camino</span>
+          <span className="font-mono text-[9px] text-muted-foreground">Public repositories only</span>
+          <a
+            href={REPO_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="font-mono text-[9.5px] uppercase tracking-[.18em] text-muted-foreground transition hover:text-foreground"
+          >
+            GitHub
+          </a>
+        </div>
+      </footer>
+    </>
   );
 }
