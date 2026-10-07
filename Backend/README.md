@@ -88,7 +88,7 @@ configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
 | `GH_APP_PRIVATE_KEY` | GitHub App PEM (escaped newlines OK) |
 | `GH_WEBHOOK_SECRET` | GitHub webhook verification |
 | `RATE_LIMIT_AGENT_ASK_REQUESTS` / `RATE_LIMIT_AGENT_ASK_WINDOW_SECONDS` | Q&A limit (default 20 requests / 600 seconds) |
-| `RATE_LIMIT_REPOSITORY_INGEST_REQUESTS` / `RATE_LIMIT_REPOSITORY_INGEST_WINDOW_SECONDS` | Ingest limit (default 2 requests / 3600 seconds) |
+| `RATE_LIMIT_REPOSITORY_INGEST_REQUESTS` / `RATE_LIMIT_REPOSITORY_INGEST_WINDOW_SECONDS` | Ingest limit, shared by `/ingest` and follows that queue a new ingest (default 2 requests / 3600 seconds) |
 | `INGEST_MAX_TARBALL_BYTES` | Maximum compressed GitHub tarball download size (default `209715200`, or 200 MiB) |
 | `INGEST_MAX_EXTRACTED_BYTES` | Maximum cumulative expanded archive size (default `1073741824`, or 1 GiB) |
 | `INGEST_MAX_ARCHIVE_ENTRIES` | Maximum tar archive member count (default `100000`) |
@@ -414,13 +414,19 @@ HTTP status when the error body is missing, malformed, non-JSON, or uses another
 The authenticated Clerk user ID keys atomic fixed-window counters in the `rate_limits`
 table. Limits apply to `POST /api/v1/agent/ask`, repository ingest/search,
 `GET /api/v1/repositories/contribution-target`, journey creation, and issue-brief
-preview/creation. Preview and create share one issue-brief bucket. Polling, listing, and
-cancellation routes are not limited. Exceeded limits return `429` with `Retry-After`.
-If the counter store is unavailable, protected routes fail closed with `503`.
+preview/creation. Preview and create share one issue-brief bucket. `POST
+/api/v1/repositories/follows` is charged to the ingest bucket only when it queues a new
+ingest for the user; following an indexed repository, or rejoining an ingest the user
+already has queued, is free. A follow over the limit is rolled back entirely. Polling,
+listing, and cancellation routes are not limited. Exceeded limits return `429` with
+`Retry-After`. If the counter store is unavailable, protected routes fail closed with
+`503`.
 
 The limiter intentionally uses a short transaction that commits before the route
 handler starts its own database work. Thus, an allowed protected request performs two
-sequential pool checkouts, not two simultaneous checkouts. Size
+sequential pool checkouts, not two simultaneous checkouts. The exception is a follow
+that queues an ingest: it charges the limit inside its open transaction, so it briefly
+holds two connections. Size
 `DATABASE_POOL_SIZE` and `DATABASE_MAX_OVERFLOW` for the resulting checkout rate and
 database latency. Across multiple backend processes, the maximum application
 connection count is `processes × (DATABASE_POOL_SIZE + DATABASE_MAX_OVERFLOW)`; keep

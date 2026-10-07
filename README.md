@@ -392,9 +392,9 @@ explicitly checked (not assumed) before real users touch the deployment.
   deploy time set `CORS_ORIGINS` to exactly the production Vercel origin and
   confirm no wildcard or localhost entries ship.
 - [~] **Rate limiting on all API endpoints.** Per-user fixed windows cover the
-  costly operations (agent Q&A, ingest, direct search, contribution-target
-  discovery, journey creation, brief preview/creation) with `429` +
-  `Retry-After`. Remaining: decide per endpoint for the currently unlimited
+  costly operations (agent Q&A, ingest, follows that queue an ingest, direct
+  search, contribution-target discovery, journey creation, brief
+  preview/creation) with `429` + `Retry-After`. Remaining: decide per endpoint for the currently unlimited
   routes (e.g. the GitHub connection endpoints in `github.py`) so nothing is
   accidentally unmetered. Redis-backed limiting (#36) is post-launch.
 - [ ] **Auth-flow expiry (password reset, sessions).** Clerk owns passwords,
@@ -587,7 +587,8 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 
 - [x] Direct browser → FastAPI integration — shared `backendFetch`/`ApiError`, JWT-derived identity, CORS, and only the three GitHub OAuth redirect routes retained in Next.js
 - [x] Frontend API client tests — Vitest covers successful JSON requests, authenticated POST bodies, FastAPI `detail` errors, and malformed/non-JSON error responses
-- [x] Per-user PostgreSQL fixed-window rate limiting for agent Q&A, ingest, direct search,
+- [x] Per-user PostgreSQL fixed-window rate limiting for agent Q&A, ingest (including
+  follows that queue one), direct search,
   contribution-target discovery, journey creation, and issue-brief preview/creation; the
   backend returns `429` and `Retry-After`
 

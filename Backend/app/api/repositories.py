@@ -549,7 +549,15 @@ async def follow_repository(
                 waiting_row=True,
                 commit=False,
             )
+        if job_queued:
+            # Only a newly queued ingest spends money, so only it is charged,
+            # against the same bucket as /ingest. A 429 (or the limiter's 503)
+            # discards the pending follow and waiting row with it.
+            await REPOSITORY_INGEST_RATE_LIMIT(user_id=auth_user_id)
         session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
     except exc.SQLAlchemyError:
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")

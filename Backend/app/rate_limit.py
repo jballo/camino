@@ -119,7 +119,12 @@ def fixed_window_rate_limit(
     request_limit: int,
     window_seconds: int,
 ):
-    """Create a Clerk-user-keyed FastAPI fixed-window dependency."""
+    """Create a Clerk-user-keyed FastAPI fixed-window dependency.
+
+    The returned callable can also be awaited inside a handler with an explicit
+    ``user_id`` when the route only knows after some work whether to charge
+    (follows charge the ingest bucket only when they queue a new ingest).
+    """
 
     if request_limit <= 0 or window_seconds <= 0:
         raise ValueError("Rate limit and window must be positive")
