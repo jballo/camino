@@ -1,36 +1,210 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Camino — Frontend
 
-## Getting Started
+Next.js web app for Camino, an open source contribution tool. The product is the brief
+workbench at `/briefs`: paste a GitHub issue URL and get a grounded implementation
+brief. `/` is a landing page for signed-out visitors. Clerk
+handles auth, and browser pages call the FastAPI backend directly with Clerk session
+JWTs. Next.js routes remain only for the GitHub App install and OAuth redirect flow.
 
-First, run the development server:
+**What works:** the landing page at `/`, the issue-brief workbench at `/briefs`,
+sign-in, account deletion through Clerk's UserButton, GitHub connection management,
+queued repo ingest/reprocess with progress and cancellation, processed-repo status,
+ask-the-codebase on `/explore`, and guided-tour generation from `/tours` through
+`/generate` and `/tours/{id}`. Costly API operations are protected by per-user rate
+limits.
+
+**Issue brief flow (the main feature):** paste a full GitHub issue URL on `/briefs`.
+The preview shows the issue state, labels, assignment/discussion/open-PR
+warnings, resolved upstream, target branch evidence, and measurable fork drift, and the
+branch can be overridden before generation. `/briefs` is a workbench: a searchable
+rail lists past briefs by status (queued, generating, ready, failed, cancelled), and
+selecting one polls it live in an inline summary pane with regenerate/cancel actions.
+**Open full brief** on the pane routes to `/briefs/{id}`, a full-page reader that polls
+the same durable job, shows when it is waiting on a required repository refresh, and
+renders the grounded summary, setup recipe, code-reading steps, test guidance,
+checklist, freshness, and confidence notes.
+
+**Tour flow (supporting context):** on `/tours`, select a repo, make sure it has been
+processed, enter a topic, and click **Generate tour**. The app creates a journey
+through FastAPI, polls progress on `/generate?id=...`, then opens the completed reader
+at `/tours/{id}`. Active jobs can be stopped from the progress page. Polling pauses
+after ten minutes with options to start another ten-minute polling window or leave; the
+server job continues unless the user explicitly selects **Stop generating**.
+
+Tour pages distinguish an expired Clerk session (401/403), a missing tour (404),
+cancelled and failed jobs, polling timeouts, and other backend errors, so users see an
+actionable message instead of one generic failure. The tours library also retains
+cancelled jobs with a distinct status badge.
+
+**Repository processing:** both the `/tours` repository dialog and `/explore` enqueue
+an ingestion job, poll it every two seconds, and show its queue/running state. Polling
+times out after ten minutes without cancelling the backend job. **Stop** sends a
+server-side cancellation request before stopping browser polling. Processing and reads
+are ref-aware: the UI discovers a contribution target when needed and carries the
+selected indexed ref into Explore, tour, and brief requests.
+
+**Account deletion:** open Clerk's UserButton, select **Security**, and choose
+**Delete account**. Clerk requires the user to type `Delete account`, deletes the Clerk
+identity, and sends the backend a verified `user.deleted` webhook that removes local
+Camino data. This flow does not currently uninstall or revoke the external GitHub App
+authorization.
+
+Removing the GitHub App from a GitHub account or organization is separate from Clerk
+account deletion. Its `installation.deleted` webhook removes Camino's connections,
+indexed repositories, tours, and embeddings for that installation.
+
+---
+
+## Run locally
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cd Frontend
+cp .env.example .env.local
+npm install
+npm run dev        # http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The backend must be running on port 8000, and a shared job worker must be running for
+repository processing, tour generation, and issue-brief generation (see
+[Backend/README.md](../Backend/README.md)). Start it with
+`uv run python -m app.worker` from `Backend/`, or use
+`docker compose --profile worker up -d worker` from the repository root. Without a
+worker, jobs remain queued and the UI eventually reports its ten-minute polling timeout.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Open the frontend at `http://localhost:3000` to match the backend's default
+`CORS_ORIGINS`; `http://127.0.0.1:3000` is a different origin and must be added
+explicitly.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+For the local GitHub App flow, configure:
 
-## Learn More
+- Callback URL: `http://localhost:3000/api/github/authorize`
+- Setup URL: `http://localhost:3000/api/github/setup`, with **Redirect on update**
+  enabled
 
-To learn more about Next.js, take a look at the following resources:
+The install route redirects to the GitHub App named by the required `GITHUB_APP_SLUG`
+environment variable (e.g. `camino-onboarder` for local development).
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### Environment variables
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+| Variable | Purpose |
+|---|---|
+| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Clerk frontend key |
+| `CLERK_SECRET_KEY` | Clerk backend key for the remaining GitHub App routes |
+| `BACKEND_URL` | Server-side FastAPI base URL used by the GitHub OAuth callback |
+| `NEXT_PUBLIC_BACKEND_URL` | Browser-visible FastAPI base URL (default `http://127.0.0.1:8000`) |
+| `NEXT_PUBLIC_APP_URL` | Public app URL for GitHub OAuth callback (default `http://localhost:3000`) |
+| `GITHUB_APP_SLUG` | Slug of the GitHub App the install route redirects to (required) |
 
-## Deploy on Vercel
+---
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Production configuration
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+The frontend is not part of the initial RDS/ECS CDK stacks, but it must be updated when
+the Fargate backend is deployed:
+
+- Set both `BACKEND_URL` and `NEXT_PUBLIC_BACKEND_URL` to the backend's HTTPS
+  ALB/custom-domain origin. The public value is intentionally browser-visible.
+- Set `NEXT_PUBLIC_APP_URL` to the frontend's canonical HTTPS origin.
+- Add the frontend's exact origin to the backend's `CORS_ORIGINS`.
+- Configure the production frontend URL in Clerk's allowed redirect/origin settings.
+- Configure GitHub App setup/callback URLs to use the production frontend routes and
+  webhook URLs to use the production backend.
+- Set `GITHUB_APP_SLUG` to the production GitHub App's slug; the install route fails
+  fast when it is absent.
+- Make production builds fail when required URLs or credentials are absent instead of
+  falling back to localhost.
+
+After deploying both the API and worker, smoke-test the complete browser flow: sign in,
+connect GitHub, list and ingest a repository, ask a question, generate a tour, generate
+an issue brief, and poll both jobs to completion.
+
+---
+
+## Pages
+
+| Route | Status | Description |
+|---|---|---|
+| `/` | live | Landing page for signed-out visitors ("Trail Stations": real sample output for `jballo/camino` #53). Signed-in users are redirected to `/briefs` |
+| `/briefs` | **live** | Workbench: preview a GitHub issue, verify/override its target branch, generate a brief, and browse/poll past briefs in a rail + inline pane. `?issue=<url>` (from the landing page) fills the field and runs the read-only preview once |
+| `/briefs/{id}` | live | Full-page reader: poll/cancel generation and read the grounded contribution brief |
+| `/explore` | live | Select repo → queue/poll/cancel ingest → ask questions with cited sources |
+| `/sign-in` | live | Clerk sign-in. `redirect_url` is honoured only for same-origin paths; otherwise it falls back to `/briefs` |
+| `/tours` | live | Tour generator + repository processing dialog, plus a library with queued, generating, ready, failed, and cancelled statuses |
+| `/generate` | live | Poll, time out, resume, or cancel generation; redirect on completion |
+| `/tours/{id}` | live | Guided tour reader with TOC, explanations, why callouts, and snippets |
+| `/settings` | live | GitHub connection status plus install/manage-repositories entry point |
+
+`src/proxy.ts` (Clerk middleware) does the routing by auth state: signed-in visitors
+to `/` go to `/briefs`, and signed-out visitors to `/briefs` or `/briefs/{id}` go to
+`/sign-in?redirect_url=…` and come back afterwards. Explore, Tours and Settings are
+not gated there. The landing page's sample content lives in
+`src/components/landing/sample.ts` and must stay real Camino output.
+
+---
+
+## Visual system
+
+The interface uses the dark Glyph design across every route: an orange accent on a
+near-black token palette, Doto display type, Space Grotesk body type, JetBrains Mono for
+technical labels, console-style cards, ledger rows, and compact uppercase navigation.
+The shared tokens and component classes live in `src/app/globals.css`; font loading and
+Clerk appearance variables live in `src/app/layout.tsx`. Focus-visible outlines,
+disabled cursors, and reduced-motion overrides are defined globally.
+
+---
+
+## Backend API access
+
+`src/lib/api.ts` contains the small shared `backendFetch<T>` helper and `ApiError`.
+Pages obtain a current token with Clerk's `useAuth().getToken()`, pass it explicitly to
+the helper, and call `/api/v1/*` on `NEXT_PUBLIC_BACKEND_URL`. The helper attaches
+`Authorization: Bearer …`, serializes JSON bodies, and throws an `ApiError` containing
+the backend status and string FastAPI `detail` message when a response fails. Missing,
+malformed, non-JSON, and non-string error bodies fall back to
+`Request failed (<status>)`. The helper does not automatically retry requests.
+
+Rate-limited requests surface the backend's `detail` message through `ApiError`. Although
+FastAPI exposes `Retry-After`, the UI does not yet display a countdown.
+
+The browser never sends a `userId`. FastAPI verifies the JWT and derives identity from
+its `sub` claim.
+
+The only remaining Next.js API routes are:
+
+- `/api/github/install`, which creates the CSRF state cookie and redirects to GitHub.
+- `/api/github/authorize`, which validates the state, sends the OAuth code to FastAPI,
+  and redirects back to settings.
+- `/api/github/setup`, which handles GitHub App installation updates.
+
+`src/lib/repository-ingestion.ts` owns the asynchronous ingestion client:
+`POST /api/v1/repositories/ingest` enqueues work, `GET .../ingest/{id}` polls status,
+and `POST .../ingest/{id}/cancel` stops an owned active job. Its poller refreshes the
+Clerk token on every request, reports `pending`, `running`, `complete`, `failed`, and
+`cancelled`, and treats client aborts separately from ten-minute timeouts. The
+`/generate` page follows the same two-second/ten-minute polling cadence for journeys
+and cancels through `POST /api/v1/journeys/{id}/cancel`.
+
+`src/lib/contribution-target.ts` resolves the target branch used when an ingest omits an
+explicit ref. `src/lib/briefs.ts` previews issue metadata and branch/fork signals, then
+creates, lists, polls, and cancels issue-brief jobs through `/api/v1/briefs/*`.
+
+Completed tour artifacts render directly from the backend `TourArtifact` shape:
+`title`, `topic`, `repo_name`, and ordered `steps` with file paths, line ranges,
+snippets, explanations, and optional "why" notes.
+
+---
+
+## Tests
+
+```bash
+npm test             # run Vitest once
+npm run test:watch   # watch mode
+npm run lint
+```
+
+`src/lib/api.test.ts` covers successful JSON responses, bearer-token requests, JSON
+POST bodies, FastAPI `detail` errors, unexpected error shapes, and non-JSON responses.
+`src/lib/repository-ingestion.test.ts` covers enqueue/cancel requests, status updates,
+terminal states, token refresh, polling timeouts, and abort behavior.
+`src/lib/contribution-target.test.ts` covers target discovery responses, and
+`src/lib/briefs.test.ts` covers authenticated preview, create, and read requests.

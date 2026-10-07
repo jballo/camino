@@ -1,0 +1,15 @@
+{
+  "title": "Wrong snippet",
+  "topic": "snippet failure",
+  "repo_name": "tiangolo/fastapi",
+  "steps": [
+    {
+      "title": "Misquoted source",
+      "explanation": "Path and lines are valid but the snippet text is wrong.",
+      "file_path": "fastapi/applications.py",
+      "start_line": 48,
+      "end_line": 50,
+      "snippet": "class TotallyMadeUp(Starlette):"
+    }
+  ]
+}

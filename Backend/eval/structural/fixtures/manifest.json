@@ -1,0 +1,34 @@
+{
+  "repo_version": "0.115.6",
+  "fixtures": [
+    {
+      "id": "valid_minimal",
+      "file": "valid_minimal.json",
+      "expect": "pass"
+    },
+    {
+      "id": "bad_schema",
+      "file": "bad_schema.json",
+      "expect": "fail",
+      "fail_checks": ["schema"]
+    },
+    {
+      "id": "bad_path",
+      "file": "bad_path.json",
+      "expect": "fail",
+      "fail_checks": ["path_exists"]
+    },
+    {
+      "id": "bad_lines",
+      "file": "bad_lines.json",
+      "expect": "fail",
+      "fail_checks": ["lines_in_bounds"]
+    },
+    {
+      "id": "bad_snippet",
+      "file": "bad_snippet.json",
+      "expect": "fail",
+      "fail_checks": ["snippet_matches"]
+    }
+  ]
+}

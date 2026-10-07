@@ -1,0 +1,47 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: localdev
+      POSTGRES_DB: onboarding_agent
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  worker:
+    image: ghcr.io/astral-sh/uv:python3.14-bookworm-slim
+    profiles: ["worker"]
+    working_dir: /app
+    command: ["uv", "run", "--frozen", "python", "-m", "app.worker"]
+    init: true
+    restart: always
+    stop_grace_period: 30s
+    depends_on:
+      - db
+    environment:
+      # secrets pass through by NAME from the shell env; run under
+      # `doppler run -- docker compose ...` (there are no .env files)
+      - DATABASE_URL=postgresql://agent:localdev@db:5432/onboarding_agent
+      - RUN_WORKER=false
+      - UV_PROJECT_ENVIRONMENT=/opt/venv
+      - CLERK_WH_KEY
+      - CLERK_SECRET_KEY
+      - CLERK_JWT_KEY
+      - GH_APP_ID
+      - GH_APP_CLIENT_ID
+      - GH_APP_SECRET
+      - GH_APP_PRIVATE_KEY
+      - GH_WEBHOOK_SECRET
+      - OPENAI_API_KEY
+      - AGENT_MODEL
+    volumes:
+      - ./Backend:/app:ro
+      - worker-venv:/opt/venv
+      - uv-cache:/root/.cache/uv
+
+volumes:
+  pgdata:
+  worker-venv:
+  uv-cache:

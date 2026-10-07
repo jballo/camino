@@ -1,0 +1,9 @@
+{
+  "repo_version": "0.115.6",
+  "description": "Small question set for agent smoke eval. IDs must exist in golden_dataset.json.",
+  "questions": [
+    {"id": "q02"},
+    {"id": "q04"},
+    {"id": "q05"}
+  ]
+}

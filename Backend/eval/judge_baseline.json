@@ -1,0 +1,66 @@
+{
+  "_provenance": "Seeded from a real live run (2026-07-08, gpt-4o-mini as both generator and judge) captured from the summary report; per-step detail (step_scores/step_count/title/summary) was not in the report. Refresh at full fidelity with: uv run python -m eval.run_tour_judge_eval --out eval/judge_baseline.json",
+  "mode": "live",
+  "repo_name": "tiangolo/fastapi",
+  "generator_model": "gpt-4o-mini",
+  "judge_model": "gpt-4o-mini",
+  "min_score": 3.5,
+  "aggregate": {
+    "topics": 3,
+    "harness_errors": 0,
+    "judged": 3,
+    "passed": 3,
+    "avg_faithfulness": 4.95,
+    "avg_relevance": 4.81,
+    "avg_completeness": 3.67,
+    "avg_ordering": 4.33,
+    "avg_overall": 4.44
+  },
+  "topics": [
+    {
+      "topic": "how a request flows through the framework",
+      "title": "",
+      "step_count": null,
+      "faithfulness": 5.0,
+      "relevance": 5.0,
+      "completeness": 5,
+      "ordering": 5,
+      "overall": 5.0,
+      "passed": true,
+      "step_scores": [],
+      "summary": null,
+      "error": null,
+      "elapsed_s": 11.5
+    },
+    {
+      "topic": "dependency injection",
+      "title": "",
+      "step_count": null,
+      "faithfulness": 5.0,
+      "relevance": 4.71,
+      "completeness": 3,
+      "ordering": 4,
+      "overall": 4.18,
+      "passed": true,
+      "step_scores": [],
+      "summary": null,
+      "error": null,
+      "elapsed_s": 13.8
+    },
+    {
+      "topic": "how routes are registered",
+      "title": "",
+      "step_count": null,
+      "faithfulness": 4.86,
+      "relevance": 4.71,
+      "completeness": 3,
+      "ordering": 4,
+      "overall": 4.14,
+      "passed": true,
+      "step_scores": [],
+      "summary": null,
+      "error": null,
+      "elapsed_s": 9.6
+    }
+  ]
+}

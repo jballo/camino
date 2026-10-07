@@ -1,0 +1,43 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "Camino backend — GitHub repo ingest, hybrid code search, and LangGraph Q&A agent"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "alembic>=1.16.5",
+    "fastapi[standard]>=0.135.3",
+    "pydantic-settings>=2.13.1",
+    "sqlmodel>=0.0.38",
+    "psycopg2-binary>=2.9.12",
+    "sqlalchemy>=2.0.49",
+    "svix>=1.92.2",
+    "pygithub>=2.9.1",
+    "tree-sitter>=0.23",
+    "tree-sitter-python>=0.23",
+    "tree-sitter-javascript>=0.23",
+    "tree-sitter-typescript>=0.23",
+    "pgvector>=0.4.2",
+    "openai>=2.37.0",
+    "clerk-backend-api>=6.0.1",
+    "langgraph>=1.2.6",
+    "langchain-openai>=1.3.3",
+    "langchain-core>=1.4.8",
+]
+
+[project.optional-dependencies]
+# Cross-encoder rerank (Exp 6) is opt-in (--rerank); keep the heavy PyTorch /
+# HuggingFace stack out of the default image. Install with `uv sync --extra rerank`.
+rerank = [
+    "sentence-transformers>=5.6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pyyaml>=6.0.3",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
