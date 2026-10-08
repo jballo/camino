@@ -113,31 +113,37 @@ def consume_fixed_window(
     )
 
 
-def fixed_window_rate_limit(
-    bucket: str,
-    *,
-    request_limit: int,
-    window_seconds: int,
-):
-    """Create a Clerk-user-keyed FastAPI fixed-window dependency.
+class FixedWindowRateLimit:
+    """A Clerk-user-keyed fixed-window limit for one bucket.
 
-    The returned callable can also be awaited inside a handler with an explicit
-    ``user_id`` when the route only knows after some work whether to charge
-    (follows charge the ingest bucket only when they queue a new ingest).
+    Use the instance as a FastAPI dependency (``Depends(LIMIT)``) to charge
+    before the handler runs. Routes that only know after some writes whether
+    to charge call ``check`` from inside their write block instead. That block
+    must run off the event loop: ``check`` blocks on the database, and nothing
+    may wait between a transaction's first write and its commit while holding
+    the loop, or an overlapping request can deadlock the process.
     """
 
-    if request_limit <= 0 or window_seconds <= 0:
-        raise ValueError("Rate limit and window must be positive")
-
-    async def enforce(
-        user_id: str = Depends(get_authenticated_user_id),
+    def __init__(
+        self,
+        bucket: str,
+        *,
+        request_limit: int,
+        window_seconds: int,
     ) -> None:
-        decision = await run_in_threadpool(
-            consume_fixed_window,
-            bucket=bucket,
+        if request_limit <= 0 or window_seconds <= 0:
+            raise ValueError("Rate limit and window must be positive")
+        self.bucket = bucket
+        self.request_limit = request_limit
+        self.window_seconds = window_seconds
+
+    def check(self, user_id: str) -> None:
+        """Consume one request synchronously, or raise ``429`` with ``Retry-After``."""
+        decision = consume_fixed_window(
+            bucket=self.bucket,
             user_id=user_id,
-            request_limit=request_limit,
-            window_seconds=window_seconds,
+            request_limit=self.request_limit,
+            window_seconds=self.window_seconds,
         )
         if not decision.allowed:
             raise HTTPException(
@@ -146,7 +152,25 @@ def fixed_window_rate_limit(
                 headers={"Retry-After": str(decision.retry_after)},
             )
 
-    return enforce
+    async def __call__(
+        self,
+        user_id: str = Depends(get_authenticated_user_id),
+    ) -> None:
+        await run_in_threadpool(self.check, user_id)
+
+
+def fixed_window_rate_limit(
+    bucket: str,
+    *,
+    request_limit: int,
+    window_seconds: int,
+) -> FixedWindowRateLimit:
+    """Create a Clerk-user-keyed FastAPI fixed-window dependency."""
+    return FixedWindowRateLimit(
+        bucket,
+        request_limit=request_limit,
+        window_seconds=window_seconds,
+    )
 
 
 AGENT_ASK_RATE_LIMIT = fixed_window_rate_limit(

@@ -169,6 +169,59 @@ def _installed_repository_names(installation_id: int) -> set[str]:
     }
 
 
+def _persist_follow(
+    session: Session,
+    *,
+    user_id: str,
+    installation_id: int,
+    repo_name: str,
+    ref: str | None,
+    installed: bool,
+) -> tuple[bool, bool]:
+    """Write a follow and its ingest request in one transaction.
+
+    Runs on a worker thread, never the event loop. Between the first write and
+    the commit, an overlapping follow of the same repository blocks in Postgres
+    on these uncommitted rows. If that blocked call held the event loop while
+    this transaction waited for the loop to resume it, neither could finish and
+    the process would freeze. Returns ``(followed, job_queued)``.
+    """
+    followed = False
+    job_queued = False
+    try:
+        if not installed:
+            session.execute(
+                pg_insert(UserRepoFollow)
+                .values(userId=user_id, repo_name=repo_name)
+                .on_conflict_do_nothing(constraint="uq_user_repo_follow")
+            )
+            followed = True
+
+        if ref is not None:
+            _, _, job_queued = enqueue_shared_ingest(
+                session,
+                user_id=user_id,
+                installation_id=installation_id,
+                repo_name=repo_name,
+                ref=ref,
+                waiting_row=True,
+                commit=False,
+            )
+        if job_queued:
+            # Only a newly queued ingest spends money, so only it is charged,
+            # against the same bucket as /ingest. A 429 (or the limiter's 503)
+            # discards the pending follow and waiting row with it.
+            REPOSITORY_INGEST_RATE_LIMIT.check(user_id)
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except exc.SQLAlchemyError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+    return followed, job_queued
+
+
 def _index_rows(session: Session, repo_names: Collection[str]) -> list:
     normalized_names = sorted(
         {normalize_repository_name(repo_name) for repo_name in repo_names}
@@ -528,39 +581,15 @@ async def follow_repository(
                 detail="Could not resolve repository ref",
             )
 
-    followed = False
-    job_queued = False
-    try:
-        if not installed:
-            session.execute(
-                pg_insert(UserRepoFollow)
-                .values(userId=auth_user_id, repo_name=repo_name)
-                .on_conflict_do_nothing(constraint="uq_user_repo_follow")
-            )
-            followed = True
-
-        if resolution is not None:
-            _, _, job_queued = enqueue_shared_ingest(
-                session,
-                user_id=auth_user_id,
-                installation_id=access.installation_id,
-                repo_name=repo_name,
-                ref=resolution.branch,
-                waiting_row=True,
-                commit=False,
-            )
-        if job_queued:
-            # Only a newly queued ingest spends money, so only it is charged,
-            # against the same bucket as /ingest. A 429 (or the limiter's 503)
-            # discards the pending follow and waiting row with it.
-            await REPOSITORY_INGEST_RATE_LIMIT(user_id=auth_user_id)
-        session.commit()
-    except HTTPException:
-        session.rollback()
-        raise
-    except exc.SQLAlchemyError:
-        session.rollback()
-        raise HTTPException(status_code=500, detail="Database error")
+    followed, job_queued = await asyncio.to_thread(
+        _persist_follow,
+        session,
+        user_id=auth_user_id,
+        installation_id=access.installation_id,
+        repo_name=repo_name,
+        ref=resolution.branch if resolution is not None else None,
+        installed=installed,
+    )
 
     return RepoFollowResponse(
         repoName=repo_name,

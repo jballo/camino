@@ -426,7 +426,10 @@ The limiter intentionally uses a short transaction that commits before the route
 handler starts its own database work. Thus, an allowed protected request performs two
 sequential pool checkouts, not two simultaneous checkouts. The exception is a follow
 that queues an ingest: it charges the limit inside its open transaction, so it briefly
-holds two connections. Size
+holds two connections. That whole write block runs on a worker thread, never on the
+event loop: an overlapping follow of the same repository waits in Postgres on the
+uncommitted rows, and if it waited on the loop the first request could never resume
+to commit. Size
 `DATABASE_POOL_SIZE` and `DATABASE_MAX_OVERFLOW` for the resulting checkout rate and
 database latency. Across multiple backend processes, the maximum application
 connection count is `processes × (DATABASE_POOL_SIZE + DATABASE_MAX_OVERFLOW)`; keep

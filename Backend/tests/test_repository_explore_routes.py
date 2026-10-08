@@ -1,6 +1,8 @@
 import datetime as dt
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call, patch
+import asyncio
+import threading
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from fastapi import HTTPException
@@ -29,11 +31,8 @@ INDEXED_AT = dt.datetime(2026, 9, 16, tzinfo=dt.timezone.utc)
 
 @pytest.fixture(autouse=True)
 def ingest_limit():
-    """Stand in for the Postgres-backed ingest limiter the follow handler awaits."""
-    with patch(
-        "app.api.repositories.REPOSITORY_INGEST_RATE_LIMIT",
-        new_callable=AsyncMock,
-    ) as limiter:
+    """Stand in for the Postgres-backed ingest limiter the follow handler checks."""
+    with patch("app.api.repositories.REPOSITORY_INGEST_RATE_LIMIT") as limiter:
         yield limiter
 
 
@@ -273,7 +272,7 @@ async def test_follow_attaches_an_indexed_repository_without_enqueuing(
     assert "ON CONFLICT ON CONSTRAINT uq_user_repo_follow DO NOTHING" in sql
     session.commit.assert_called_once()
     enqueue.assert_not_called()
-    ingest_limit.assert_not_awaited()
+    ingest_limit.check.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -316,9 +315,9 @@ async def test_follow_reports_whether_this_request_queued_a_job(
     assert enqueue.call_args.kwargs["commit"] is False
     session.commit.assert_called_once_with()
     if created:
-        ingest_limit.assert_awaited_once_with(user_id=USER_ID)
+        ingest_limit.check.assert_called_once_with(USER_ID)
     else:
-        ingest_limit.assert_not_awaited()
+        ingest_limit.check.assert_not_called()
 
 
 def _unindexed_follow_patches(enqueue_result):
@@ -351,7 +350,7 @@ def _unindexed_session():
 async def test_follow_charges_the_ingest_limit_before_committing(ingest_limit):
     session = _unindexed_session()
     order = MagicMock()
-    order.attach_mock(ingest_limit, "limit")
+    order.attach_mock(ingest_limit.check, "limit")
     order.attach_mock(session.commit, "commit")
     access, installed, branch, enqueue = _unindexed_follow_patches(
         (MagicMock(), MagicMock(), True)
@@ -364,13 +363,60 @@ async def test_follow_charges_the_ingest_limit_before_committing(ingest_limit):
             USER_ID,
         )
 
-    assert order.mock_calls == [call.limit(user_id=USER_ID), call.commit()]
+    assert order.mock_calls == [call.limit(USER_ID), call.commit()]
+
+
+@pytest.mark.asyncio
+async def test_follow_writes_and_charges_off_the_event_loop(ingest_limit):
+    """Regression for the overlap deadlock: no write-to-commit work on the loop.
+
+    An overlapping follow blocks in Postgres on this request's uncommitted rows.
+    If that happened on the event loop while this request needed the loop to
+    commit, the process would freeze.
+    """
+    loop_thread = threading.get_ident()
+    seen = {}
+
+    def record(name):
+        def side_effect(*_args, **_kwargs):
+            try:
+                asyncio.get_running_loop()
+                seen[name] = "event loop"
+            except RuntimeError:
+                seen[name] = (
+                    "loop thread"
+                    if threading.get_ident() == loop_thread
+                    else "worker thread"
+                )
+
+        return side_effect
+
+    session = _unindexed_session()
+    session.execute.side_effect = record("insert")
+    ingest_limit.check.side_effect = record("limit")
+    session.commit.side_effect = record("commit")
+    access, installed, branch, enqueue = _unindexed_follow_patches(
+        (MagicMock(), MagicMock(), True)
+    )
+
+    with access, installed, branch, enqueue:
+        await follow_repository(
+            RepoFollowBody(repoName="org/repo"),
+            session,
+            USER_ID,
+        )
+
+    assert seen == {
+        "insert": "worker thread",
+        "limit": "worker thread",
+        "commit": "worker thread",
+    }
 
 
 @pytest.mark.asyncio
 async def test_follow_rolls_back_when_the_ingest_limit_is_exceeded(ingest_limit):
     session = _unindexed_session()
-    ingest_limit.side_effect = HTTPException(
+    ingest_limit.check.side_effect = HTTPException(
         status_code=429,
         detail="Rate limit exceeded. Try again later.",
         headers={"Retry-After": "37"},
