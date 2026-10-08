@@ -16,6 +16,7 @@ import ReactMarkdown from "react-markdown";
 import { ApiError, backendFetch } from "@/lib/api";
 import {
   answerMatchesSelection,
+  followErrorMessage,
   repositorySelectionChanged,
 } from "./state";
 
@@ -353,12 +354,7 @@ export default function Explore() {
         return true;
       } catch (error) {
         console.error("Failed to follow repository", error);
-        const message =
-          error instanceof ApiError && error.status === 404
-            ? "Repository not found — or it is private and unavailable to the GitHub App."
-            : error instanceof ApiError && error.status === 502
-              ? "GitHub check failed — try again."
-              : "Could not add that repository.";
+        const message = followErrorMessage(error);
         setLookup({ status: "error", message });
         setAskError(message);
         return false;

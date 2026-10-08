@@ -1,6 +1,8 @@
 import datetime as dt
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+import asyncio
+import threading
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from fastapi import HTTPException
@@ -25,6 +27,13 @@ from app.services.repo_access import (
 
 USER_ID = "user_123"
 INDEXED_AT = dt.datetime(2026, 9, 16, tzinfo=dt.timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def ingest_limit():
+    """Stand in for the Postgres-backed ingest limiter the follow handler checks."""
+    with patch("app.api.repositories.REPOSITORY_INGEST_RATE_LIMIT") as limiter:
+        yield limiter
 
 
 def _index_row(repo_name: str = "org/repo"):
@@ -231,7 +240,9 @@ async def test_overview_fails_closed_when_access_cannot_be_checked():
 
 
 @pytest.mark.asyncio
-async def test_follow_attaches_an_indexed_repository_without_enqueuing():
+async def test_follow_attaches_an_indexed_repository_without_enqueuing(
+    ingest_limit,
+):
     session = MagicMock()
     indexed_result = MagicMock()
     indexed_result.first.return_value = MagicMock()
@@ -261,11 +272,14 @@ async def test_follow_attaches_an_indexed_repository_without_enqueuing():
     assert "ON CONFLICT ON CONSTRAINT uq_user_repo_follow DO NOTHING" in sql
     session.commit.assert_called_once()
     enqueue.assert_not_called()
+    ingest_limit.check.assert_not_called()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("created", [True, False])
-async def test_follow_reports_whether_this_request_queued_a_job(created):
+async def test_follow_reports_whether_this_request_queued_a_job(
+    created, ingest_limit
+):
     session = MagicMock()
     indexed_result = MagicMock()
     indexed_result.first.return_value = None
@@ -300,6 +314,129 @@ async def test_follow_reports_whether_this_request_queued_a_job(created):
     assert enqueue.call_args.kwargs["waiting_row"] is True
     assert enqueue.call_args.kwargs["commit"] is False
     session.commit.assert_called_once_with()
+    if created:
+        ingest_limit.check.assert_called_once_with(USER_ID)
+    else:
+        ingest_limit.check.assert_not_called()
+
+
+def _unindexed_follow_patches(enqueue_result):
+    return (
+        patch(
+            "app.api.repositories.resolve_repo_access",
+            return_value=RepoAccess(installation_id=12, visibility="public"),
+        ),
+        patch("app.api.repositories._installed_repository_names", return_value=set()),
+        patch(
+            "app.api.repositories.resolve_target_branch",
+            return_value=SimpleNamespace(branch="main"),
+        ),
+        patch(
+            "app.api.repositories.enqueue_shared_ingest",
+            return_value=enqueue_result,
+        ),
+    )
+
+
+def _unindexed_session():
+    session = MagicMock()
+    indexed_result = MagicMock()
+    indexed_result.first.return_value = None
+    session.exec.return_value = indexed_result
+    return session
+
+
+@pytest.mark.asyncio
+async def test_follow_charges_the_ingest_limit_before_committing(ingest_limit):
+    session = _unindexed_session()
+    order = MagicMock()
+    order.attach_mock(ingest_limit.check, "limit")
+    order.attach_mock(session.commit, "commit")
+    access, installed, branch, enqueue = _unindexed_follow_patches(
+        (MagicMock(), MagicMock(), True)
+    )
+
+    with access, installed, branch, enqueue:
+        await follow_repository(
+            RepoFollowBody(repoName="org/repo"),
+            session,
+            USER_ID,
+        )
+
+    assert order.mock_calls == [call.limit(USER_ID), call.commit()]
+
+
+@pytest.mark.asyncio
+async def test_follow_writes_and_charges_off_the_event_loop(ingest_limit):
+    """Regression for the overlap deadlock: no write-to-commit work on the loop.
+
+    An overlapping follow blocks in Postgres on this request's uncommitted rows.
+    If that happened on the event loop while this request needed the loop to
+    commit, the process would freeze.
+    """
+    loop_thread = threading.get_ident()
+    seen = {}
+
+    def record(name):
+        def side_effect(*_args, **_kwargs):
+            try:
+                asyncio.get_running_loop()
+                seen[name] = "event loop"
+            except RuntimeError:
+                seen[name] = (
+                    "loop thread"
+                    if threading.get_ident() == loop_thread
+                    else "worker thread"
+                )
+
+        return side_effect
+
+    session = _unindexed_session()
+    session.execute.side_effect = record("insert")
+    ingest_limit.check.side_effect = record("limit")
+    session.commit.side_effect = record("commit")
+    access, installed, branch, enqueue = _unindexed_follow_patches(
+        (MagicMock(), MagicMock(), True)
+    )
+
+    with access, installed, branch, enqueue:
+        await follow_repository(
+            RepoFollowBody(repoName="org/repo"),
+            session,
+            USER_ID,
+        )
+
+    assert seen == {
+        "insert": "worker thread",
+        "limit": "worker thread",
+        "commit": "worker thread",
+    }
+
+
+@pytest.mark.asyncio
+async def test_follow_rolls_back_when_the_ingest_limit_is_exceeded(ingest_limit):
+    session = _unindexed_session()
+    ingest_limit.check.side_effect = HTTPException(
+        status_code=429,
+        detail="Rate limit exceeded. Try again later.",
+        headers={"Retry-After": "37"},
+    )
+    access, installed, branch, enqueue = _unindexed_follow_patches(
+        (MagicMock(), MagicMock(), True)
+    )
+
+    with access, installed, branch, enqueue, pytest.raises(HTTPException) as error:
+        await follow_repository(
+            RepoFollowBody(repoName="org/repo"),
+            session,
+            USER_ID,
+        )
+
+    assert error.value.status_code == 429
+    assert error.value.headers == {"Retry-After": "37"}
+    session.execute.assert_called_once()
+    session.commit.assert_not_called()
+    session.rollback.assert_called_once_with()
 
 
 @pytest.mark.asyncio
