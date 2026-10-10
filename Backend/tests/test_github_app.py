@@ -8,6 +8,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from github import GithubException
 import pytest
+import requests
 
 from app.services import github_app
 from app.services.github_app import (
@@ -183,6 +184,18 @@ def test_read_timeout_on_token_post_is_retried(synthetic_app_key, token_server):
         token = _mint(server)
 
     assert token == "SYNTHETIC_TEST_VALUE"
+    assert server.requests == [_TOKEN_PATH, _TOKEN_PATH]
+
+
+def test_persistent_read_timeout_stops_after_one_retry(
+    synthetic_app_key, token_server
+):
+    # read=1 caps one mint near a minute; preview and create mint several
+    # times inline. RequestException is what the worker classes as transient.
+    with token_server(["stall", "stall", "stall"]) as server:
+        with pytest.raises(requests.RequestException):
+            _mint(server)
+
     assert server.requests == [_TOKEN_PATH, _TOKEN_PATH]
 
 
