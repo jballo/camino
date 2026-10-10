@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import logging
 import threading
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -23,6 +24,7 @@ from app.services.repository_ingestion import (
 from app.tour import TourGenerationCancelledError, TourGenerationError
 from app.worker import (
     JobAuthorizationRevokedError,
+    _describe_cause,
     _run_standalone,
     _ensure_ingestion_owned,
     _fail_rejected_sponsor_waiters,
@@ -772,6 +774,152 @@ async def test_run_job_fails_permanent_ingestion_failure():
         "Repository not found",
     )
 
+
+
+def _raise_wrapped(wrapper: Exception, cause: Exception):
+    """Return an async side effect that raises ``wrapper`` from ``cause``."""
+
+    async def side_effect(*_args, **_kwargs):
+        raise wrapper from cause
+
+    return side_effect
+
+
+def _job_failure_records(caplog) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.name == "app.worker"
+        and record.getMessage().startswith("job failed")
+    ]
+
+
+_INTEGRITY_CAUSE = (
+    'duplicate key value violates unique constraint "uq_chunk_identity_gen"\n'
+    "DETAIL:  Key (file_path, symbol_name, start_line)="
+    "(docs/jquery.min.js, n, 2) already exists."
+)
+
+
+def test_describe_cause_is_empty_without_a_chain():
+    assert _describe_cause(ValueError("plain")) == ""
+
+
+def test_describe_cause_reports_innermost_exception_on_one_line():
+    root = RuntimeError("line one\n  line two")
+    try:
+        try:
+            raise root
+        except RuntimeError as inner:
+            raise KeyError("middle") from inner
+    except KeyError as middle:
+        error = PermanentRepositoryIngestionError("outer")
+        error.__cause__ = middle
+
+    assert _describe_cause(error) == " | cause=RuntimeError: line one line two"
+
+
+def test_describe_cause_honours_from_none():
+    try:
+        try:
+            raise RuntimeError("hidden")
+        except RuntimeError:
+            raise PermanentRepositoryIngestionError("outer") from None
+    except PermanentRepositoryIngestionError as error:
+        assert _describe_cause(error) == ""
+
+
+def test_describe_cause_truncates_long_messages():
+    error = PermanentRepositoryIngestionError("outer")
+    error.__cause__ = RuntimeError("x" * 1000)
+
+    described = _describe_cause(error)
+
+    assert described == " | cause=RuntimeError: " + "x" * 300
+
+
+async def test_run_job_logs_cause_of_permanent_failure(caplog):
+    caplog.set_level(logging.WARNING, logger="app.worker")
+    job = _shared_ingest_job()
+    session = MagicMock()
+    session.get.return_value = job
+    mark_failed = MagicMock(return_value=True)
+
+    with (
+        _patch_session(session),
+        _patch_sponsors(12345),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._mark_failed", mark_failed),
+        patch(
+            "app.worker.ingest_repository",
+            new_callable=AsyncMock,
+            side_effect=_raise_wrapped(
+                PermanentRepositoryIngestionError(
+                    "Database integrity error during ingestion"
+                ),
+                RuntimeError(_INTEGRITY_CAUSE),
+            ),
+        ),
+    ):
+        await run_job(1, WORKER_ID)
+
+    [record] = _job_failure_records(caplog)
+    message = record.getMessage()
+    assert message.startswith("job failed permanently")
+    assert "\n" not in message
+    assert "cause=RuntimeError:" in message
+    assert '"uq_chunk_identity_gen"' in message
+    assert "(docs/jquery.min.js, n, 2) already exists." in message
+    assert record.exc_info is not None
+    assert isinstance(record.exc_info[1], PermanentRepositoryIngestionError)
+    mark_failed.assert_called_once_with(
+        session,
+        1,
+        WORKER_ID,
+        "Database integrity error during ingestion",
+    )
+
+
+async def test_run_job_logs_cause_of_transient_failure_without_traceback(caplog):
+    caplog.set_level(logging.WARNING, logger="app.worker")
+    job = _shared_ingest_job(attempts=2)
+    session = MagicMock()
+    session.get.return_value = job
+    requeue = MagicMock(return_value=True)
+
+    with (
+        _patch_session(session),
+        _patch_sponsors(12345),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._requeue_or_fail", requeue),
+        patch(
+            "app.worker.ingest_repository",
+            new_callable=AsyncMock,
+            side_effect=_raise_wrapped(
+                TransientRepositoryIngestionError(
+                    "GitHub request failed with status 502"
+                ),
+                ConnectionError("502 Bad Gateway"),
+            ),
+        ),
+    ):
+        await run_job(1, WORKER_ID)
+
+    [record] = _job_failure_records(caplog)
+    message = record.getMessage()
+    assert message.startswith("job failed transiently")
+    assert message.endswith(
+        "GitHub request failed with status 502"
+        " | cause=ConnectionError: 502 Bad Gateway"
+    )
+    assert record.exc_info is None
+    requeue.assert_called_once_with(
+        session,
+        1,
+        WORKER_ID,
+        attempts=2,
+        error="GitHub request failed with status 502",
+    )
 
 async def test_run_job_tries_next_sponsor_when_installation_is_invalid():
     job = _shared_ingest_job()
