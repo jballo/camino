@@ -618,6 +618,38 @@ _TRANSIENT_JOB_ERRORS = (
     TransientRepositoryIngestionError,
 )
 
+# Longest cause message kept on a failure log line.
+_CAUSE_MAX_CHARS = 300
+
+
+def _next_in_chain(error: BaseException) -> BaseException | None:
+    """Return the exception ``error`` was raised from, honouring ``from None``."""
+    if error.__cause__ is not None:
+        return error.__cause__
+    if error.__suppress_context__:
+        return None
+    return error.__context__
+
+
+def _describe_cause(error: BaseException) -> str:
+    """Return `` | cause=<Type>: <message>`` for the innermost chained exception.
+
+    Job errors wrap the real failure (a constraint violation, a GitHub status),
+    so logging only ``str(error)`` loses the reason. The message is collapsed to
+    one line so a Postgres ``DETAIL:`` line stays on the same log line.
+    """
+    seen = {id(error)}
+    innermost = None
+    cause = _next_in_chain(error)
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        innermost = cause
+        cause = _next_in_chain(cause)
+    if innermost is None:
+        return ""
+    message = " ".join(str(innermost).split())[:_CAUSE_MAX_CHARS]
+    return f" | cause={type(innermost).__name__}: {message}"
+
 
 async def _stamp_tour_freshness(
     session: Session,
@@ -978,21 +1010,24 @@ async def run_job(job_id: int, worker_id: str) -> None:
             PermanentRepositoryIngestionError,
         ) as error:
             logger.warning(
-                "job failed permanently | id=%s type=%s repo=%r: %s",
+                "job failed permanently | id=%s type=%s repo=%r: %s%s",
                 job_id,
                 job_type,
                 repo_name,
                 error,
+                _describe_cause(error),
+                exc_info=error,
             )
             session.rollback()
             permanent_error = str(error)
         except _TRANSIENT_JOB_ERRORS as error:
             logger.warning(
-                "job failed transiently | id=%s type=%s repo=%r: %s",
+                "job failed transiently | id=%s type=%s repo=%r: %s%s",
                 job_id,
                 job_type,
                 repo_name,
                 error,
+                _describe_cause(error),
             )
             session.rollback()
             transient_error = str(error) or type(error).__name__
