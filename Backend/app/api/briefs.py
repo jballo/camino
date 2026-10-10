@@ -16,7 +16,7 @@ from app.db import SessionDep
 from app.models.brief import BriefWarning
 from app.models.code import RepoIndexState
 from app.models.job import Job, JobStatus, JobType
-from app.rate_limit import ISSUE_BRIEF_CREATE_RATE_LIMIT
+from app.rate_limit import ISSUE_BRIEF_CREATE_RATE_LIMIT, REPOSITORY_INGEST_RATE_LIMIT
 from app.security import get_authenticated_user_id
 from app.services.fork_status import ForkStatus, resolve_fork_status
 from app.services.issue_thread import IssueThread, IssueThreadError, fetch_issue_thread
@@ -222,6 +222,71 @@ async def preview_brief(
     return preview
 
 
+def _persist_brief(
+    session: Session,
+    *,
+    user_id: str,
+    installation_id: int,
+    repo_name: str,
+    ref: str,
+    preview: BriefPreviewResponse,
+    queue_ingest: bool,
+) -> Job:
+    """Write a brief, and the ingest it waits on, in one transaction.
+
+    Runs on a worker thread, never the event loop, for the same reason as
+    follows: between the first write and the commit, an overlapping request for
+    the same ``repo@ref`` blocks in Postgres on these uncommitted rows, and the
+    ingest charge below blocks on the database too.
+    """
+    try:
+        dependency_id = None
+        if queue_ingest:
+            _, shared, created = enqueue_shared_ingest(
+                session,
+                user_id=user_id,
+                installation_id=installation_id,
+                repo_name=repo_name,
+                ref=ref,
+                waiting_row=False,
+                commit=False,
+            )
+            if created:
+                # Only starting a new ingest spends money, so joining an
+                # active one stays free. A 429 (or the limiter's 503)
+                # discards the pending ingest and brief together.
+                REPOSITORY_INGEST_RATE_LIMIT.check(user_id)
+            dependency_id = shared.id
+        brief, _ = enqueue_job(
+            session,
+            user_id=user_id,
+            installation_id=installation_id,
+            repo_name=repo_name,
+            ref=ref,
+            job_type=JobType.ISSUE_BRIEF,
+            dedupe_key=issue_brief_dedupe_key(
+                user_id=user_id,
+                repo_name=repo_name,
+                ref=ref,
+                issue_repo=preview.issueRepo,
+                issue_number=preview.issueNumber,
+            ),
+            topic=preview.title,
+            issue_repo=preview.issueRepo,
+            issue_number=preview.issueNumber,
+            blocked_by_job_id=dependency_id,
+            commit=False,
+        )
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except exc.SQLAlchemyError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+    return brief
+
+
 @router.post("", dependencies=[Depends(ISSUE_BRIEF_CREATE_RATE_LIMIT)])
 async def create_brief(
     payload: BriefRequest,
@@ -240,7 +305,6 @@ async def create_brief(
                 RepoIndexState.ref == ref,
             )
         ).one_or_none()
-        dependency_id = None
         if state is not None:
             await asyncio.to_thread(
                 authorize_index_read,
@@ -248,38 +312,6 @@ async def create_brief(
                 auth_user_id,
                 state,
             )
-        else:
-            _, shared, _ = enqueue_shared_ingest(
-                session,
-                user_id=auth_user_id,
-                installation_id=installation_id,
-                repo_name=repo_name,
-                ref=ref,
-                waiting_row=False,
-                commit=False,
-            )
-            dependency_id = shared.id
-        brief, _ = enqueue_job(
-            session,
-            user_id=auth_user_id,
-            installation_id=installation_id,
-            repo_name=repo_name,
-            ref=ref,
-            job_type=JobType.ISSUE_BRIEF,
-            dedupe_key=issue_brief_dedupe_key(
-                user_id=auth_user_id,
-                repo_name=repo_name,
-                ref=ref,
-                issue_repo=preview.issueRepo,
-                issue_number=preview.issueNumber,
-            ),
-            topic=preview.title,
-            issue_repo=preview.issueRepo,
-            issue_number=preview.issueNumber,
-            blocked_by_job_id=dependency_id,
-            commit=False,
-        )
-        session.commit()
     except RepoAccessDenied:
         raise HTTPException(status_code=404, detail="Repository index not found")
     except RepoAccessUnavailable:
@@ -287,6 +319,16 @@ async def create_brief(
     except exc.SQLAlchemyError:
         session.rollback()
         raise HTTPException(status_code=500, detail="Database error")
+    brief = await asyncio.to_thread(
+        _persist_brief,
+        session,
+        user_id=auth_user_id,
+        installation_id=installation_id,
+        repo_name=repo_name,
+        ref=ref,
+        preview=preview,
+        queue_ingest=state is None,
+    )
     return BriefCreatedResponse(id=brief.id, status=brief.status)
 
 

@@ -1,12 +1,15 @@
 import asyncio
+import contextlib
 import threading
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import exc
 
 from app.models.job import JobStatus, JobType
+from app.rate_limit import RateLimitDecision
 from app.brief import BriefNeedsRefreshError
 from app.models.tour import TourArtifact, TourStep
 from app.services.staleness import ChangedFile, HeadComparison
@@ -169,8 +172,8 @@ async def test_run_job_does_not_call_github_after_authorization_is_revoked():
     session.rollback.assert_called()
 
 
-async def test_issue_brief_parks_behind_refresh_without_spending_retry():
-    job = _job(
+def _refresh_brief_job():
+    return _job(
         job_type=JobType.ISSUE_BRIEF,
         issue_repo="org/repo",
         issue_number=44,
@@ -178,33 +181,142 @@ async def test_issue_brief_parks_behind_refresh_without_spending_retry():
         userId="user_1",
         topic="Fix refresh races",
     )
-    session = MagicMock()
-    session.get.return_value = job
-    dependency = MagicMock(id=17)
-    park = MagicMock(return_value=True)
 
-    with (
+
+def _run_refresh(session, *, created, decision=None, consume_error=None, generate=None):
+    """Run a brief whose first draft needs a refresh ingest.
+
+    ``created`` says whether the refresh starts a new shared ingest or joins
+    an active one; ``decision`` is what the ingest bucket answers.
+    """
+    dependency = MagicMock(id=17)
+    consume = MagicMock(return_value=decision, side_effect=consume_error)
+    mocks = SimpleNamespace(
+        enqueue=MagicMock(return_value=(dependency, dependency, created)),
+        consume=consume,
+        park=MagicMock(return_value=True),
+        persist=MagicMock(return_value=True),
+        requeue=MagicMock(),
+        generate=generate
+        or AsyncMock(side_effect=BriefNeedsRefreshError("stale")),
+    )
+    return dependency, mocks, (
         _patch_session(session),
         patch("app.worker._renew_job_lease", return_value=True),
         patch("app.worker.fetch_issue_thread", return_value=MagicMock(branch_instruction=None)),
         patch("app.worker.resolve_target_branch", return_value=MagicMock(branch="main", default_branch="main")),
         patch("app.worker.resolve_fork_status", return_value=MagicMock()),
-        patch("app.worker.generate_brief", new_callable=AsyncMock, side_effect=BriefNeedsRefreshError("stale")),
-        patch(
-            "app.worker.enqueue_shared_ingest",
-            return_value=(dependency, dependency, True),
-        ) as enqueue,
-        patch("app.worker.park_job", park),
-        patch("app.worker._update_owned_job") as persist,
-    ):
+        patch("app.worker.generate_brief", mocks.generate),
+        patch("app.worker.enqueue_shared_ingest", mocks.enqueue),
+        patch("app.rate_limit.consume_fixed_window", consume),
+        patch("app.worker.park_job", mocks.park),
+        patch("app.worker._update_owned_job", mocks.persist),
+        patch("app.worker._requeue_or_fail", mocks.requeue),
+    )
+
+
+async def _run_refresh_job(patches):
+    with contextlib.ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
         await run_job(1, WORKER_ID)
 
-    assert enqueue.call_args.kwargs["waiting_row"] is False
-    assert enqueue.call_args.kwargs["commit"] is False
-    park.assert_called_once_with(
+
+async def test_issue_brief_parks_behind_refresh_without_spending_retry():
+    session = MagicMock()
+    session.get.return_value = _refresh_brief_job()
+    _, mocks, patches = _run_refresh(
+        session,
+        created=True,
+        decision=RateLimitDecision(allowed=True, retry_after=60),
+    )
+
+    await _run_refresh_job(patches)
+
+    assert mocks.enqueue.call_args.kwargs["waiting_row"] is False
+    assert mocks.enqueue.call_args.kwargs["commit"] is False
+    mocks.park.assert_called_once_with(
         session, 1, WORKER_ID, blocked_by_job_id=17
     )
-    persist.assert_not_called()
+    mocks.persist.assert_not_called()
+
+
+async def test_refresh_that_starts_an_ingest_charges_the_requester_once():
+    session = MagicMock()
+    session.get.return_value = _refresh_brief_job()
+    _, mocks, patches = _run_refresh(
+        session,
+        created=True,
+        decision=RateLimitDecision(allowed=True, retry_after=60),
+    )
+
+    await _run_refresh_job(patches)
+
+    mocks.consume.assert_called_once()
+    assert mocks.consume.call_args.kwargs["bucket"] == "repository_ingest"
+    assert mocks.consume.call_args.kwargs["user_id"] == "user_1"
+    mocks.park.assert_called_once()
+
+
+async def test_refresh_that_joins_an_active_ingest_is_free():
+    session = MagicMock()
+    session.get.return_value = _refresh_brief_job()
+    _, mocks, patches = _run_refresh(session, created=False)
+
+    await _run_refresh_job(patches)
+
+    mocks.consume.assert_not_called()
+    mocks.park.assert_called_once_with(
+        session, 1, WORKER_ID, blocked_by_job_id=17
+    )
+
+
+async def test_refresh_with_an_empty_ingest_bucket_drafts_a_stale_brief():
+    session = MagicMock()
+    session.get.return_value = _refresh_brief_job()
+    artifact = MagicMock()
+    artifact.model_dump.return_value = {"summary": "stale but disclosed"}
+    generate = AsyncMock(side_effect=[BriefNeedsRefreshError("stale"), artifact])
+    _, mocks, patches = _run_refresh(
+        session,
+        created=True,
+        decision=RateLimitDecision(allowed=False, retry_after=60),
+        generate=generate,
+    )
+
+    await _run_refresh_job(patches)
+
+    # The uncommitted refresh ingest is rolled back, not parked on.
+    mocks.park.assert_not_called()
+    session.rollback.assert_called()
+    assert [call.kwargs["allow_stale"] for call in generate.await_args_list] == [
+        False,
+        True,
+    ]
+    mocks.persist.assert_called_once()
+    assert mocks.persist.call_args.kwargs["status"] == JobStatus.COMPLETE
+    assert mocks.persist.call_args.kwargs["artifact"] == {
+        "summary": "stale but disclosed"
+    }
+
+
+async def test_refresh_retries_the_brief_when_the_limiter_is_unavailable():
+    session = MagicMock()
+    session.get.return_value = _refresh_brief_job()
+    _, mocks, patches = _run_refresh(
+        session,
+        created=True,
+        consume_error=HTTPException(
+            status_code=503, detail="Rate limit service unavailable"
+        ),
+    )
+
+    await _run_refresh_job(patches)
+
+    mocks.park.assert_not_called()
+    mocks.persist.assert_not_called()
+    mocks.requeue.assert_called_once()
+    assert mocks.requeue.call_args.kwargs["error"] == "Rate limit service unavailable"
 
 
 async def test_legacy_issue_brief_without_issue_repo_fails_without_fetching():

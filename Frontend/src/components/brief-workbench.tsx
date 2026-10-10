@@ -16,6 +16,7 @@ import BriefRail from "@/components/brief-rail";
 import { ChakanaMark, LlamaTrail, Scribble, TileCluster } from "@/components/trail-art";
 import { ApiError } from "@/lib/api";
 import {
+  briefCreateErrorMessage,
   cancelIssueBrief,
   createIssueBrief,
   getIssueBrief,
@@ -45,13 +46,6 @@ const STEPS = [
     body: "A grounded brief, generated from the repository.",
   },
 ] as const;
-
-function createErrorMessage(caught: unknown, fallback: string) {
-  if (caught instanceof ApiError && caught.status === 429) {
-    return "Too many brief requests right now. Please wait a minute and try again.";
-  }
-  return caught instanceof Error ? caught.message : fallback;
-}
 
 function briefListErrorMessage(caught: unknown) {
   if (
@@ -244,7 +238,7 @@ export default function BriefWorkbench({
       );
       await selectCreatedBrief(result.id);
     } catch (caught) {
-      setError(createErrorMessage(caught, "Failed to start the issue brief."));
+      setError(briefCreateErrorMessage(caught, "Failed to start the issue brief."));
     } finally {
       setCreating(false);
     }
@@ -287,7 +281,7 @@ export default function BriefWorkbench({
       await selectCreatedBrief(result.id);
     } catch (caught) {
       setPaneError(
-        createErrorMessage(caught, "Failed to regenerate this issue brief."),
+        briefCreateErrorMessage(caught, "Failed to regenerate this issue brief."),
       );
     }
   }

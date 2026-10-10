@@ -36,7 +36,9 @@ def overrides():
     app.dependency_overrides[get_authenticated_user_id] = authenticated
     app.dependency_overrides[get_session] = session_override
     app.dependency_overrides[ISSUE_BRIEF_CREATE_RATE_LIMIT] = lambda: None
-    yield
+    # Ingest metering has its own tests in test_briefs_rate_limit.py.
+    with patch("app.api.briefs.REPOSITORY_INGEST_RATE_LIMIT"):
+        yield
     app.dependency_overrides.clear()
 
 
