@@ -417,19 +417,31 @@ table. Limits apply to `POST /api/v1/agent/ask`, repository ingest/search,
 preview/creation. Preview and create share one issue-brief bucket. `POST
 /api/v1/repositories/follows` is charged to the ingest bucket only when it queues a new
 ingest for the user; following an indexed repository, or rejoining an ingest the user
-already has queued, is free. A follow over the limit is rolled back entirely. Polling,
-listing, and cancellation routes are not limited. Exceeded limits return `429` with
-`Retry-After`. If the counter store is unavailable, protected routes fail closed with
-`503`.
+already has queued, is free. A follow over the limit is rolled back entirely.
+
+`POST /api/v1/briefs` is charged to the issue-brief bucket, and also to the ingest
+bucket when the target `repo@ref` is unindexed and the request starts a new shared
+ingest. Joining a shared ingest someone else already started is free. A brief over the
+ingest limit is rolled back together with its ingest, and its `429` detail reads
+`Repository indexing limit reached. Try again later.` so the frontend can tell the two
+limits apart. When the worker finds that a brief's code changed since indexing, the
+refresh ingest it would start is charged to the brief's requester the same way. If
+that bucket is empty, the worker skips the refresh and drafts the brief with stale
+citations disclosed. If the counter store is unavailable there, the brief is retried
+as a transient failure.
+
+Polling, listing, and cancellation routes are not limited. Exceeded limits return
+`429` with `Retry-After`. If the counter store is unavailable, protected routes fail
+closed with `503`.
 
 The limiter intentionally uses a short transaction that commits before the route
 handler starts its own database work. Thus, an allowed protected request performs two
-sequential pool checkouts, not two simultaneous checkouts. The exception is a follow
-that queues an ingest: it charges the limit inside its open transaction, so it briefly
-holds two connections. That whole write block runs on a worker thread, never on the
-event loop: an overlapping follow of the same repository waits in Postgres on the
-uncommitted rows, and if it waited on the loop the first request could never resume
-to commit. Size
+sequential pool checkouts, not two simultaneous checkouts. The exceptions are follows
+and briefs that queue an ingest: they charge the limit inside their open transaction,
+so they briefly hold two connections. Those write blocks run on a worker thread, never
+on the event loop: an overlapping request for the same repository waits in Postgres on
+the uncommitted rows, and if it waited on the loop the first request could never
+resume to commit. Size
 `DATABASE_POOL_SIZE` and `DATABASE_MAX_OVERFLOW` for the resulting checkout rate and
 database latency. Across multiple backend processes, the maximum application
 connection count is `processes × (DATABASE_POOL_SIZE + DATABASE_MAX_OVERFLOW)`; keep

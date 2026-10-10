@@ -82,7 +82,9 @@ def enqueue_shared_ingest(
     row left over from a finished ingest is settled first so the request starts
     fresh. Without it (briefs) ``requester_job`` is the shared ingest and the
     caller blocks its own job on it in the same transaction. ``created``
-    reports whether ``requester_job`` was inserted by this call.
+    reports whether ``requester_job`` was inserted by this call, so without a
+    waiting row it says whether this call started a new shared ingest rather
+    than joining an active one.
     """
     waiter_key = repository_ingest_waiter_dedupe_key(
         user_id=user_id, repo_name=repo_name, ref=ref
@@ -107,7 +109,7 @@ def enqueue_shared_ingest(
                 return waiting, shared, False
             _settle_waiting_row(session, waiting.id, outcome)
 
-    shared, _ = enqueue_job(
+    shared, shared_created = enqueue_job(
         session,
         user_id=None,
         installation_id=None,
@@ -120,7 +122,7 @@ def enqueue_shared_ingest(
     if not waiting_row:
         if commit:
             session.commit()
-        return shared, shared, False
+        return shared, shared, shared_created
 
     requester_job, created = enqueue_job(
         session,

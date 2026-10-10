@@ -14,6 +14,14 @@ from app.security import get_authenticated_user_id
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_RATE_LIMIT_DETAIL = "Rate limit exceeded. Try again later."
+# Brief creation can hit either its own bucket or this one, so the frontend
+# tells the two apart by this message.
+REPOSITORY_INGEST_RATE_LIMIT_DETAIL = (
+    "Repository indexing limit reached. Try again later."
+)
+
+
 @dataclass(frozen=True)
 class RateLimitDecision:
     allowed: bool
@@ -130,25 +138,35 @@ class FixedWindowRateLimit:
         *,
         request_limit: int,
         window_seconds: int,
+        detail: str = DEFAULT_RATE_LIMIT_DETAIL,
     ) -> None:
         if request_limit <= 0 or window_seconds <= 0:
             raise ValueError("Rate limit and window must be positive")
         self.bucket = bucket
         self.request_limit = request_limit
         self.window_seconds = window_seconds
+        self.detail = detail
 
-    def check(self, user_id: str) -> None:
-        """Consume one request synchronously, or raise ``429`` with ``Retry-After``."""
-        decision = consume_fixed_window(
+    def consume(self, user_id: str) -> RateLimitDecision:
+        """Consume one request synchronously and return the decision.
+
+        For callers with no HTTP response to send, such as the worker. Raises
+        ``503`` like ``check`` when the counter store is unavailable.
+        """
+        return consume_fixed_window(
             bucket=self.bucket,
             user_id=user_id,
             request_limit=self.request_limit,
             window_seconds=self.window_seconds,
         )
+
+    def check(self, user_id: str) -> None:
+        """Consume one request synchronously, or raise ``429`` with ``Retry-After``."""
+        decision = self.consume(user_id)
         if not decision.allowed:
             raise HTTPException(
                 status_code=429,
-                detail="Rate limit exceeded. Try again later.",
+                detail=self.detail,
                 headers={"Retry-After": str(decision.retry_after)},
             )
 
@@ -164,12 +182,14 @@ def fixed_window_rate_limit(
     *,
     request_limit: int,
     window_seconds: int,
+    detail: str = DEFAULT_RATE_LIMIT_DETAIL,
 ) -> FixedWindowRateLimit:
     """Create a Clerk-user-keyed FastAPI fixed-window dependency."""
     return FixedWindowRateLimit(
         bucket,
         request_limit=request_limit,
         window_seconds=window_seconds,
+        detail=detail,
     )
 
 
@@ -182,6 +202,7 @@ REPOSITORY_INGEST_RATE_LIMIT = fixed_window_rate_limit(
     "repository_ingest",
     request_limit=settings.rate_limit_repository_ingest_requests,
     window_seconds=settings.rate_limit_repository_ingest_window_seconds,
+    detail=REPOSITORY_INGEST_RATE_LIMIT_DETAIL,
 )
 REPOSITORY_SEARCH_RATE_LIMIT = fixed_window_rate_limit(
     "repository_search",

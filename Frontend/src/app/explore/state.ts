@@ -1,4 +1,4 @@
-import { ApiError } from "../../lib/api";
+import { ApiError, retryWait } from "../../lib/api";
 
 type AnswerSelection = {
   repoName: string;
@@ -20,12 +20,6 @@ export function answerMatchesSelection(
   return (
     answer !== undefined && answer.repoName === repoName && answer.ref === ref
   );
-}
-
-function retryWait(seconds: number | undefined) {
-  if (seconds === undefined) return "later";
-  const minutes = Math.ceil(seconds / 60);
-  return minutes <= 1 ? "in about a minute" : `in about ${minutes} minutes`;
 }
 
 export function followErrorMessage(error: unknown) {

@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 
+from fastapi import HTTPException
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -39,6 +40,7 @@ from app.db_schema import verify_embedding_schema
 from app.models.job import Job, JobStatus, JobType
 from app.models.code import RepoIndexState
 from app.models.tour import TourArtifact, TourFreshness
+from app.rate_limit import REPOSITORY_INGEST_RATE_LIMIT
 from app.services.fork_status import resolve_fork_status
 from app.services.issue_thread import IssueThreadError, fetch_issue_thread
 from app.services.repository_ingestion import (
@@ -173,6 +175,22 @@ SELECT EXISTS (
       AND active IS TRUE
 )
 """)
+
+
+class RefreshBudgetUnavailableError(Exception):
+    """The ingest rate limiter could not be reached; retry the brief later."""
+
+
+def _charge_refresh_ingest(user_id: str) -> bool:
+    """Charge a brief's refresh ingest to its requester's ingest bucket.
+
+    Returns ``False`` when the bucket is empty. A limiter outage is transient,
+    so the brief is retried rather than refreshed for free or failed.
+    """
+    try:
+        return REPOSITORY_INGEST_RATE_LIMIT.consume(user_id).allowed
+    except HTTPException as error:
+        raise RefreshBudgetUnavailableError(str(error.detail)) from error
 
 
 class JobAuthorizationRevokedError(Exception):
@@ -596,6 +614,7 @@ _TRANSIENT_JOB_ERRORS = (
     APIConnectionError,
     InternalServerError,
     exc.OperationalError,
+    RefreshBudgetUnavailableError,
     TransientRepositoryIngestionError,
 )
 
@@ -824,21 +843,46 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     _ensure_job_authorized(session, user_id, installation_id)
                     # Park in the same transaction as the enqueue so the shared
                     # ingest is never left without this brief waiting on it.
-                    _, shared, _ = enqueue_shared_ingest(
+                    # Nothing below awaits before park_job commits, so no other
+                    # job on this loop can run while the new row is uncommitted.
+                    _, shared, created = enqueue_shared_ingest(
                         session,
-                        user_id=job.userId,
+                        user_id=user_id,
                         installation_id=installation_id,
                         repo_name=repo_name,
                         ref=ref,
                         waiting_row=False,
                         commit=False,
                     )
-                    job_parked = park_job(
-                        session,
-                        job_id,
-                        worker_id,
-                        blocked_by_job_id=shared.id,
-                    )
+                    # Joining an active ingest is free; starting one is charged
+                    # to the requester like any other ingest.
+                    if created and not _charge_refresh_ingest(user_id):
+                        session.rollback()
+                        logger.info(
+                            "ingest limit reached; drafting brief without refresh "
+                            "| id=%s repo=%r",
+                            job_id,
+                            repo_name,
+                        )
+                        artifact = await generate_brief(
+                            session,
+                            issue=issue,
+                            repo_name=repo_name,
+                            ref=ref,
+                            installation_id=installation_id,
+                            target_resolution=target_resolution,
+                            fork_status=fork_status,
+                            allow_stale=True,
+                            cancel_event=lease_lost,
+                        )
+                        result = artifact.model_dump(mode="json")
+                    else:
+                        job_parked = park_job(
+                            session,
+                            job_id,
+                            worker_id,
+                            blocked_by_job_id=shared.id,
+                        )
             elif job_type == JobType.REPOSITORY_INGEST:
                 def finalize_ingestion_publication(
                     publication_session: Session,
