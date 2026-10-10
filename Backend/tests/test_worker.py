@@ -819,6 +819,40 @@ def test_describe_cause_reports_innermost_exception_on_one_line():
     assert _describe_cause(error) == " | cause=RuntimeError: line one line two"
 
 
+
+def test_describe_cause_follows_implicit_context():
+    # Raised inside an except block without "from": only __context__ is set.
+    try:
+        try:
+            raise RuntimeError("root")
+        except RuntimeError:
+            raise PermanentRepositoryIngestionError("outer")
+    except PermanentRepositoryIngestionError as error:
+        assert error.__cause__ is None
+        assert error.__context__ is not None
+        assert _describe_cause(error) == " | cause=RuntimeError: root"
+
+
+def test_describe_cause_stops_on_a_cyclic_chain():
+    first = RuntimeError("first")
+    second = ValueError("second")
+    first.__cause__ = second
+    second.__cause__ = first
+    error = PermanentRepositoryIngestionError("outer")
+    error.__cause__ = first
+    result: list[str] = []
+
+    # Run in a daemon thread so a regression fails the test instead of
+    # hanging the suite.
+    thread = threading.Thread(
+        target=lambda: result.append(_describe_cause(error)), daemon=True
+    )
+    thread.start()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive(), "_describe_cause did not terminate"
+    assert result == [" | cause=ValueError: second"]
+
 def test_describe_cause_honours_from_none():
     try:
         try:
