@@ -236,7 +236,7 @@ def _iter_file_chunks(
                 continue
 
             relative_path = full_path.relative_to(root).as_posix()
-            skip_reason = source_skip_reason(source_bytes)
+            skip_reason = source_skip_reason(source_bytes, relative_path)
             if skip_reason is not None:
                 walk_stats.files_skipped += 1
                 if len(walk_stats.skipped_files) < _MAX_SKIPPED_FILES_RECORDED:

@@ -402,6 +402,59 @@ async def test_invalid_utf8_file_is_skipped(caplog):
     assert "invalid UTF-8" in caplog.text
 
 
+async def test_minified_files_are_skipped_and_one_line_duplicates_ingest(caplog):
+    session = MagicMock()
+    github_patch, _ = _github(_repository_installation())
+    response = _StreamingResponse(
+        _tarball(
+            {
+                "src/keep.py": b"def keep():\n    return True\n",
+                "static/jquery.min.js": b"function n(){}function n(){}\n",
+                "static/blob.js": b"function b(){return " + b"1+" * 5_000 + b"1}\n",
+                "tests/duplicate-bindings.js": b"class A{}   class A{}\n",
+            }
+        )
+    )
+
+    with (
+        github_patch,
+        patch(
+            "app.services.repository_ingestion.requests.get",
+            return_value=response,
+        ),
+        patch(
+            "app.services.repository_ingestion.embed_all",
+            new_callable=AsyncMock,
+            side_effect=lambda texts: [[0.25] for _ in texts],
+        ),
+        caplog.at_level("WARNING", logger="app.services.repository_ingestion"),
+    ):
+        result = await ingest_repository(
+            session,
+            repo_name="org/repo",
+            installation_id=123,
+            ref="main",
+        )
+
+    assert result == {
+        "chunks_inserted": 2,
+        "embeddings_created": 2,
+        "files_skipped": 2,
+    }
+    chunk_models = session.add_all.call_args_list[0].args[0]
+    assert sorted(
+        (chunk.file_path, chunk.symbol_name, chunk.start_line)
+        for chunk in chunk_models
+    ) == [
+        ("src/keep.py", "keep", 1),
+        ("tests/duplicate-bindings.js", "A", 1),
+    ]
+    assert "static/jquery.min.js" in caplog.text
+    assert "minified (file name)" in caplog.text
+    assert "static/blob.js" in caplog.text
+    assert "minified (line over 5000 bytes)" in caplog.text
+
+
 async def test_vendored_and_nested_repo_dirs_are_pruned():
     session = MagicMock()
     github_patch, _ = _github(_repository_installation())
