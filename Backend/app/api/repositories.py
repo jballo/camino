@@ -5,13 +5,12 @@ import re
 from collections.abc import Collection
 
 from fastapi import APIRouter, Depends, HTTPException
-from github import Auth, GithubException, GithubIntegration
+from github import GithubException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import bindparam, exc, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlmodel import Session, select
 
-from app.config import settings
 from app.services.embeddings import EmbeddingError
 from app.db import SessionDep
 from app.models.github_connection import GithubConnections
@@ -25,6 +24,7 @@ from app.rate_limit import (
 )
 from app.security import get_authenticated_user_id
 from app.services.jobs import cancel_job, normalize_repository_name
+from app.services.github_app import github_integration
 from app.services.search import hybrid_search
 from app.services.shared_ingests import enqueue_shared_ingest, waiting_row_outcome
 from app.services.repo_access import (
@@ -148,13 +148,7 @@ def _normalized_repository_name(repo_name: str) -> str:
 
 
 def _installed_repositories(installation_id: int) -> list[str]:
-    app_auth = Auth.AppAuth(
-        app_id=settings.gh_app_id,
-        private_key=settings.gh_app_private_key,
-    )
-    installation = GithubIntegration(auth=app_auth).get_app_installation(
-        installation_id
-    )
+    installation = github_integration().get_app_installation(installation_id)
     return [
         repo.full_name
         for repo in installation.get_repos()

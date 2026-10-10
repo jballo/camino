@@ -85,9 +85,8 @@ async def test_private_installed_repository_is_hidden_from_list_and_overview():
     overview_session.exec.side_effect = [connection_result, follows_result]
 
     with (
-        patch("app.api.repositories.Auth.AppAuth"),
         patch(
-            "app.api.repositories.GithubIntegration",
+            "app.api.repositories.github_integration",
             return_value=integration,
         ),
         patch(
