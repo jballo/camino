@@ -15,7 +15,6 @@ import ReactMarkdown from "react-markdown";
 
 import { ApiError, backendFetch } from "@/lib/api";
 import {
-  IngestionTimeoutError,
   isAbortError,
   pollRepositoryIngestion,
 } from "@/lib/repository-ingestion";
@@ -367,8 +366,13 @@ export default function Explore() {
     if (jobs.length === 0) return;
     const controller = new AbortController();
     for (const { id } of jobs) {
+      // Follow the request until it settles, however long that takes. Status
+      // requests that fail are retried, so the page never loses track of a
+      // job and the user never has to recheck by hand.
       pollRepositoryIngestion(id, getToken, {
         signal: controller.signal,
+        timeoutMs: Infinity,
+        retryTransientErrors: true,
         onUpdate: (job) =>
           setIngests((current) => applyIngestUpdate(current, job)),
       }).then(
@@ -378,12 +382,11 @@ export default function Explore() {
           }
         },
         (error: unknown) => {
-          // A long ingest outlives the poll window. Its state stays as last
-          // seen and the next overview load picks up the outcome.
-          if (isAbortError(error) || error instanceof IngestionTimeoutError) {
-            return;
-          }
+          if (isAbortError(error)) return;
+          // Only a final client error gets here (e.g. the job is gone). The
+          // local state is wrong, so let the server's view replace it.
           console.error("Failed to check repository index request", error);
+          if (!controller.signal.aborted) void refreshAfterIngest();
         },
       );
     }
