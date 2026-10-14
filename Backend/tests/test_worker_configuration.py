@@ -26,6 +26,21 @@ def test_worker_defaults_use_standalone_topology_and_ten_minute_lease():
     assert environment["WORKER_LEASE_TIMEOUT"] == "600"
 
 
+def test_database_timeout_defaults_are_documented():
+    assert Settings.model_fields["database_connect_timeout"].default == 10
+    assert Settings.model_fields["database_keepalives_idle"].default == 30
+    assert Settings.model_fields["database_keepalives_interval"].default == 10
+    assert Settings.model_fields["database_keepalives_count"].default == 3
+    assert Settings.model_fields["database_lock_timeout_ms"].default == 30_000
+
+    environment = _example_environment()
+    assert environment["DATABASE_CONNECT_TIMEOUT"] == "10"
+    assert environment["DATABASE_KEEPALIVES_IDLE"] == "30"
+    assert environment["DATABASE_KEEPALIVES_INTERVAL"] == "10"
+    assert environment["DATABASE_KEEPALIVES_COUNT"] == "3"
+    assert environment["DATABASE_LOCK_TIMEOUT_MS"] == "30000"
+
+
 def test_ingestion_resource_cap_defaults_are_documented():
     assert Settings.model_fields["ingest_max_extracted_bytes"].default == 1024**3
     assert Settings.model_fields["ingest_max_archive_entries"].default == 100_000

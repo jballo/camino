@@ -76,6 +76,9 @@ configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
 | `DATABASE_URL` | Postgres connection string |
 | `DATABASE_POOL_SIZE` | Persistent connections per backend process (default `5`) |
 | `DATABASE_MAX_OVERFLOW` | Temporary overflow connections per backend process (default `10`) |
+| `DATABASE_CONNECT_TIMEOUT` | Seconds to wait while opening a database connection (default `10`) |
+| `DATABASE_KEEPALIVES_IDLE` / `DATABASE_KEEPALIVES_INTERVAL` / `DATABASE_KEEPALIVES_COUNT` | TCP keepalive timing; a dead connection raises after about idle + interval × count seconds (defaults `30` / `10` / `3`) |
+| `DATABASE_LOCK_TIMEOUT_MS` | Postgres `lock_timeout`: how long a statement may wait for another session's lock before failing; `0` disables (default `30000`) |
 | `OPENAI_API_KEY` | Embeddings + agent chat |
 | `AGENT_MODEL` | Chat model (default `gpt-4o-mini`) |
 | `VECTOR_TYPE` | pgvector embedding column/query type: `halfvec` (default) or `vector`; must match the existing database column |
