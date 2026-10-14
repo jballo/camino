@@ -13,11 +13,14 @@ import pytest
 from sqlalchemy import text, update
 from sqlmodel import Session
 
+from app.api import repositories
 from app.api.repositories import repository_overview
+from app.models.code import CodeChunkModel
 from app.models.github_connection import GithubConnections
 from app.models.job import Job, JobStatus
 from app.models.repo_follow import UserRepoFollow
 from app.services.installation_state import SUSPENSION_ERROR
+from app.services.repository_ingestion import _PUBLISH_GENERATION_SQL
 from app.services.shared_ingests import enqueue_shared_ingest
 from tests.test_worker_claim_pg import pg_engine  # noqa: F401  (fixture)
 
@@ -31,11 +34,12 @@ INSTALLATION_ID = 12
 @pytest.fixture
 def engine(pg_engine):  # noqa: F811
     UserRepoFollow.__table__.create(pg_engine, checkfirst=True)
+    CodeChunkModel.__table__.create(pg_engine, checkfirst=True)
     with Session(pg_engine) as session:
         session.execute(
             text(
                 "TRUNCATE jobs, repo_index_state, user_repo_follows, "
-                "githubconnections RESTART IDENTITY CASCADE"
+                "code_chunks, githubconnections RESTART IDENTITY CASCADE"
             )
         )
         for user_id in (USER_ID, OTHER_USER_ID):
@@ -171,3 +175,58 @@ async def test_other_users_requests_and_shared_ingests_are_not_reported(engine):
         entry = await _overview_entry(session)
 
     assert entry.ingest is None
+
+
+@pytest.mark.asyncio
+async def test_index_published_mid_overview_is_never_complete_without_refs(
+    engine,
+):
+    """The worker's publish+complete commit lands between the overview's reads.
+
+    Whatever the request state says, an index the worker has published by the
+    time the index rows are read must be in the response. A "complete" request
+    beside no refs would leave Explore on "Index ready. Loading it…" for good.
+    """
+    with Session(engine) as session:
+        _, shared = _request(session)
+        _set_job(session, shared.id, status=JobStatus.RUNNING)
+        read_latest_ingests = repositories._latest_ingests
+
+        def read_then_worker_commits(*args, **kwargs):
+            jobs = read_latest_ingests(*args, **kwargs)
+            with Session(engine) as worker:
+                worker.execute(
+                    _PUBLISH_GENERATION_SQL,
+                    {
+                        "repo_name": REPO,
+                        "ref": "main",
+                        "visibility": "public",
+                        "generation": "gen-1",
+                        "commit_sha": "abc123",
+                    },
+                )
+                worker.execute(
+                    update(Job)
+                    .where(Job.id == shared.id)
+                    .values(status=JobStatus.COMPLETE)
+                )
+                worker.commit()
+            return jobs
+
+        with (
+            patch(
+                "app.api.repositories._installed_repository_names",
+                return_value={REPO},
+            ),
+            patch(
+                "app.api.repositories._latest_ingests",
+                side_effect=read_then_worker_commits,
+            ),
+        ):
+            overview = await repository_overview(session, USER_ID)
+
+    entry = overview.installed[0]
+    assert [ref.ref for ref in entry.refs] == ["main"]
+    assert entry.refs[0].indexedSha == "abc123"
+    assert entry.ingest is not None
+    assert entry.ingest.status in {JobStatus.RUNNING, JobStatus.COMPLETE}

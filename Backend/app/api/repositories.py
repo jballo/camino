@@ -549,8 +549,21 @@ async def repository_overview(
             authorized_requested_names.add(repo_name)
 
         visible_names = installed_names | authorized_requested_names
+        # Read the request states before the index rows. A worker publishes an
+        # index and completes its job in one commit. Landing between these two
+        # reads, that commit yields an index beside a still-running request,
+        # which Explore polls to completion. The other order could yield a
+        # complete request beside no index, which nothing re-checks.
+        ingest_by_repo: dict[str, RepoIngestSummaryResponse] = {}
+        for job in _latest_ingests(session, auth_user_id, visible_names):
+            status, _, _, error = _effective_ingest_state(session, job)
+            ingest_by_repo[job.repo_name] = RepoIngestSummaryResponse(
+                id=job.id,
+                status=status,
+                ref=job.ref,
+                error=error,
+            )
         rows = _index_rows(session, visible_names)
-        latest_ingests = _latest_ingests(session, auth_user_id, visible_names)
     except exc.NoResultFound:
         raise HTTPException(
             status_code=404,
@@ -566,16 +579,6 @@ async def repository_overview(
     for row in rows:
         if row.repo_name in visible_names:
             refs_by_repo.setdefault(row.repo_name, []).append(_ref_response(row))
-
-    ingest_by_repo: dict[str, RepoIngestSummaryResponse] = {}
-    for job in latest_ingests:
-        status, _, _, error = _effective_ingest_state(session, job)
-        ingest_by_repo[job.repo_name] = RepoIngestSummaryResponse(
-            id=job.id,
-            status=status,
-            ref=job.ref,
-            error=error,
-        )
 
     def entry(repo_name: str) -> RepoEntryResponse:
         return RepoEntryResponse(
