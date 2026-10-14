@@ -22,6 +22,7 @@ import {
   activeIngestKey,
   answerMatchesSelection,
   applyIngestUpdate,
+  createLoadSequence,
   followErrorMessage,
   ingestMetaLabel,
   ingestPanelStatus,
@@ -162,6 +163,7 @@ export default function Explore() {
   // The user's latest index request per repository, seeded by the overview
   // and kept current by polling while a request is in flight.
   const [ingests, setIngests] = useState<Record<string, RepoIngest>>({});
+  const [overviewLoads] = useState(createLoadSequence);
 
   const [query, setQuery] = useState("");
   const [asking, setAsking] = useState(false);
@@ -177,6 +179,10 @@ export default function Explore() {
 
   const loadOverview = useCallback(
     async (preferredRepo?: string) => {
+      // Loads overlap when a poll finishes as a follow lands. Only the newest
+      // may write state: an older response, read before the follow committed,
+      // would erase the new request and stop its polling.
+      const load = overviewLoads.begin();
       setOverviewLoading(true);
       setOverviewError(undefined);
       try {
@@ -221,6 +227,7 @@ export default function Explore() {
           ];
         }
 
+        if (!overviewLoads.isLatest(load)) return;
         setOverview(next);
         setIngests(ingestsFromOverview([...next.installed, ...next.requested]));
         setSelectedRepo((current) => {
@@ -243,13 +250,14 @@ export default function Explore() {
         });
         loadedOnce.current = true;
       } catch (error) {
+        if (!overviewLoads.isLatest(load)) return;
         console.error("Failed to load repository overview", error);
         setOverviewError("Could not load your repositories.");
       } finally {
-        setOverviewLoading(false);
+        if (overviewLoads.isLatest(load)) setOverviewLoading(false);
       }
     },
-    [getToken],
+    [getToken, overviewLoads],
   );
 
   useEffect(() => {

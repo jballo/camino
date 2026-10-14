@@ -35,6 +35,19 @@ export function followErrorMessage(error: unknown) {
   return "Could not add that repository.";
 }
 
+/**
+ * Serial numbers for overlapping overview loads. Responses can arrive out of
+ * order, and an older one would replace requests created after it began, so
+ * only the newest load may apply its result.
+ */
+export function createLoadSequence() {
+  let latest = 0;
+  return {
+    begin: () => ++latest,
+    isLatest: (sequence: number) => sequence === latest,
+  };
+}
+
 export type RepoIngestStatus =
   | "pending"
   | "running"

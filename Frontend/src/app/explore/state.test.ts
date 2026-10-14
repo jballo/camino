@@ -5,6 +5,7 @@ import {
   activeIngestKey,
   answerMatchesSelection,
   applyIngestUpdate,
+  createLoadSequence,
   followErrorMessage,
   ingestMetaLabel,
   ingestPanelStatus,
@@ -192,5 +193,23 @@ describe("Explore index requests", () => {
     expect(requestIndexLabel(ingest({ status: "cancelled" }))).toBe(
       "Request again",
     );
+  });
+});
+
+describe("Explore overview loads", () => {
+  it("lets only the newest of overlapping loads apply", () => {
+    const loads = createLoadSequence();
+    const first = loads.begin();
+    expect(loads.isLatest(first)).toBe(true);
+
+    const second = loads.begin();
+    expect(loads.isLatest(first)).toBe(false);
+    expect(loads.isLatest(second)).toBe(true);
+
+    // A load that began earlier stays stale however late its response lands.
+    const third = loads.begin();
+    expect(loads.isLatest(first)).toBe(false);
+    expect(loads.isLatest(second)).toBe(false);
+    expect(loads.isLatest(third)).toBe(true);
   });
 });
