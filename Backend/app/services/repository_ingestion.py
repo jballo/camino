@@ -71,11 +71,20 @@ _CLEANUP_STAGED_SQL = text("""
       )
 """)
 
+# A publish whose commit landed but whose acknowledgment was lost reaches the
+# failure handlers with its generation already active, so never delete that.
 _CLEANUP_FAILED_GENERATION_SQL = text("""
-    DELETE FROM code_chunks
-    WHERE repo_name = :repo_name
-      AND ref = :ref
-      AND generation = :generation
+    DELETE FROM code_chunks AS c
+    WHERE c.repo_name = :repo_name
+      AND c.ref = :ref
+      AND c.generation = :generation
+      AND NOT EXISTS (
+          SELECT 1
+          FROM repo_index_state AS s
+          WHERE s.repo_name = c.repo_name
+            AND s.ref = c.ref
+            AND s.active_generation = c.generation
+      )
 """)
 
 _PUBLISH_GENERATION_SQL = text("""
