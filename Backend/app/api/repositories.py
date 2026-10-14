@@ -268,19 +268,21 @@ def _latest_ingests(
     """
     if not repo_names:
         return []
-    jobs = session.exec(
-        select(Job)
-        .where(
-            Job.userId == user_id,
-            Job.job_type == JobType.REPOSITORY_INGEST,
-            Job.repo_name.in_(sorted(repo_names)),
-        )
-        .order_by(Job.createdAt.desc(), Job.id.desc())
-    ).all()
-    latest: dict[str, Job] = {}
-    for job in jobs:
-        latest.setdefault(job.repo_name, job)
-    return list(latest.values())
+    # DISTINCT ON keeps the first row per repository in this order: the
+    # newest request. Finished rows are kept forever, so this must not
+    # load the whole history.
+    return list(
+        session.exec(
+            select(Job)
+            .distinct(Job.repo_name)
+            .where(
+                Job.userId == user_id,
+                Job.job_type == JobType.REPOSITORY_INGEST,
+                Job.repo_name.in_(sorted(repo_names)),
+            )
+            .order_by(Job.repo_name, Job.createdAt.desc(), Job.id.desc())
+        ).all()
+    )
 
 
 def _ref_response(row) -> RepoRefResponse:

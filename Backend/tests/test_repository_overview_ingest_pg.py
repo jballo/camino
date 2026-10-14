@@ -160,9 +160,12 @@ async def test_a_new_request_replaces_the_failed_one(engine):
         second, _ = _request(session)
 
         entry = await _overview_entry(session)
+        # Read while attached: the overview no longer loads the superseded
+        # row, so nothing else refreshes `first` after the commits above.
+        first_id, second_id = first.id, second.id
 
-    assert second.id != first.id
-    assert entry.ingest.id == second.id
+    assert second_id != first_id
+    assert entry.ingest.id == second_id
     assert entry.ingest.status == JobStatus.PENDING
     assert entry.ingest.error is None
 
