@@ -36,6 +36,13 @@ def ingest_limit():
         yield limiter
 
 
+def _no_ingests_result():
+    """The overview's query for the user's own index requests, finding none."""
+    result = MagicMock()
+    result.all.return_value = []
+    return result
+
+
 def _index_row(repo_name: str = "org/repo"):
     return SimpleNamespace(
         repo_name=repo_name,
@@ -82,7 +89,11 @@ async def test_private_installed_repository_is_hidden_from_list_and_overview():
     connection_result.one.return_value = MagicMock(installationId=12)
     follows_result = MagicMock()
     follows_result.all.return_value = []
-    overview_session.exec.side_effect = [connection_result, follows_result]
+    overview_session.exec.side_effect = [
+        connection_result,
+        follows_result,
+        _no_ingests_result(),
+    ]
 
     with (
         patch(
@@ -139,7 +150,11 @@ async def test_overview_keeps_installed_and_requested_separate():
     follows_result.all.return_value = [
         UserRepoFollow(userId=USER_ID, repo_name="public/requested")
     ]
-    session.exec.side_effect = [connection_result, follows_result]
+    session.exec.side_effect = [
+        connection_result,
+        follows_result,
+        _no_ingests_result(),
+    ]
 
     with (
         patch(
@@ -168,6 +183,8 @@ async def test_overview_keeps_installed_and_requested_separate():
     assert [item.repoName for item in result.requested] == ["public/requested"]
     assert result.installed[0].refs[0].chunkCount == 42
     assert result.requested[0].refs[0].ref == "main"
+    assert result.installed[0].ingest is None
+    assert result.requested[0].ingest is None
     resolve_access.assert_called_once_with(
         session,
         USER_ID,
@@ -266,6 +283,7 @@ async def test_follow_attaches_an_indexed_repository_without_enqueuing(
         "followed": True,
         "indexed": True,
         "jobQueued": False,
+        "jobId": None,
     }
     sql = str(session.execute.call_args.args[0])
     assert "ON CONFLICT ON CONSTRAINT uq_user_repo_follow DO NOTHING" in sql
@@ -283,8 +301,8 @@ async def test_follow_reports_whether_this_request_queued_a_job(
     indexed_result = MagicMock()
     indexed_result.first.return_value = None
     session.exec.return_value = indexed_result
-    waiting = MagicMock(userId=USER_ID)
-    shared = MagicMock(userId=None)
+    waiting = MagicMock(userId=USER_ID, id=77)
+    shared = MagicMock(userId=None, id=76)
 
     with (
         patch(
@@ -309,6 +327,9 @@ async def test_follow_reports_whether_this_request_queued_a_job(
 
     assert result.indexed is False
     assert result.jobQueued is created
+    # A joined request returns the same waiting row, so a repeat click polls
+    # the job the first click started.
+    assert result.jobId == 77
     assert enqueue.call_args.kwargs["ref"] == "main"
     assert enqueue.call_args.kwargs["waiting_row"] is True
     assert enqueue.call_args.kwargs["commit"] is False

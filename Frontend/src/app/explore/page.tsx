@@ -15,9 +15,23 @@ import ReactMarkdown from "react-markdown";
 
 import { ApiError, backendFetch } from "@/lib/api";
 import {
+  isAbortError,
+  pollRepositoryIngestion,
+} from "@/lib/repository-ingestion";
+import {
+  activeIngestKey,
   answerMatchesSelection,
+  applyIngestUpdate,
+  createLoadSequence,
   followErrorMessage,
+  ingestMetaLabel,
+  ingestPanelStatus,
+  ingestsFromOverview,
+  isIngestActive,
+  jobsFromActiveIngestKey,
+  requestIndexLabel,
   repositorySelectionChanged,
+  type RepoIngest,
 } from "./state";
 
 type Source = {
@@ -46,6 +60,7 @@ type RepoRef = {
 type RepoEntry = {
   repoName: string;
   refs: RepoRef[];
+  ingest?: RepoIngest | null;
   transient?: boolean;
 };
 
@@ -67,6 +82,7 @@ type RepoFollowResult = {
   followed: boolean;
   indexed: boolean;
   jobQueued: boolean;
+  jobId: number | null;
 };
 
 type ActiveTab = "installed" | "requested";
@@ -106,9 +122,15 @@ function shortSha(sha: string | null) {
   return sha ? sha.slice(0, 7) : "—";
 }
 
-function repoMeta(repo: RepoEntry, tab: ActiveTab) {
+function repoMeta(
+  repo: RepoEntry,
+  tab: ActiveTab,
+  ingest: RepoIngest | undefined,
+) {
   if (repo.transient) return "not in your list yet";
   if (repo.refs.length === 0) {
+    const requestState = ingestMetaLabel(ingest);
+    if (requestState) return requestState;
     return tab === "installed"
       ? "no index yet — select to request"
       : "requested — not indexed yet";
@@ -138,6 +160,10 @@ export default function Explore() {
   const [lookup, setLookup] = useState<LookupState>({ status: "idle" });
   const [addingRepo, setAddingRepo] = useState(false);
   const [toast, setToast] = useState<string>();
+  // The user's latest index request per repository, seeded by the overview
+  // and kept current by polling while a request is in flight.
+  const [ingests, setIngests] = useState<Record<string, RepoIngest>>({});
+  const [overviewLoads] = useState(createLoadSequence);
 
   const [query, setQuery] = useState("");
   const [asking, setAsking] = useState(false);
@@ -147,9 +173,16 @@ export default function Explore() {
   const loadedOnce = useRef(false);
   const previousRepo = useRef<string | undefined>(undefined);
   const askAbortRef = useRef<AbortController | null>(null);
+  const selectionRef = useRef<{ repo?: string; transient: boolean }>({
+    transient: false,
+  });
 
   const loadOverview = useCallback(
     async (preferredRepo?: string) => {
+      // Loads overlap when a poll finishes as a follow lands. Only the newest
+      // may write state: an older response, read before the follow committed,
+      // would erase the new request and stop its polling.
+      const load = overviewLoads.begin();
       setOverviewLoading(true);
       setOverviewError(undefined);
       try {
@@ -194,7 +227,9 @@ export default function Explore() {
           ];
         }
 
+        if (!overviewLoads.isLatest(load)) return;
         setOverview(next);
+        setIngests(ingestsFromOverview([...next.installed, ...next.requested]));
         setSelectedRepo((current) => {
           if (normalizedPreferred) return normalizedPreferred;
           const stillPresent = [...next.installed, ...next.requested].some(
@@ -215,13 +250,14 @@ export default function Explore() {
         });
         loadedOnce.current = true;
       } catch (error) {
+        if (!overviewLoads.isLatest(load)) return;
         console.error("Failed to load repository overview", error);
         setOverviewError("Could not load your repositories.");
       } finally {
-        setOverviewLoading(false);
+        if (overviewLoads.isLatest(load)) setOverviewLoading(false);
       }
     },
-    [getToken],
+    [getToken, overviewLoads],
   );
 
   useEffect(() => {
@@ -314,6 +350,56 @@ export default function Explore() {
     ? selectedRefs[selectedRepo ?? ""]
     : selectedRepoRefs[0]?.ref;
   const activeRef = selectedRepoRefs.find((item) => item.ref === selectedRef);
+  const selectedIngest = selectedRepo ? ingests[selectedRepo] : undefined;
+  const selectedIngestActive = isIngestActive(selectedIngest);
+  const selectedIngestStatus = ingestPanelStatus(selectedIngest);
+
+  useEffect(() => {
+    selectionRef.current = {
+      repo: selectedRepo,
+      transient: Boolean(selectedEntry?.transient),
+    };
+  }, [selectedRepo, selectedEntry?.transient]);
+
+  // Reload once an index lands so its refs appear without a manual reload.
+  // Keep a deep-linked row in view; otherwise leave selection and tab alone.
+  const refreshAfterIngest = useCallback(() => {
+    const selection = selectionRef.current;
+    return loadOverview(selection.transient ? selection.repo : undefined);
+  }, [loadOverview]);
+
+  const activeIngests = activeIngestKey(ingests);
+  useEffect(() => {
+    const jobs = jobsFromActiveIngestKey(activeIngests);
+    if (jobs.length === 0) return;
+    const controller = new AbortController();
+    for (const { id } of jobs) {
+      // Follow the request until it settles, however long that takes. Status
+      // requests that fail are retried, so the page never loses track of a
+      // job and the user never has to recheck by hand.
+      pollRepositoryIngestion(id, getToken, {
+        signal: controller.signal,
+        timeoutMs: Infinity,
+        retryTransientErrors: true,
+        onUpdate: (job) =>
+          setIngests((current) => applyIngestUpdate(current, job)),
+      }).then(
+        (job) => {
+          if (job.status === "complete" && !controller.signal.aborted) {
+            void refreshAfterIngest();
+          }
+        },
+        (error: unknown) => {
+          if (isAbortError(error)) return;
+          // Only a final client error gets here (e.g. the job is gone). The
+          // local state is wrong, so let the server's view replace it.
+          console.error("Failed to check repository index request", error);
+          if (!controller.signal.aborted) void refreshAfterIngest();
+        },
+      );
+    }
+    return () => controller.abort();
+  }, [activeIngests, getToken, refreshAfterIngest]);
 
   const followRepository = useCallback(
     async (repoName: string, lookupData?: RepoLookup) => {
@@ -330,6 +416,22 @@ export default function Explore() {
         const inInstalled = overview.installed.some(
           (repo) => repo.repoName === result.repoName,
         );
+        const jobId = result.jobId;
+        if (jobId !== null && !result.indexed) {
+          setIngests((current) =>
+            current[result.repoName]?.id === jobId
+              ? current
+              : {
+                  ...current,
+                  [result.repoName]: {
+                    id: jobId,
+                    status: "pending",
+                    ref: null,
+                    error: null,
+                  },
+                },
+          );
+        }
         setToast(
           result.indexed
             ? `${result.repoName} added to ${inInstalled ? "Installed" : "Requested"}.`
@@ -549,7 +651,7 @@ export default function Explore() {
                     {repo.repoName}
                   </span>
                   <span className="font-mono text-[10.5px] leading-relaxed tracking-[.04em] text-muted-foreground">
-                    {repoMeta(repo, activeTab)}
+                    {repoMeta(repo, activeTab, ingests[repo.repoName])}
                   </span>
                 </button>
               );
@@ -780,21 +882,38 @@ export default function Explore() {
                     Request a shared index, then come back later. You do not
                     need to keep this page open.
                   </p>
+                  {selectedIngestStatus && (
+                    <div
+                      role="status"
+                      className={`mt-3 max-w-xl text-sm leading-relaxed ${
+                        selectedIngestStatus.tone === "problem"
+                          ? "text-destructive"
+                          : "text-foreground"
+                      }`}
+                    >
+                      <p>{selectedIngestStatus.message}</p>
+                      {selectedIngestStatus.detail && (
+                        <p className="mt-1 font-mono text-[11px] tracking-[.03em]">
+                          {selectedIngestStatus.detail}
+                        </p>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <Button
                   onClick={() =>
                     void followRepository(selectedEntry.repoName)
                   }
-                  disabled={addingRepo}
+                  disabled={addingRepo || selectedIngestActive}
                   className="button-primary"
                 >
-                  {addingRepo && (
+                  {(addingRepo || selectedIngestActive) && (
                     <Loader2
                       className="size-4 animate-spin"
                       aria-hidden="true"
                     />
                   )}
-                  Request index
+                  {requestIndexLabel(selectedIngest)}
                 </Button>
               </div>
             )}
