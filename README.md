@@ -348,10 +348,13 @@ Before the first backend deployment:
 
 - [x] Validate that a submitted GitHub installation belongs to the authenticated GitHub user.
 - [~] Revoke the external GitHub App authorization during account deletion; Clerk already provides the authenticated, confirmed deletion flow and webhook-driven local cleanup.
-- [ ] Add a production backend Dockerfile (arm64) and pinned production start command.
-- [ ] Add a production Compose file: Caddy, API (`RUN_WORKER=false`), worker replicas,
-  healthchecks, and restart policies.
-- [ ] Add `/health` and wire it into the Compose healthchecks and Caddy.
+- [x] Add a production backend Dockerfile (arm64) and pinned production start command
+  (`Backend/Dockerfile`; one image for the API and the worker).
+- [x] Add a production Compose file: Caddy, API (`RUN_WORKER=false`), worker replicas,
+  healthchecks, and restart policies (`docker-compose.prod.yml`; runbook in
+  [docs/deploy.md](docs/deploy.md)).
+- [x] Add `/health` (unauthenticated liveness probe, no database or external calls)
+  and wire it into the Compose healthcheck and Caddy's upstream health check.
 - [ ] Add Alembic and commit an initial schema migration, including `halfvec` and indexes.
 - [ ] Run migrations as an explicit one-off step (`docker compose run`); do not run
   schema creation on every app start.
@@ -510,8 +513,8 @@ to revisit only if usage demands them.
 
 ## Now / next 3 actions
 
-1. **Prepare the backend for the box** — add the production arm64 Dockerfile and
-   `/health`, and introduce the full Alembic baseline.
+1. **Prepare the backend for the box** — the production arm64 Dockerfile and
+   `/health` are in; introduce the full Alembic baseline.
 2. **Stand up the data layer** — RDS `db.t4g.micro` + pgvector with backups
    (storage plan phase 2), production secrets provisioned outside agent sessions.
 3. **Bring up the Compose stack on a `t4g.small`** — Caddy TLS on a real domain,
@@ -605,9 +608,9 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [x] Deployment decision: single EC2 `t4g.small` + Docker Compose (supersedes CDK/Fargate)
 - [x] `t4g.small` load test: RAM and API-latency gates passed ([docs/t4g-loadtest.md](docs/t4g-loadtest.md))
 - [x] Storage shrink: halfvec exact scan shipped ([docs/storage-capacity-plan.md](docs/storage-capacity-plan.md) phase 1)
-- [ ] Backend production Dockerfile (arm64) and pinned start command
-- [ ] Production Compose file: Caddy TLS, API (`RUN_WORKER=false`), worker replicas, healthchecks, restart policies
-- [ ] `/health` endpoint wired into Compose healthchecks and Caddy
+- [x] Backend production Dockerfile (arm64) and pinned start command
+- [x] Production Compose file: Caddy TLS, API (`RUN_WORKER=false`), worker replicas, healthchecks, restart policies ([docs/deploy.md](docs/deploy.md))
+- [x] `/health` endpoint wired into Compose healthchecks and Caddy
 - [ ] Alembic baseline and explicit one-off migration step
 - [ ] RDS `db.t4g.micro` + pgvector, encrypted storage, backups, security-group-only access (storage plan phase 2)
 - [ ] Production secrets provisioned according to the documented deployment procedure
