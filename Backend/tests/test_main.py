@@ -13,6 +13,26 @@ def _normalized_sql(connection: MagicMock) -> list[str]:
     ]
 
 
+async def test_lifespan_ddl_waits_for_locks_instead_of_timing_out():
+    connection = MagicMock()
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value.__enter__.return_value = connection
+
+    with (
+        patch.object(main, "engine", mock_engine),
+        patch.object(main.SQLModel.metadata, "create_all"),
+        patch.object(main, "verify_embedding_schema"),
+    ):
+        async with main.lifespan(main.app):
+            pass
+
+    # Each startup transaction opts out of DATABASE_LOCK_TIMEOUT_MS first.
+    assert mock_engine.connect.call_count == 2
+    statements = _normalized_sql(connection)
+    assert statements[0] == "SET LOCAL lock_timeout = 0"
+    assert statements.count("SET LOCAL lock_timeout = 0") == 2
+
+
 async def test_lifespan_provisions_schema_extras(monkeypatch):
     """create_all() cannot express the view or the composite/partial/vector
     indexes, so lifespan must create them explicitly on every startup."""

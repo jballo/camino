@@ -1,12 +1,14 @@
 """Engine settings that bound dead connections and lock waits."""
 
+import threading
 import time
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 
-from app import db
+from app import db, main
 from app.config import settings
 from app.db import engine_options
 from tests.test_worker_claim_pg import pg_engine  # noqa: F401  (fixture)
@@ -75,3 +77,31 @@ def test_lock_wait_fails_instead_of_hanging(pg_engine):  # noqa: F811
 
     assert raised.value.orig.pgcode == "55P03"  # lock_not_available
     assert elapsed < 5
+
+
+async def test_startup_waits_for_a_worker_transaction_on_jobs(pg_engine):  # noqa: F811
+    config = settings.model_copy(update={"database_lock_timeout_ms": 500})
+    engine = create_engine(pg_engine.url, **engine_options(config))
+    # Like run_job: read the job row and keep the transaction open while a
+    # brief generates.
+    worker = pg_engine.connect()
+    worker.execute(text("SELECT 1 FROM jobs LIMIT 1"))
+    finish_generation = threading.Timer(2.0, worker.rollback)
+    try:
+        finish_generation.start()
+        started = time.monotonic()
+        with patch.object(main, "engine", engine):
+            async with main.lifespan(main.app):
+                pass
+        elapsed = time.monotonic() - started
+        with engine.connect() as conn:
+            lock_timeout = conn.execute(text("SHOW lock_timeout")).scalar()
+    finally:
+        finish_generation.cancel()
+        worker.close()
+        engine.dispose()
+
+    # Startup outlasted the 500 ms timeout by waiting for the worker, and the
+    # pooled connection kept the configured timeout afterwards.
+    assert elapsed >= 1.5
+    assert lock_timeout == "500ms"
