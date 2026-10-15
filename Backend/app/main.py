@@ -221,6 +221,17 @@ app.add_middleware(
     expose_headers=["Retry-After"],
 )
 
+@app.get("/health", include_in_schema=False)
+def health() -> dict[str, str]:
+    """Liveness probe for the Compose healthcheck and Caddy.
+
+    Unauthenticated and free of database and external calls: it answers as
+    long as the process serves HTTP. Startup already fails if the database or
+    schema is unusable, so there is nothing further to check here.
+    """
+    return {"status": "ok"}
+
+
 app.include_router(github.router, prefix="/api/v1/github", tags=["github"])
 app.include_router(repositories.router, prefix="/api/v1/repositories", tags=["repositories"])
 app.include_router(agent.router, prefix="/api/v1/agent", tags=["agent"])

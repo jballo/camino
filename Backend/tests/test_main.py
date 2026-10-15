@@ -181,3 +181,20 @@ def test_lifespan_skips_worker_when_disabled(monkeypatch):
     ):
         with TestClient(main.app) as _client:
             assert main.app.state.worker_task is None
+
+
+def test_health_is_unauthenticated_and_touches_nothing():
+    """The liveness probe must not run lifespan DDL or need a database: a
+    TestClient outside a ``with`` block never triggers lifespan."""
+    mock_engine = MagicMock()
+    with patch.object(main, "engine", mock_engine):
+        response = TestClient(main.app).get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    mock_engine.connect.assert_not_called()
+
+
+def test_health_is_not_part_of_the_public_schema():
+    paths = TestClient(main.app).get("/openapi.json").json()["paths"]
+    assert "/health" not in paths

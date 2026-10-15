@@ -115,11 +115,10 @@ stack boundaries and deployment order.
 
 ### Backend work required before Fargate
 
-- Add a production Dockerfile using Python 3.14, install locked `uv` dependencies, run
-  as a non-root user, and start Uvicorn on `0.0.0.0:$PORT`.
-- Add an unauthenticated `/health` liveness endpoint that does not depend on external
-  APIs. Add a readiness check that verifies required startup configuration and database
-  connectivity without calling GitHub or OpenAI.
+- Done: `Dockerfile` builds the production image (see "Production image" below).
+- Done: unauthenticated `GET /health` liveness endpoint with no database or external
+  calls. It is left out of the OpenAPI schema. A separate readiness check is not
+  needed: startup fails when the database or the embedding schema is unusable.
 - Completed: `POST /api/v1/github/connect` verifies `installationId` against the
   authenticated GitHub user's accessible installations before persisting it.
 - Revoke or uninstall the external GitHub App authorization when Clerk's confirmed
@@ -129,6 +128,34 @@ stack boundaries and deployment order.
   generated chunks are already capped.
 - Handle `SIGTERM` so in-flight jobs can finish or be cancelled cleanly; stale
   `running` rows are requeued or failed by the worker's lease recovery.
+
+### Production image
+
+`Dockerfile` builds one arm64 image that runs either the API (default command) or
+the worker. The build context is this directory; `.dockerignore` keeps tests, eval
+fixtures, `.venv`, and every `.env*` and key file out of the image.
+
+```bash
+# from the repository root; tag with the git SHA so a rollback is the previous tag
+docker build --platform linux/arm64 -t camino-backend:$(git rev-parse --short HEAD) Backend
+```
+
+- Two stages: `uv sync --frozen --no-dev` resolves the lockfile into `/opt/venv` on
+  the uv image, and the runtime stage copies only that venv and the application code
+  onto `python:3.14-slim`. Both stages pin the same Debian release so the venv's
+  interpreter link resolves. Bytecode is compiled at build time.
+- Runs as the non-root user `app` (uid 10001). Code and the venv are owned by root
+  and read-only to it.
+- API: `uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers
+  --forwarded-allow-ips '*' --no-server-header`. Only Caddy reaches port 8000 and it
+  is never published from the host, which is why every proxy peer is trusted.
+- Worker: override the command with `python -m app.worker`. On a fresh database,
+  start the API once first so it creates the schema.
+- Configuration is environment variables only (names in `.env.example`); nothing is
+  baked in. `RUN_WORKER` stays `false` in the API container.
+- `docker stop` sends `SIGTERM`: the worker exits 0 after its loop stops; uvicorn
+  finishes its shutdown and then re-raises the signal, so its exit code is 143.
+  Both are normal. Run containers with `init: true` so signals are forwarded.
 
 ### RDS and migrations
 
