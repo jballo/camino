@@ -1,4 +1,5 @@
 from typing import Annotated, Any
+from sqlalchemy.engine import make_url
 from sqlmodel import create_engine, Session
 from fastapi import Depends
 from app.config import Settings, settings
@@ -7,6 +8,14 @@ from app.config import Settings, settings
 def engine_options(config: Settings) -> dict[str, Any]:
     """Engine settings that turn a dead connection or a stuck lock wait into
     an ``OperationalError`` instead of an indefinite hang."""
+    # connect_args replaces an ``options`` value from DATABASE_URL (such as
+    # -csearch_path=...), so keep it and append the lock timeout.
+    url_options = make_url(config.database_url).query.get("options", ())
+    if isinstance(url_options, str):
+        url_options = (url_options,)
+    options = " ".join(
+        [*url_options, f"-c lock_timeout={config.database_lock_timeout_ms}"]
+    )
     return {
         "pool_size": config.database_pool_size,
         "max_overflow": config.database_max_overflow,
@@ -24,7 +33,7 @@ def engine_options(config: Settings) -> dict[str, Any]:
             "keepalives_count": config.database_keepalives_count,
             # Bounds waiting on another session's lock without capping how
             # long a statement may run once it holds its locks.
-            "options": f"-c lock_timeout={config.database_lock_timeout_ms}",
+            "options": options,
         },
     }
 

@@ -6,16 +6,32 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 
 from app import db, main
-from app.config import settings
+from app.config import Settings, settings
 from app.db import engine_options
 from tests.test_worker_claim_pg import pg_engine  # noqa: F401  (fixture)
 
 
+TIMEOUT_FIELDS = (
+    "database_connect_timeout",
+    "database_keepalives_idle",
+    "database_keepalives_interval",
+    "database_keepalives_count",
+    "database_lock_timeout_ms",
+)
+
+
+def _default_settings(**overrides) -> Settings:
+    """Shared settings with the timeout defaults, whatever the local env sets."""
+    defaults = {name: Settings.model_fields[name].default for name in TIMEOUT_FIELDS}
+    return settings.model_copy(update={**defaults, **overrides})
+
+
 def test_engine_bounds_connects_dead_connections_and_lock_waits():
-    options = engine_options(settings)
+    options = engine_options(_default_settings())
 
     assert options["pool_pre_ping"] is True
     assert options["connect_args"] == {
@@ -30,14 +46,12 @@ def test_engine_bounds_connects_dead_connections_and_lock_waits():
 
 
 def test_engine_options_follow_settings():
-    config = settings.model_copy(
-        update={
-            "database_connect_timeout": 3,
-            "database_keepalives_idle": 5,
-            "database_keepalives_interval": 2,
-            "database_keepalives_count": 4,
-            "database_lock_timeout_ms": 0,
-        }
+    config = _default_settings(
+        database_connect_timeout=3,
+        database_keepalives_idle=5,
+        database_keepalives_interval=2,
+        database_keepalives_count=4,
+        database_lock_timeout_ms=0,
     )
 
     connect_args = engine_options(config)["connect_args"]
@@ -49,8 +63,18 @@ def test_engine_options_follow_settings():
     assert connect_args["options"] == "-c lock_timeout=0"
 
 
+def test_engine_keeps_options_from_the_database_url():
+    config = _default_settings(
+        database_url="postgresql://localhost/camino?options=-csearch_path%3Dcamino"
+    )
+
+    connect_args = engine_options(config)["connect_args"]
+
+    assert connect_args["options"] == "-csearch_path=camino -c lock_timeout=30000"
+
+
 def test_postgres_accepts_the_connection_settings(pg_engine):  # noqa: F811
-    engine = create_engine(pg_engine.url, **engine_options(settings))
+    engine = create_engine(pg_engine.url, **engine_options(_default_settings()))
     try:
         with engine.connect() as conn:
             assert conn.execute(text("SHOW lock_timeout")).scalar() == "30s"
@@ -58,8 +82,22 @@ def test_postgres_accepts_the_connection_settings(pg_engine):  # noqa: F811
         engine.dispose()
 
 
+def test_postgres_keeps_the_schema_from_the_database_url(pg_engine):  # noqa: F811
+    url = pg_engine.url.update_query_dict({"options": "-csearch_path=camino"})
+    config = _default_settings(
+        database_url=url.render_as_string(hide_password=False)
+    )
+    engine = create_engine(make_url(config.database_url), **engine_options(config))
+    try:
+        with engine.connect() as conn:
+            assert conn.execute(text("SHOW search_path")).scalar() == "camino"
+            assert conn.execute(text("SHOW lock_timeout")).scalar() == "30s"
+    finally:
+        engine.dispose()
+
+
 def test_lock_wait_fails_instead_of_hanging(pg_engine):  # noqa: F811
-    config = settings.model_copy(update={"database_lock_timeout_ms": 500})
+    config = _default_settings(database_lock_timeout_ms=500)
     engine = create_engine(pg_engine.url, **engine_options(config))
     with pg_engine.begin() as conn:
         conn.execute(text("CREATE TABLE IF NOT EXISTS lock_probe (id int)"))
@@ -80,7 +118,7 @@ def test_lock_wait_fails_instead_of_hanging(pg_engine):  # noqa: F811
 
 
 async def test_startup_waits_for_a_worker_transaction_on_jobs(pg_engine):  # noqa: F811
-    config = settings.model_copy(update={"database_lock_timeout_ms": 500})
+    config = _default_settings(database_lock_timeout_ms=500)
     engine = create_engine(pg_engine.url, **engine_options(config))
     # Like run_job: read the job row and keep the transaction open while a
     # brief generates.
