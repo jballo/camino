@@ -21,6 +21,7 @@ from app.security import get_authenticated_user_id
 from app.services.fork_status import ForkStatus, resolve_fork_status
 from app.services.issue_thread import IssueThread, IssueThreadError, fetch_issue_thread
 from app.services.jobs import (
+    active_job,
     cancel_job,
     enqueue_job,
     issue_brief_dedupe_key,
@@ -239,7 +240,21 @@ def _persist_brief(
     the same ``repo@ref`` blocks in Postgres on these uncommitted rows, and the
     ingest charge below blocks on the database too.
     """
+    dedupe_key = issue_brief_dedupe_key(
+        user_id=user_id,
+        repo_name=repo_name,
+        ref=ref,
+        issue_repo=preview.issueRepo,
+        issue_number=preview.issueNumber,
+    )
     try:
+        # A repeat of a brief that is still active gets that brief back before
+        # the ingest is touched. Its ingest may have failed before a worker
+        # settled the brief, and starting a new one here would charge for an
+        # ingest nothing waits on.
+        existing = active_job(session, dedupe_key)
+        if existing is not None:
+            return existing
         dependency_id = None
         if queue_ingest:
             _, shared, created = enqueue_shared_ingest(
@@ -264,13 +279,7 @@ def _persist_brief(
             repo_name=repo_name,
             ref=ref,
             job_type=JobType.ISSUE_BRIEF,
-            dedupe_key=issue_brief_dedupe_key(
-                user_id=user_id,
-                repo_name=repo_name,
-                ref=ref,
-                issue_repo=preview.issueRepo,
-                issue_number=preview.issueNumber,
-            ),
+            dedupe_key=dedupe_key,
             topic=preview.title,
             issue_repo=preview.issueRepo,
             issue_number=preview.issueNumber,

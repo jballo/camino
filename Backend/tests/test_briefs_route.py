@@ -170,6 +170,7 @@ async def test_preview_keeps_fork_issue_identity_separate_from_upstream_code():
 def test_cold_start_wires_brief_to_ingestion_dependency():
     session = MagicMock()
     session.exec.return_value.one_or_none.return_value = None
+    session.exec.return_value.first.return_value = None
 
     def custom_session():
         yield session
@@ -218,6 +219,7 @@ def test_cold_start_wires_brief_to_ingestion_dependency():
 def test_create_brief_writes_ingest_and_brief_in_one_commit():
     session = MagicMock()
     session.exec.return_value.one_or_none.return_value = None
+    session.exec.return_value.first.return_value = None
 
     def custom_session():
         yield session
