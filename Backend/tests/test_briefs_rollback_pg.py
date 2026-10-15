@@ -1,5 +1,8 @@
 """A brief refused by the ingest limit saves nothing, against real Postgres (#100).
 
+A repeat of a still-active brief whose ingest failed starts and charges no new
+ingest (#104).
+
 ``test_briefs_rate_limit.py`` proves the route rolls back with a mocked
 session. These tests run ``create_brief`` with a real session, the real
 shared-ingest and job enqueue (including their savepoints), and query
@@ -7,15 +10,15 @@ shared-ingest and job enqueue (including their savepoints), and query
 replaced.
 """
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import text
+from sqlalchemy import text, update
 from sqlmodel import Session, select
 
 from app.api.briefs import BriefRequest, create_brief
-from app.models.job import Job, JobType
+from app.models.job import Job, JobStatus, JobType
 from app.rate_limit import REPOSITORY_INGEST_RATE_LIMIT_DETAIL, RateLimitDecision
 from tests.test_briefs_rate_limit import _preview
 from tests.test_worker_claim_pg import pg_engine  # noqa: F401  (fixture)
@@ -94,3 +97,30 @@ async def test_brief_saves_nothing_when_the_limiter_is_unavailable(engine):
 
     assert failed.value.status_code == 503
     assert _saved_jobs(engine) == []
+
+
+async def test_repeat_brief_after_its_ingest_failed_starts_and_charges_nothing(
+    engine,
+):
+    """The ingest failed, but no worker has settled the brief yet."""
+    first = await _create(
+        engine,
+        consume=lambda **_: RateLimitDecision(allowed=True, retry_after=60),
+    )
+    with Session(engine) as session:
+        session.execute(
+            update(Job)
+            .where(Job.job_type == JobType.REPOSITORY_INGEST)
+            .values(status=JobStatus.FAILED, error="clone failed")
+        )
+        session.commit()
+    consume = MagicMock(return_value=RateLimitDecision(allowed=True, retry_after=60))
+
+    repeat = await _create(engine, consume=consume)
+
+    assert repeat.id == first.id
+    consume.assert_not_called()
+    assert _saved_jobs(engine) == [
+        (JobType.REPOSITORY_INGEST, None),
+        (JobType.ISSUE_BRIEF, USER_ID),
+    ]

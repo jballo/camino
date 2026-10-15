@@ -128,6 +128,7 @@ def _app(window, indexed, active_ingests, session):
         patch("app.rate_limit.consume_fixed_window", side_effect=window.consume),
         patch("app.api.briefs._preview", new=AsyncMock(side_effect=preview)),
         patch("app.api.briefs.authorize_index_read"),
+        patch("app.api.briefs.active_job", return_value=None),
         patch(
             "app.api.briefs.enqueue_shared_ingest",
             side_effect=enqueue_shared_ingest,

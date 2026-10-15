@@ -69,7 +69,7 @@ def cancel_job(session: Session, job_id: int) -> bool:
     return result.rowcount == 1
 
 
-def _active_job(session: Session, dedupe_key: str) -> Job | None:
+def active_job(session: Session, dedupe_key: str) -> Job | None:
     return session.exec(
         select(Job)
         .where(
@@ -103,7 +103,7 @@ def enqueue_job(
     transaction; a savepoint keeps their other writes intact after a dedupe race.
     """
     repo_name = normalize_repository_name(repo_name)
-    existing = _active_job(session, dedupe_key)
+    existing = active_job(session, dedupe_key)
     if existing is not None:
         return existing, False
 
@@ -130,7 +130,7 @@ def enqueue_job(
             session.refresh(job)
             return job, True
         except exc.IntegrityError:
-            existing = _active_job(session, dedupe_key)
+            existing = active_job(session, dedupe_key)
             if existing is None:
                 raise
             return existing, False
@@ -142,7 +142,7 @@ def enqueue_job(
         return job, True
     except exc.IntegrityError:
         session.rollback()
-        existing = _active_job(session, dedupe_key)
+        existing = active_job(session, dedupe_key)
         if existing is None:
             raise
         return existing, False
