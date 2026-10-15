@@ -45,6 +45,63 @@ person on the box.
      chose, host `db` (the Compose service name), port `5432`, and database `camino`.
    - `db.env`: `POSTGRES_PASSWORD=<the same password>`.
 
+   Compose parses these files with its own rules. Three of them matter here; every
+   value in the examples below is fake.
+
+   **Use a hex database password.** Generate it on the box:
+
+   ```bash
+   openssl rand -hex 32
+   ```
+
+   It prints 64 characters of `0-9` and `a-f`, none of which need escaping in a URL
+   or in Compose. The same password goes into both files:
+
+   ```
+   # db.env
+   POSTGRES_PASSWORD=5e1f0c7a9b2d4e6f8a1c3b5d7e9f0a2b4c6d8e0f1a3b5c7d9e1f3a5b7c9d1e3f
+
+   # backend.env
+   DATABASE_URL=postgresql://camino:5e1f0c7a9b2d4e6f8a1c3b5d7e9f0a2b4c6d8e0f1a3b5c7d9e1f3a5b7c9d1e3f@db:5432/camino
+   ```
+
+   A password such as `p@ss/word` would break the URL: `@` and `/` are part of URL
+   syntax, so the app would try to reach the wrong host.
+
+   **Protect any `$` in a value.** Compose reads `$` in an unquoted or double-quoted
+   value as a variable reference. It drops the `$` and the rest of the word, starts
+   anyway, and only prints a "variable is not set" warning. This mostly matters for
+   third-party keys you do not choose yourself:
+
+   ```
+   # Wrong: the app receives "sk_ab"
+   SOME_KEY=sk_ab$cd123
+   SOME_KEY="sk_ab$cd123"
+
+   # Right: the app receives "sk_ab$cd123"
+   SOME_KEY='sk_ab$cd123'
+   SOME_KEY=sk_ab$$cd123
+   ```
+
+   **Wrap the GitHub App private key in double quotes.** Either form below works and
+   reaches the app with real line breaks (a real key has many more lines). Pasted as
+   is:
+
+   ```
+   GH_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----
+   MIIEowIBAAKCAQEAfakefakefakefakefakefakefakefakefakefake
+   fakefakefakefakefakefakefakefakefakefakefakefakefake==
+   -----END RSA PRIVATE KEY-----"
+   ```
+
+   Or on one line, with `\n` at each line break:
+
+   ```
+   GH_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAfakefake...\nfakefake...==\n-----END RSA PRIVATE KEY-----"
+   ```
+
+   Without the quotes, Compose refuses to start with "key cannot contain a space".
+
 6. **Start the stack:**
 
    ```bash
