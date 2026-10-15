@@ -8,6 +8,11 @@ class Settings(BaseSettings):
     database_url: str
     database_pool_size: int = Field(default=5, gt=0)
     database_max_overflow: int = Field(default=10, ge=0)
+    database_connect_timeout: int = Field(default=10, gt=0)
+    database_keepalives_idle: int = Field(default=30, gt=0)
+    database_keepalives_interval: int = Field(default=10, gt=0)
+    database_keepalives_count: int = Field(default=3, gt=0)
+    database_lock_timeout_ms: int = Field(default=30_000, ge=0)
     clerk_wh_key: str
     clerk_secret_key: str
     clerk_jwt_key: str | None = None

@@ -38,9 +38,17 @@ def _embedding_index_ddl() -> str | None:
     """
 
 
+# Startup DDL needs exclusive locks, and a worker's open transaction can hold a
+# conflicting lock for a whole brief or tour generation. Wait it out instead of
+# failing on DATABASE_LOCK_TIMEOUT_MS. SET LOCAL ends with the transaction, so
+# the pooled connection keeps the configured timeout afterwards.
+_WAIT_FOR_LOCKS_SQL = text("SET LOCAL lock_timeout = 0")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     with engine.connect() as conn:
+        conn.execute(_WAIT_FOR_LOCKS_SQL)
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         # The repository index is a disposable cache. Step 3 changes its
         # identity from (installation, repo) to (repo, ref), so an old-shape
@@ -63,6 +71,7 @@ async def lifespan(app: FastAPI):
     SQLModel.metadata.create_all(engine)
 
     with engine.connect() as conn:
+        conn.execute(_WAIT_FOR_LOCKS_SQL)
         # create_all() cannot express these: column storage, the composite,
         # partial, HNSW, and GIN indexes, and the view that exposes only live
         # index generations.
