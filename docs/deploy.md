@@ -26,16 +26,20 @@ person on the box.
    and add your user to the `docker` group.
 4. **Clone the repository** on the box and check out the release branch or tag.
 5. **Create the configuration directory.** It lives outside the repository and is
-   never committed:
+   never committed. It belongs to the user who runs Compose, because Compose reads
+   these files itself, as that user. Nobody else can open it:
 
    ```bash
-   sudo mkdir -p /etc/camino && sudo chmod 700 /etc/camino
-   sudo touch /etc/camino/{compose.env,backend.env,db.env}
-   sudo chmod 600 /etc/camino/*.env
+   sudo install -d -m 700 -o "$USER" -g "$USER" /etc/camino
+   for f in compose.env backend.env db.env; do install -m 600 /dev/null "/etc/camino/$f"; done
    ```
 
-   Fill the three files in an editor, not through a shell command (a command line is
-   recorded in history):
+   Owning the files yourself gives nothing away compared with root ownership: a
+   member of the `docker` group can already read any file on the box through a
+   container.
+
+   Fill the three files in an editor, without `sudo`, not through a shell command
+   (a command line is recorded in history):
 
    - `compose.env`: `CAMINO_DOMAIN=api.example.com`, `CAMINO_CONFIG_DIR=/etc/camino`,
      and `CAMINO_IMAGE_TAG=<git short SHA>`.
