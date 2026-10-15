@@ -1,0 +1,124 @@
+# Production stack for the single EC2 box: Caddy (TLS and reverse proxy), the
+# API, one job worker, and Postgres with pgvector. This file stands alone; do
+# not combine it with docker-compose.yml, which mounts source for development.
+#
+#   docker compose --env-file /etc/camino/compose.env -f docker-compose.prod.yml up -d --build
+#
+# Runbook: docs/deploy.md. Configuration lives outside the repository in
+# CAMINO_CONFIG_DIR (default /etc/camino):
+#
+#   compose.env   CAMINO_DOMAIN, CAMINO_IMAGE_TAG, CAMINO_CONFIG_DIR (no secrets;
+#                 read by Compose itself through --env-file)
+#   backend.env   API and worker settings; names in Backend/.env.example.
+#                 DATABASE_URL points at the db service: user camino, the
+#                 password from db.env, host db, port 5432, database camino.
+#   db.env        POSTGRES_PASSWORD, the same password
+#
+# No value is written here, so this file is safe to commit and to print. Never
+# render the resolved configuration (the Compose `config` subcommand without
+# --quiet): it prints the environment, secrets included.
+#
+# Memory budget on the 2 GiB t4g.small (no swap), from docs/t4g-loadtest.md:
+# api 384 + worker 400 + db 384 + caddy 128 = 1296 MiB, leaving room for the
+# host, Docker, and one more worker (`--scale worker=2`).
+
+x-logging: &logging
+  # Rotated on the box so logs cannot fill the disk.
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-backend: &backend
+  image: camino-backend:${CAMINO_IMAGE_TAG:-local}
+  build:
+    context: ./Backend
+  init: true
+  restart: always
+  env_file:
+    - ${CAMINO_CONFIG_DIR:-/etc/camino}/backend.env
+  logging: *logging
+
+services:
+  caddy:
+    image: caddy:2.11.7-alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      CAMINO_DOMAIN: ${CAMINO_DOMAIN:?set CAMINO_DOMAIN to the backend hostname, e.g. api.example.com}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data        # certificates and ACME account
+      - caddy-config:/config
+    mem_limit: 128m
+    memswap_limit: 128m
+    logging: *logging
+
+  api:
+    <<: *backend
+    environment:
+      RUN_WORKER: "false"
+    # Port 8000 is reachable only from the Compose network (Caddy); it is never
+    # published on the host.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # Startup DDL may wait on locks held by a running job.
+      start_period: 90s
+    depends_on:
+      db:
+        condition: service_healthy
+    mem_limit: 384m
+    memswap_limit: 384m
+    cpus: 0.5
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.worker"]
+    # SIGTERM stops the loop; a job still running when the grace period ends
+    # is requeued by lease recovery.
+    stop_grace_period: 30s
+    depends_on:
+      db:
+        condition: service_healthy
+      # The API provisions the schema on a fresh database.
+      api:
+        condition: service_healthy
+    mem_limit: 400m
+    memswap_limit: 400m
+    cpus: 0.75
+
+  db:
+    image: pgvector/pgvector:0.8.7-pg16-trixie
+    restart: always
+    shm_size: 256m
+    environment:
+      POSTGRES_USER: camino
+      POSTGRES_DB: camino
+    env_file:
+      - ${CAMINO_CONFIG_DIR:-/etc/camino}/db.env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U camino -d camino"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    mem_limit: 384m
+    memswap_limit: 384m
+    logging: *logging
+
+volumes:
+  pgdata:
+  caddy-data:
+  caddy-config:

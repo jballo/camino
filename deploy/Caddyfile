@@ -1,0 +1,38 @@
+# Reverse proxy in front of the Camino API (docker-compose.prod.yml).
+#
+# CAMINO_DOMAIN is the caddy service's environment variable. For a real
+# hostname Caddy obtains and renews the TLS certificate itself and redirects
+# HTTP to HTTPS; ports 80 and 443 must be reachable from the internet for the
+# certificate issuance to work. For a local rehearsal set
+# CAMINO_DOMAIN=http://localhost to serve plain HTTP on port 80.
+
+{$CAMINO_DOMAIN} {
+	encode zstd gzip
+
+	# Every request body is a small JSON document (the largest field is a
+	# 4000-character question); webhooks from Clerk and GitHub are well under this.
+	request_body {
+		max_size 1MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# Caddy sets X-Forwarded-For and X-Forwarded-Proto; uvicorn runs with
+	# --proxy-headers so the API sees the real client. The active health check
+	# makes Caddy answer 503 itself while the API is down or restarting.
+	reverse_proxy api:8000 {
+		health_uri /health
+		health_interval 30s
+		health_timeout 5s
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

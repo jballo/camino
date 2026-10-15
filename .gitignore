@@ -35,6 +35,8 @@ yarn-error.log*
 .env.*
 !.env.example
 !.env*.example
+# production config files (docs/deploy.md) belong in /etc/camino, never here
+*.env
 
 # vercel
 .vercel
