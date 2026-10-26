@@ -41,8 +41,10 @@ person on the box.
    Fill the three files in an editor, without `sudo`, not through a shell command
    (a command line is recorded in history):
 
-   - `compose.env`: `CAMINO_DOMAIN=api.example.com`, `CAMINO_CONFIG_DIR=/etc/camino`,
-     and `CAMINO_IMAGE_TAG=<git short SHA>`.
+   - `compose.env`: `CAMINO_DOMAIN=api.example.com`,
+     `CAMINO_CORS_ORIGIN=https://<the Vercel origin>` (the same origin as
+     `CORS_ORIGINS` below), `CAMINO_CONFIG_DIR=/etc/camino`, and
+     `CAMINO_IMAGE_TAG=<git short SHA>`.
    - `backend.env`: every variable from `Backend/.env.example` that has no default,
      plus `CORS_ORIGINS=https://<the Vercel origin>` and any limits you want to change.
      `DATABASE_URL` is a `postgresql://` URL with user `camino`, the password you
@@ -134,6 +136,14 @@ All commands take the same `--env-file` and `-f` flags; define a shell alias.
 
 - **Logs:** `docker compose ... logs -f api` (or `worker`, `caddy`, `db`). Caddy
   writes one JSON line per request.
+- **While the API is down or restarting:** Caddy retries failed connections for
+  about 5 seconds (a request the API already received is never sent again), then
+  answers itself with the frontend's CORS headers so the browser
+  lets the frontend read the reply: `204` to a CORS preflight, and
+  `503 {"detail": "Service temporarily unavailable"}` with `Retry-After: 10` to
+  everything else. A slow API is never taken out of rotation; requests just wait
+  for it. Any status the API itself returns, including its own `502` for a failed
+  GitHub check, passes through unchanged.
 - **Deploy a new version:** `git pull`, set `CAMINO_IMAGE_TAG` in `compose.env` to the
   new short SHA, then `up -d --build`. Compose rebuilds the image and replaces only
   the `api` and `worker` containers.

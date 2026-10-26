@@ -7,8 +7,9 @@
 # Runbook: docs/deploy.md. Configuration lives outside the repository in
 # CAMINO_CONFIG_DIR (default /etc/camino):
 #
-#   compose.env   CAMINO_DOMAIN, CAMINO_IMAGE_TAG, CAMINO_CONFIG_DIR (no secrets;
-#                 read by Compose itself through --env-file)
+#   compose.env   CAMINO_DOMAIN, CAMINO_CORS_ORIGIN, CAMINO_IMAGE_TAG,
+#                 CAMINO_CONFIG_DIR (no secrets; read by Compose itself through
+#                 --env-file)
 #   backend.env   API and worker settings; names in Backend/.env.example.
 #                 DATABASE_URL points at the db service: user camino, the
 #                 password from db.env, host db, port 5432, database camino.
@@ -49,6 +50,7 @@ services:
       - "443:443/udp"
     environment:
       CAMINO_DOMAIN: ${CAMINO_DOMAIN:?set CAMINO_DOMAIN to the backend hostname, e.g. api.example.com}
+      CAMINO_CORS_ORIGIN: ${CAMINO_CORS_ORIGIN:?set CAMINO_CORS_ORIGIN to the frontend origin, e.g. https://app.example.com}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data        # certificates and ACME account
