@@ -5,6 +5,18 @@
 # HTTP to HTTPS; ports 80 and 443 must be reachable from the internet for the
 # certificate issuance to work. For a local rehearsal set
 # CAMINO_DOMAIN=http://localhost to serve plain HTTP on port 80.
+# CAMINO_CORS_ORIGIN is the frontend's origin, for Caddy's own error responses.
+
+# Applied to the API's responses and to Caddy's own error responses, which
+# start without the headers set on the normal route.
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+}
 
 {$CAMINO_DOMAIN} {
 	encode zstd gzip
@@ -15,20 +27,63 @@
 		max_size 1MB
 	}
 
-	header {
-		Strict-Transport-Security "max-age=31536000; includeSubDomains"
-		X-Content-Type-Options "nosniff"
-		Referrer-Policy "no-referrer"
-		-Server
-	}
+	import security_headers
 
 	# Caddy sets X-Forwarded-For and X-Forwarded-Proto; uvicorn runs with
-	# --proxy-headers so the API sees the real client. The active health check
-	# makes Caddy answer 503 itself while the API is down or restarting.
+	# --proxy-headers so the API sees the real client.
+	#
+	# No active health check: with a single upstream, one slow probe would take
+	# the API out of rotation and turn a short stall into an outage (#123).
+	# While the API restarts, Caddy keeps retrying the connection for a few
+	# seconds instead of failing at once. Only failed connections are retried,
+	# so a request that reached the API is never sent twice: lb_retry_match
+	# turns off Caddy's retry of failed GET requests, and keepalive off stops
+	# Go retrying a request on a reused connection that died. A new connection
+	# per request on the Docker network costs little at our traffic.
 	reverse_proxy api:8000 {
-		health_uri /health
-		health_interval 30s
-		health_timeout 5s
+		lb_try_duration 5s
+		lb_retry_match expression false
+		transport http {
+			keepalive off
+		}
+	}
+
+	# Errors Caddy generates itself (the API is unreachable) get CORS headers so
+	# the frontend, on another origin, can read them. Responses from the API
+	# keep their status and are never replaced by this handler.
+	handle_errors 502 503 504 {
+		import security_headers
+
+		# Every frontend call sends Authorization, so the browser asks first with
+		# a preflight; a failed preflight means the real request is never sent.
+		# Answer it the way the API would. The short max-age keeps the browser
+		# from caching this answer in place of the API's own.
+		@preflight {
+			method OPTIONS
+			header Origin *
+			header Access-Control-Request-Method *
+		}
+		handle @preflight {
+			header {
+				Access-Control-Allow-Origin {$CAMINO_CORS_ORIGIN}
+				Access-Control-Allow-Methods {http.request.header.Access-Control-Request-Method}
+				Access-Control-Allow-Headers {http.request.header.Access-Control-Request-Headers}
+				Access-Control-Max-Age 10
+			}
+			respond 204
+		}
+
+		# Everything else gets a 503 in the API's error format. 502 is avoided
+		# because the API uses it for a failed GitHub check.
+		handle {
+			header {
+				Access-Control-Allow-Origin {$CAMINO_CORS_ORIGIN}
+				Access-Control-Expose-Headers Retry-After
+				Retry-After 10
+				Content-Type application/json
+			}
+			respond `{"detail": "Service temporarily unavailable"}` 503
+		}
 	}
 
 	log {
