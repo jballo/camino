@@ -3,12 +3,12 @@
 The private alpha runs the whole backend on a single EC2 `t4g.small` (2 vCPU ARM,
 2 GiB RAM) with Docker Compose. `docker-compose.prod.yml` starts four containers:
 
-| Service  | Image                              | Role                                                     |
-|----------|------------------------------------|----------------------------------------------------------|
-| `caddy`  | `caddy:2.11.7-alpine`              | Ports 80/443, automatic TLS, reverse proxy to the API    |
-| `api`    | `Backend/Dockerfile`               | FastAPI under uvicorn on port 8000 (internal only)       |
-| `worker` | same image, `python -m app.worker` | Claims ingest, tour, and brief jobs from Postgres        |
-| `db`     | `pgvector/pgvector:0.8.7-pg16`     | Postgres with pgvector; data in the `pgdata` volume      |
+| Service  | Image                                 | Role                                                  |
+|----------|---------------------------------------|-------------------------------------------------------|
+| `caddy`  | `caddy:2.11.7-alpine`                 | Ports 80/443, automatic TLS, reverse proxy to the API |
+| `api`    | `Backend/Dockerfile`                  | FastAPI under uvicorn on port 8000 (internal only)    |
+| `worker` | same image, `python -m app.worker`    | Claims ingest, tour, and brief jobs from Postgres     |
+| `db`     | `pgvector/pgvector:0.8.7-pg16-trixie` | Postgres with pgvector; data in the `pgdata` volume   |
 
 The frontend stays on Vercel and calls the API by its hostname, so the backend
 needs a real domain. Nothing here is automated yet: the steps below are run by a
@@ -89,9 +89,10 @@ person on the box.
    SOME_KEY=sk_ab$$cd123
    ```
 
-   **Wrap the GitHub App private key in double quotes.** Either form below works and
-   reaches the app with real line breaks (a real key has many more lines). Pasted as
-   is:
+   **Wrap every PEM key in double quotes.** There are two: the GitHub App private key
+   `GH_APP_PRIVATE_KEY` and the Clerk public key `CLERK_JWT_KEY`. Either form below
+   works for both and reaches the app with real line breaks (a real key has many more
+   lines). Pasted as is:
 
    ```
    GH_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----
@@ -106,7 +107,14 @@ person on the box.
    GH_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAfakefake...\nfakefake...==\n-----END RSA PRIVATE KEY-----"
    ```
 
-   Without the quotes, Compose refuses to start with "key cannot contain a space".
+   Without the quotes, the two forms fail differently:
+
+   - Pasted as is, Compose refuses to start and reports a parse error on one of the
+     key's lines (the wording depends on the key).
+   - On one line, Compose starts, but the app receives a literal `\n` instead of
+     line breaks. With a broken `CLERK_JWT_KEY`, every request that needs a
+     signed-in user returns `401`; with a broken `GH_APP_PRIVATE_KEY`, every GitHub
+     App call fails.
 
 6. **Start the stack:**
 
@@ -146,11 +154,27 @@ All commands take the same `--env-file` and `-f` flags; define a shell alias.
   GitHub check, passes through unchanged.
 - **Deploy a new version:** `git pull`, set `CAMINO_IMAGE_TAG` in `compose.env` to the
   new short SHA, then `up -d --build`. Compose rebuilds the image and replaces only
-  the `api` and `worker` containers.
-- **Roll back:** set `CAMINO_IMAGE_TAG` back to the previous SHA and run `up -d`
-  without `--build`; the old image is still on the box.
-- **Second worker:** append `--scale worker=2` to `up -d`. Each worker is budgeted at
-  400 MiB.
+  the `api` and `worker` containers. If `deploy/Caddyfile` changed, also run
+  `up -d --no-deps --force-recreate caddy`: Compose does not notice edits to a
+  mounted file, and Caddy keeps the configuration it started with.
+- **Roll back:** check that `docker image ls camino-backend` lists the previous
+  SHA, set `CAMINO_IMAGE_TAG` back to it, then `up -d --no-build --pull never`.
+  Both flags matter: the backend services have a `build:` section, so a plain
+  `up -d` with a missing image rebuilds the *current* checkout and tags it with the
+  old SHA, and without `--pull never` Compose first looks for the image on Docker
+  Hub. With both, a missing image fails with "No such image" instead. Pulling is
+  off for every service, so the Caddy and pgvector images must also be on the box
+  (they are, once the stack has run). This swaps only the backend image;
+  `deploy/Caddyfile` and the Compose file still come from the current checkout.
+- **Roll back when the old image is gone:** keep `CAMINO_IMAGE_TAG` at the previous
+  SHA, `git checkout <previous SHA>`, then `up -d --build`. This restores that
+  version's Compose file and Caddyfile on disk; if the Caddyfile differs, run
+  `up -d --no-deps --force-recreate caddy` to load it. The rebuilt image matches
+  the old code but not necessarily the old image (the base image tag may point
+  somewhere new). Checking out a SHA leaves Git on no branch, so `git pull` fails
+  until you `git switch <release branch>` before the next deploy.
+- **Second worker:** add `--scale worker=2` to the `up -d` command you are running,
+  keeping its other flags. Each worker is budgeted at 400 MiB.
 - **Stop everything:** `down`. Volumes (database, certificates) survive; `down -v`
   deletes them.
 
