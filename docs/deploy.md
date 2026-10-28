@@ -152,31 +152,80 @@ All commands take the same `--env-file` and `-f` flags; define a shell alias.
   everything else. A slow API is never taken out of rotation; requests just wait
   for it. Any status the API itself returns, including its own `502` for a failed
   GitHub check, passes through unchanged.
-- **Deploy a new version:** `git pull`, set `CAMINO_IMAGE_TAG` in `compose.env` to the
-  new short SHA, then `up -d --build`. Compose rebuilds the image and replaces only
-  the `api` and `worker` containers. If `deploy/Caddyfile` changed, also run
-  `up -d --no-deps --force-recreate caddy`: Compose does not notice edits to a
-  mounted file, and Caddy keeps the configuration it started with.
-- **Roll back:** check that `docker image ls camino-backend` lists the previous
-  SHA, set `CAMINO_IMAGE_TAG` back to it, then `up -d --no-build --pull never`.
-  Both flags matter: the backend services have a `build:` section, so a plain
-  `up -d` with a missing image rebuilds the *current* checkout and tags it with the
-  old SHA, and without `--pull never` Compose first looks for the image on Docker
-  Hub. With both, a missing image fails with "No such image" instead. Pulling is
-  off for every service, so the Caddy and pgvector images must also be on the box
-  (they are, once the stack has run). This swaps only the backend image;
-  `deploy/Caddyfile` and the Compose file still come from the current checkout.
-- **Roll back when the old image is gone:** keep `CAMINO_IMAGE_TAG` at the previous
-  SHA, `git checkout <previous SHA>`, then `up -d --build`. This restores that
-  version's Compose file and Caddyfile on disk; if the Caddyfile differs, run
-  `up -d --no-deps --force-recreate caddy` to load it. The rebuilt image matches
-  the old code but not necessarily the old image (the base image tag may point
-  somewhere new). Checking out a SHA leaves Git on no branch, so `git pull` fails
-  until you `git switch <release branch>` before the next deploy.
+- **Deploy a new version:** first note the current `CAMINO_IMAGE_TAG` in
+  `compose.env`; that SHA is what a rollback returns to. Then `git pull`, set
+  `CAMINO_IMAGE_TAG` to the new short SHA, and run `up -d --build`. Compose rebuilds
+  the image and replaces only the `api` and `worker` containers. If
+  `deploy/Caddyfile` changed, also run `up -d --no-deps --force-recreate caddy`:
+  Compose does not notice edits to a mounted file, and Caddy keeps the
+  configuration it started with.
+- **Roll back:** see [Rolling back](#rolling-back).
 - **Second worker:** add `--scale worker=2` to the `up -d` command you are running,
   keeping its other flags. Each worker is budgeted at 400 MiB.
 - **Stop everything:** `down`. Volumes (database, certificates) survive; `down -v`
   deletes them.
+
+## Rolling back
+
+A rollback puts the previous release's backend image back. The Caddyfile, the
+Compose file, and the files in `/etc/camino` are not part of that image, so first
+find out whether the release you are undoing changed them. Below,
+`<previous SHA>` is the tag you noted before deploying and `<current SHA>` is the
+tag running now.
+
+1. **See what the release changed:**
+
+   ```bash
+   docker image ls camino-backend
+   git diff --stat <previous SHA> <current SHA> -- deploy/Caddyfile docker-compose.prod.yml Backend/.env.example Backend/app/config.py
+   ```
+
+   The first command shows whether the previous image is still on the box. The
+   second only lists files; read the diff of each one it lists
+   (`git diff <previous SHA> <current SHA> -- <file>`) to see what changed.
+
+2. **Put the env files back first.** `/etc/camino` is not in git, so no command
+   below touches it. If the release changed `Backend/.env.example`,
+   `Backend/app/config.py`, or the `${...}` variables in `docker-compose.prod.yml`,
+   edit `compose.env`, `backend.env`, and `db.env` until every key the previous
+   release reads is there with the value it expects: a renamed key gets its old
+   name back, a changed value its old value. Keys that only the newer release reads
+   can stay; the previous release ignores them.
+
+3. **Follow one of these paths:**
+
+   - **Caddyfile and Compose file unchanged, previous image present:** set
+     `CAMINO_IMAGE_TAG` back to `<previous SHA>`, then
+     `up -d --no-build --pull never`. A release that changed only env keys takes
+     this path too, once step 2 is done.
+
+     Both flags matter: the backend services have a `build:` section, so a plain
+     `up -d` with a missing image rebuilds the *current* checkout and tags it with
+     the old SHA, and without `--pull never` Compose first looks for the image on
+     Docker Hub. With both, a missing image fails with "No such image" instead.
+     Pulling is off for every service, so the Caddy and pgvector images must also be
+     on the box (they are, once the stack has run).
+   - **Caddyfile or Compose file changed, previous image present:**
+     `git checkout <previous SHA>`, set `CAMINO_IMAGE_TAG` back to `<previous SHA>`,
+     then `up -d --no-build --pull never`. This restores that release's Compose file
+     and runs its original image, without a rebuild. If the Caddyfile changed, also
+     run `up -d --no-deps --force-recreate --no-build --pull never caddy` so Caddy
+     loads the restored file.
+   - **Previous image gone:** `git checkout <previous SHA>`, set `CAMINO_IMAGE_TAG`
+     back to `<previous SHA>`, then `up -d --build`, and recreate Caddy as above if
+     the Caddyfile changed. The rebuilt image matches the old code but not
+     necessarily the old image (the base image tag may point somewhere new).
+
+4. **Check it** with `ps` and the `/health` probe, as in step 7 of the setup.
+
+After a checkout, Git is on no branch and `git pull` fails. Stay there until the
+next deploy, and start that deploy with `git switch <release branch>`: switching
+puts the newer Compose file and Caddyfile back on disk, and any `up` run after
+that would use them.
+
+A rollback never undoes database changes. At startup the API adds tables and
+columns, drops old ones, and rewrites some job rows (`Backend/app/main.py`), so
+the previous release runs against whatever the newer one left behind.
 
 ## Rules
 
