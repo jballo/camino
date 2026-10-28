@@ -12,14 +12,22 @@
 # .dockerignore next to this file enforces that. Image tags should be the git
 # SHA so a rollback is redeploying the previous tag.
 
-ARG PYTHON_VERSION=3.14
+# Exact patch version: a bare 3.14 tag moves with every Python release, so two
+# builds of one commit could ship different interpreters.
+ARG PYTHON_VERSION=3.14.10
 ARG UV_VERSION=0.12.23
-# Both stages must share one Debian release so the interpreter the venv links
-# to is identical. uv publishes its python images on trixie (Debian 13).
 ARG DEBIAN_RELEASE=trixie
 
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
+# Both stages start from this one image, so the interpreter the venv was built
+# with is the one it runs on.
+FROM python:${PYTHON_VERSION}-slim-${DEBIAN_RELEASE} AS python-base
+
 # ---- build stage: resolve the locked dependencies into /opt/venv ------------
-FROM ghcr.io/astral-sh/uv:${UV_VERSION}-python${PYTHON_VERSION}-${DEBIAN_RELEASE}-slim AS build
+FROM python-base AS build
+
+COPY --from=uv /uv /uvx /bin/
 
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
     # The venv is copied to another stage, so hardlinks into the cache would break
@@ -40,7 +48,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 
 # ---- runtime stage ---------------------------------------------------------
-FROM python:${PYTHON_VERSION}-slim-${DEBIAN_RELEASE} AS runtime
+FROM python-base AS runtime
 
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
@@ -52,8 +60,8 @@ RUN groupadd --system --gid 10001 app \
 
 WORKDIR /app
 
-# The venv's python symlink points at /usr/local/bin/python3.14, which the
-# uv build image and this python image share.
+# The venv's python symlink points at /usr/local/bin/python3, which exists in
+# python-base.
 COPY --from=build --chown=root:root /opt/venv /opt/venv
 
 # Runtime code only (.dockerignore drops tests, eval fixtures, and secrets).
