@@ -140,10 +140,11 @@ fixtures, `.venv`, and every `.env*` and key file out of the image.
 docker build --platform linux/arm64 -t camino-backend:$(git rev-parse --short HEAD) Backend
 ```
 
-- Two stages: `uv sync --frozen --no-dev` resolves the lockfile into `/opt/venv` on
-  the uv image, and the runtime stage copies only that venv and the application code
-  onto `python:3.14-slim`. Both stages pin the same Debian release so the venv's
-  interpreter link resolves. Bytecode is compiled at build time.
+- Two stages on one base image, `python:3.14.10-slim-trixie` (an exact patch
+  version, so the venv always runs on the interpreter it was built with). The build
+  stage copies in the uv 0.12.23 binary and runs `uv sync --frozen --no-dev` into
+  `/opt/venv`; the runtime stage copies only that venv and the application code, so
+  uv never ships. Dependency bytecode is compiled at build time.
 - Runs as the non-root user `app` (uid 10001). Code and the venv are owned by root
   and read-only to it.
 - API: `uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers

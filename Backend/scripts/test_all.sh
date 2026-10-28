@@ -53,10 +53,13 @@ container_id="$(docker run --rm \
   -p "127.0.0.1:${host_port}:5432" \
   -d pgvector/pgvector:pg16)"
 
+# Check over TCP like pytest does: during first-boot init the image's temporary
+# server listens on the Unix socket only, and the Postgres tests skip (not fail)
+# when they cannot connect.
 ready=false
 for _attempt in {1..30}; do
   if docker exec "${container_id}" \
-    pg_isready -U test_runner -d testdb >/dev/null 2>&1; then
+    pg_isready -h 127.0.0.1 -U test_runner -d testdb >/dev/null 2>&1; then
     ready=true
     break
   fi

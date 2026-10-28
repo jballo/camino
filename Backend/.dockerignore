@@ -1,21 +1,24 @@
 # Build context for Backend/Dockerfile. Keep the image to runtime code only.
+#
+# A bare pattern matches at the top of this directory only, so the secret and
+# cache rules use `**/` to match in every subfolder too (and at the top).
 
 # Secrets and local configuration never enter the image
-.env
-.env.*
-*.pem
-*.key
-*.p12
-*.pfx
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
 
 # Local environments and caches
-.venv/
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-.DS_Store
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.DS_Store
 
 # Evaluation fixtures and tests (hundreds of MB; not needed at runtime)
 eval/
