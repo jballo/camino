@@ -16,11 +16,13 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 from alembic import command
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
+from sqlmodel import Session
 
 from app import main, migrate, schema_revision
 from app.config import settings
@@ -36,6 +38,9 @@ from app.schema_revision import (
     head_revision,
     script_directory,
 )
+from app.services import repository_ingestion
+from app.services.parser import parse_file
+from eval import ingest_local
 from tests.test_worker_claim_pg import database_unavailable
 
 
@@ -257,6 +262,71 @@ def test_hand_made_hnsw_index_is_not_a_difference(engine):
         config.attributes["connection"] = connection
         config.attributes["configure_logger"] = False
         command.check(config)
+
+
+@pytest.mark.parametrize(
+    ("column_type", "precision"),
+    [("halfvec", np.float16), ("vector", np.float32)],
+)
+async def test_ingestion_stores_embeddings_at_the_column_precision(
+    engine, monkeypatch, tmp_path, column_type, precision
+):
+    """Neither ingestion path may round to half precision on its own: the
+    fp32 experiment converts the column to vector(1536) (eval/README.md).
+    Several chunks, because batched ORM inserts cast to the declared type."""
+    _upgrade(engine)
+    if column_type == "vector":
+        with engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE code_chunk_embeddings "
+                "ALTER COLUMN embedding TYPE vector(1536) "
+                "USING embedding::vector(1536)"
+            ))
+    # Half precision keeps about 3 significant digits; these need 7.
+    values = [0.1234567 + index * 1e-6 for index in range(1536)]
+    expected = np.array(values).astype(precision)
+
+    async def embed_all(texts):
+        return [values for _ in texts]
+
+    def stored_embeddings():
+        with engine.begin() as connection:
+            rows = connection.execute(
+                text("SELECT embedding::text FROM code_chunk_embeddings")
+            ).scalars().all()
+            connection.execute(text("TRUNCATE code_chunks CASCADE"))
+        return [
+            np.array([float(v) for v in row.strip("[]").split(",")])
+            for row in rows
+        ]
+
+    source = "".join(f"def f{index}():\n    return {index}\n\n" for index in range(3))
+    monkeypatch.setattr(repository_ingestion, "embed_all", embed_all)
+    with Session(engine) as session:
+        await repository_ingestion._persist_wave(
+            session,
+            parse_file("source.py", source.encode()),
+            repo_name="owner/repo",
+            ref="main",
+            generation="test",
+        )
+    production = stored_embeddings()
+
+    monkeypatch.setattr(ingest_local, "embed_all", embed_all)
+    monkeypatch.setattr(ingest_local, "create_engine", lambda url: engine)
+    (tmp_path / "source.py").write_text(source)
+    await ingest_local.ingest(tmp_path, "owner/repo", "main")
+    evaluation = stored_embeddings()
+
+    for embeddings in (production, evaluation):
+        assert len(embeddings) == 3
+        for stored in embeddings:
+            assert np.array_equal(stored.astype(precision), expected)
+            if column_type == "vector":
+                assert not np.array_equal(
+                    stored.astype(np.float32),
+                    np.array(values).astype(np.float16).astype(np.float32),
+                )
 
 
 def test_lock_timeout_rolls_back_and_retries_with_backoff(engine):
