@@ -394,6 +394,24 @@ def _recover_stale() -> None:
         )
 
 
+def _generation_read_engine():
+    """Engine for reads made while a brief or tour is being generated.
+
+    Generation awaits the LLM, embeddings and GitHub between its reads. On a
+    normal session the first read opens a transaction that stays open across
+    those awaits, and its table locks block schema changes for the whole run.
+    Autocommit ends each statement's transaction as soon as it returns.
+
+    The session still holds one pooled connection until it is closed, and it
+    is not read-only: a write through it commits at once and cannot be rolled
+    back. Use it only for reads; claims, parking and results go through a
+    normal session. The isolation level is reset when the connection returns
+    to the pool. Built from ``engine`` at call time so tests that patch it
+    cover this engine too.
+    """
+    return engine.execution_options(isolation_level="AUTOCOMMIT")
+
+
 def _renew_job_lease(job_id: int, worker_id: str) -> bool:
     """Refresh a claim if this worker still owns it."""
     with Session(engine) as session:
@@ -717,7 +735,10 @@ async def _stamp_tour_freshness(
 
 async def run_job(job_id: int, worker_id: str) -> None:
     """Dispatch one claimed job and persist its outcome. Never raises."""
-    with Session(engine) as session:
+    with (
+        Session(engine) as session,
+        Session(_generation_read_engine()) as read_session,
+    ):
         job = session.get(Job, job_id)
         if job is None:
             logger.error("job vanished before execution | id=%s", job_id)
@@ -741,6 +762,9 @@ async def run_job(job_id: int, worker_id: str) -> None:
         issue_repo = job.issue_repo
         issue_number = job.issue_number
         refresh_cycles = job.refresh_cycles
+        # End the read transaction before generation; everything below works
+        # from the copies above.
+        session.rollback()
 
         try:
             owns_lease = _renew_job_lease(job_id, worker_id)
@@ -783,7 +807,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
         job_parked = False
         try:
             if job_type != JobType.REPOSITORY_INGEST:
-                _ensure_job_authorized(session, user_id, installation_id)
+                _ensure_job_authorized(read_session, user_id, installation_id)
             if ref is None:
                 raise PermanentRepositoryIngestionError(
                     "Legacy job is missing its repository ref"
@@ -792,15 +816,15 @@ async def run_job(job_id: int, worker_id: str) -> None:
                 if topic is None:
                     raise TourGenerationError("Tour job is missing its topic")
                 artifact = await generate_tour(
-                    session,
+                    read_session,
                     topic=topic,
                     repo_name=repo_name,
                     ref=ref,
                     cancel_event=lease_lost,
                 )
-                _ensure_job_authorized(session, user_id, installation_id)
+                _ensure_job_authorized(read_session, user_id, installation_id)
                 await _stamp_tour_freshness(
-                    session,
+                    read_session,
                     artifact,
                     repo_name=repo_name,
                     installation_id=installation_id,
@@ -816,7 +840,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     raise BriefGenerationError(
                         "Issue brief job is missing its issue metadata"
                     )
-                _ensure_job_authorized(session, user_id, installation_id)
+                _ensure_job_authorized(read_session, user_id, installation_id)
                 issue = await asyncio.to_thread(
                     fetch_issue_thread,
                     issue_repo,
@@ -859,7 +883,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
                 )
                 try:
                     artifact = await generate_brief(
-                        session,
+                        read_session,
                         issue=issue,
                         repo_name=repo_name,
                         ref=ref,
@@ -897,7 +921,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
                             repo_name,
                         )
                         artifact = await generate_brief(
-                            session,
+                            read_session,
                             issue=issue,
                             repo_name=repo_name,
                             ref=ref,
@@ -1043,6 +1067,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
         finally:
             heartbeat_stop.set()
             heartbeat.join()
+            read_session.close()
 
         if ingestion_completed:
             logger.info(

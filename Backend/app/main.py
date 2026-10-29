@@ -38,10 +38,11 @@ def _embedding_index_ddl() -> str | None:
     """
 
 
-# Startup DDL needs exclusive locks, and a worker's open transaction can hold a
-# conflicting lock for a whole brief or tour generation. Wait it out instead of
-# failing on DATABASE_LOCK_TIMEOUT_MS. SET LOCAL ends with the transaction, so
-# the pooled connection keeps the configured timeout afterwards.
+# Startup DDL needs exclusive locks, and any open transaction on these tables
+# (an API request, a worker claim or ingest publication) holds a conflicting
+# one until it ends. Wait it out instead of failing on DATABASE_LOCK_TIMEOUT_MS.
+# SET LOCAL ends with the transaction, so the pooled connection keeps the
+# configured timeout afterwards.
 _WAIT_FOR_LOCKS_SQL = text("SET LOCAL lock_timeout = 0")
 
 
