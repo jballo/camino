@@ -98,9 +98,18 @@ services:
     depends_on:
       resource_governor:
         condition: service_completed_successfully
+      # The api only checks the schema; migrate (docker-compose.yml) creates it.
+      migrate:
+        condition: service_completed_successfully
     mem_limit: ${API_MEM:-384m}
     memswap_limit: ${API_MEM:-384m}
     cpus: ${API_CPUS:-0.5}
+
+  # Exits before the run starts, so it stays outside the shared cgroup and
+  # the RAM budget.
+  migrate:
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?run under doppler so the Neon URL is set}
 
   worker:
     depends_on:

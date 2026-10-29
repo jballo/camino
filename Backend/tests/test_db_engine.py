@@ -1,6 +1,5 @@
 """Engine settings that bound dead connections and lock waits."""
 
-import threading
 import time
 from unittest.mock import patch
 
@@ -117,16 +116,15 @@ def test_lock_wait_fails_instead_of_hanging(pg_engine):  # noqa: F811
     assert elapsed < 5
 
 
-async def test_startup_waits_for_a_worker_transaction_on_jobs(pg_engine):  # noqa: F811
+async def test_startup_does_not_wait_for_locks_on_application_tables(pg_engine):  # noqa: F811
     config = _default_settings(database_lock_timeout_ms=500)
     engine = create_engine(pg_engine.url, **engine_options(config))
-    # Like run_job: read the job row and keep the transaction open while a
-    # brief generates.
-    worker = pg_engine.connect()
-    worker.execute(text("SELECT 1 FROM jobs LIMIT 1"))
-    finish_generation = threading.Timer(2.0, worker.rollback)
+    # Startup used to run DDL that queued behind any transaction on jobs. The
+    # check only reads the catalog and alembic_version, so even the strongest
+    # lock on jobs does not hold it up.
+    holder = pg_engine.connect()
+    holder.execute(text("LOCK TABLE jobs IN ACCESS EXCLUSIVE MODE"))
     try:
-        finish_generation.start()
         started = time.monotonic()
         with patch.object(main, "engine", engine):
             async with main.lifespan(main.app):
@@ -134,12 +132,13 @@ async def test_startup_waits_for_a_worker_transaction_on_jobs(pg_engine):  # noq
         elapsed = time.monotonic() - started
         with engine.connect() as conn:
             lock_timeout = conn.execute(text("SHOW lock_timeout")).scalar()
+            statement_timeout = conn.execute(text("SHOW statement_timeout")).scalar()
     finally:
-        finish_generation.cancel()
-        worker.close()
+        holder.rollback()
+        holder.close()
         engine.dispose()
 
-    # Startup outlasted the 500 ms timeout by waiting for the worker, and the
-    # pooled connection kept the configured timeout afterwards.
-    assert elapsed >= 1.5
+    assert elapsed < 0.5
+    # The check's SET LOCAL timeouts ended with its transaction.
     assert lock_timeout == "500ms"
+    assert statement_timeout == "0"

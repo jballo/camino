@@ -40,10 +40,10 @@ path.
 The FastAPI source is not committed. `ingest_local.py` auto-clones the pinned
 version into `.data/` (gitignored) on first run, so reproduction is two commands:
 
-Start the API once against a fresh database before running the harnesses so startup
-creates `repo_index_state`, `live_code_chunks`, and the required schema objects. With
-the application defaults this creates a `halfvec(1536)` embedding column with `PLAIN`
-storage and no HNSW index. The API does not need to remain running during eval commands.
+Run `uv run python -m app.migrate` against a fresh database before running the
+harnesses; the migrations create `repo_index_state`, `live_code_chunks`, and the rest
+of the schema, with a `halfvec(1536)` embedding column, `PLAIN` storage, and no HNSW
+index. The API does not need to run during eval commands.
 
 ```bash
 cd Backend
@@ -90,8 +90,12 @@ Flags: `--dataset PATH`, `--mode {hybrid,vector,fts,ablation}`, `--k`, `--limit`
 
 ## Exp7 halfvec experiment matrix
 
-Run every variant against the local throwaway test database. Start the API once
-against a fresh database before ingesting so startup creates the schema. The
+Run every variant against the local throwaway test database. Create the schema with
+`python -m app.migrate` before ingesting; it always creates `halfvec(1536)`, so the
+fp32 variant switches the column by hand first (below). An exp7 database left by a
+run before the Alembic baseline is adopted once
+([Backend/README.md](../README.md#adopting-a-database-created-by-the-api)) or
+recreated by removing the container and its volume. The
 commands below pin `DATABASE_URL` to the documented local-only credentials and set
 `VECTOR_TYPE`/`VECTOR_INDEX` explicitly for every variant, so schema validation catches
 an accidental mismatch before an experiment runs.
@@ -120,9 +124,15 @@ exp7() {
   doppler run -- env DATABASE_URL="$EXP7_DATABASE_URL" "$@"
 }
 
-# Boot once, wait for startup, then stop it with Ctrl-C.
-exp7 VECTOR_TYPE=vector VECTOR_INDEX=hnsw \
-  uv run fastapi run app/main.py --port 8002
+# Create the schema, then switch the empty column to fp32 with HNSW for V0.
+exp7 uv run python -m app.migrate
+psql "$EXP7_DATABASE_URL" <<'SQL'
+ALTER TABLE code_chunk_embeddings ALTER COLUMN embedding TYPE vector(1536);
+ALTER TABLE code_chunk_embeddings ALTER COLUMN embedding SET STORAGE PLAIN;
+CREATE INDEX ix_embeddings_hnsw ON code_chunk_embeddings
+  USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
+SQL
 
 # Confirm the server has pgvector >= 0.7 before continuing.
 psql "$EXP7_DATABASE_URL" \

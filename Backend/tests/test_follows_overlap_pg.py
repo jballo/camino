@@ -43,7 +43,6 @@ DEADLOCK_TIMEOUT_SECONDS = 10
 
 @pytest.fixture
 def engine(pg_engine):  # noqa: F811
-    UserRepoFollow.__table__.create(pg_engine, checkfirst=True)
     with Session(pg_engine) as session:
         session.execute(
             text(

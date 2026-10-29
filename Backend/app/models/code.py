@@ -1,20 +1,16 @@
 import datetime as dt
 from typing import Any
-from pgvector.sqlalchemy import HALFVEC, Vector
+from pgvector.sqlalchemy import HALFVEC
 from sqlmodel import Column, Field, SQLModel
-from sqlalchemy import DateTime, Integer, UniqueConstraint, ForeignKey
+from sqlalchemy import DateTime, Index, Integer, UniqueConstraint, ForeignKey
 from sqlalchemy.dialects.postgresql import TSVECTOR
 
-from app.config import settings
-from app.services.embeddings import EMBED_DIMENSIONS
 from app.services.parser import CodeChunk
 
 
-EMBEDDING_COLUMN_TYPE = (
-    HALFVEC(EMBED_DIMENSIONS)
-    if settings.vector_type == "halfvec"
-    else Vector(EMBED_DIMENSIONS)
-)
+# Matches EMBED_DIMENSIONS in app/services/embeddings.py. The column type is
+# fixed by the migrations; VECTOR_TYPE is only checked against it at startup.
+EMBEDDING_COLUMN_TYPE = HALFVEC(1536)
 
 
 class CodeChunkModel(SQLModel, table=True):
@@ -29,6 +25,8 @@ class CodeChunkModel(SQLModel, table=True):
             "start_line",
             name="uq_chunk_identity_gen",
         ),
+        Index("ix_chunks_repo_generation", "repo_name", "ref", "generation"),
+        Index("ix_chunks_search", "search_vector", postgresql_using="gin"),
     )
 
     id: int | None = Field(default=None, primary_key=True)

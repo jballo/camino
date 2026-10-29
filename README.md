@@ -202,6 +202,7 @@ docker compose up -d
 cd Backend
 cp .env.example .env   # fill in secrets
 uv sync
+uv run python -m app.migrate   # create or upgrade the schema
 uv run fastapi dev app/main.py --port 8000
 
 # 3. Worker (in a second terminal)
@@ -243,15 +244,13 @@ or Cloudflare Tunnel when testing deletion flows locally. The install route targ
 GitHub App slug configured via the required `GITHUB_APP_SLUG` environment variable
 (e.g. `camino-onboarder`).
 
-Startup creates missing tables and provisions pgvector, custom indexes, and the
-`live_code_chunks` view. Embeddings default to `halfvec(1536)` with exact scans and no
-HNSW index. The API and standalone worker validate that the configured embedding type
-matches the database, but they do not migrate an older schema. A database created with
-the former `vector(1536)` default, or before the shared `jobs` table and
-generation-based indexes, must be recreated for local development or upgraded with the
-explicit migration in [Backend/README.md](Backend/README.md#local-db-created-before-2026-09).
-`SQLModel.metadata.create_all()` does not add, rename, or remove columns on existing
-tables.
+Alembic migrations own the schema: run `uv run python -m app.migrate` in `Backend/`
+before starting the API, and again after pulling a new migration. Embeddings are
+`halfvec(1536)` with exact scans and no HNSW index. The API and standalone worker
+only check the schema at startup: they refuse to run unless the database is at their
+migration revision and its embedding type matches `VECTOR_TYPE`. A database the API
+created before the migrations existed is adopted once with
+`python -m app.migrate adopt` ([Backend/README.md](Backend/README.md#migrations)).
 
 1. Sign in → open **Settings** → connect or manage the GitHub App.
 2. On **Home**, paste a GitHub issue URL, review the issue warnings and discovered
@@ -291,7 +290,7 @@ npm run lint
 
 Backend coverage includes API/auth behavior, webhook cleanup, rate limiting, retrieval,
 ref-aware staged ingestion, tour and issue-brief generation/cancellation, contribution
-target discovery, shared-job lifecycle, and startup schema provisioning. The complete
+target discovery, shared-job lifecycle, and schema migrations. The complete
 backend command provisions and removes an isolated pgvector database for real concurrent
 claim/recovery tests; never point `TEST_DATABASE_URL` at the development or eval
 database because those tests truncate tables. See [Backend testing](Backend/README.md#tests)
@@ -355,9 +354,9 @@ Before the first backend deployment:
   [docs/deploy.md](docs/deploy.md)).
 - [x] Add `/health` (unauthenticated liveness probe, no database or external calls)
   and wire it into the Compose healthcheck and Caddy's upstream health check.
-- [ ] Add Alembic and commit an initial schema migration, including `halfvec` and indexes.
-- [ ] Run migrations as an explicit one-off step (`docker compose run`); do not run
-  schema creation on every app start.
+- [x] Add Alembic and commit an initial schema migration, including `halfvec` and indexes.
+- [x] Run migrations as an explicit one-off step (`docker compose run --rm migrate`);
+  startup only checks the schema revision.
 - [~] Add explicit LLM timeouts and a parsed source-file-count limit; compressed
   tarballs, expanded archive bytes, archive entries, and generated chunks are capped.
 - [x] Recover shared jobs left `running` after a task restart with expiring leases,
@@ -513,8 +512,8 @@ to revisit only if usage demands them.
 
 ## Now / next 3 actions
 
-1. **Prepare the backend for the box** — the production arm64 Dockerfile and
-   `/health` are in; introduce the full Alembic baseline.
+1. **Prepare the backend for the box** — the production arm64 Dockerfile,
+   `/health`, and the Alembic baseline with a one-off `migrate` step are in; next is CI.
 2. **Stand up the data layer** — RDS `db.t4g.micro` + pgvector with backups
    (storage plan phase 2), production secrets provisioned outside agent sessions.
 3. **Bring up the Compose stack on a `t4g.small`** — Caddy TLS on a real domain,
@@ -611,7 +610,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [x] Backend production Dockerfile (arm64) and pinned start command
 - [x] Production Compose file: Caddy TLS, API (`RUN_WORKER=false`), worker replicas, healthchecks, restart policies ([docs/deploy.md](docs/deploy.md))
 - [x] `/health` endpoint wired into Compose healthchecks and Caddy
-- [ ] Alembic baseline and explicit one-off migration step
+- [x] Alembic baseline and explicit one-off migration step
 - [ ] RDS `db.t4g.micro` + pgvector, encrypted storage, backups, security-group-only access (storage plan phase 2)
 - [ ] Production secrets provisioned according to the documented deployment procedure
 - [ ] Domain + TLS for the backend origin (Route 53 + Caddy); Vercel origin in `CORS_ORIGINS`

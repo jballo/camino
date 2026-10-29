@@ -38,22 +38,47 @@ from app.worker import (
 WORKER_ID = "test-host:1:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 
-async def test_standalone_worker_verifies_embedding_schema():
+async def test_standalone_worker_verifies_schema_before_polling():
     connection = MagicMock()
     mock_engine = MagicMock()
     mock_engine.connect.return_value.__enter__.return_value = connection
     loop = asyncio.get_running_loop()
+    events: list[str] = []
+
+    async def record_loop(_stop_event):
+        events.append("poll")
 
     with (
         patch("app.worker.engine", mock_engine),
-        patch("app.worker.verify_embedding_schema") as verify_schema,
-        patch("app.worker.worker_loop", new=AsyncMock()) as loop_worker,
+        patch(
+            "app.worker.verify_schema",
+            side_effect=lambda _conn: events.append("verify"),
+        ) as verify_schema,
+        patch("app.worker.worker_loop", side_effect=record_loop),
         patch.object(loop, "add_signal_handler"),
     ):
         await _run_standalone()
 
     verify_schema.assert_called_once_with(connection)
-    loop_worker.assert_awaited_once()
+    assert events == ["verify", "poll"]
+
+
+async def test_standalone_worker_never_polls_when_the_schema_check_fails():
+    loop = asyncio.get_running_loop()
+
+    with (
+        patch("app.worker.engine", MagicMock()),
+        patch(
+            "app.worker.verify_schema",
+            side_effect=RuntimeError("schema is behind"),
+        ),
+        patch("app.worker.worker_loop", new=AsyncMock()) as loop_worker,
+        patch.object(loop, "add_signal_handler"),
+        pytest.raises(RuntimeError, match="schema is behind"),
+    ):
+        await _run_standalone()
+
+    loop_worker.assert_not_awaited()
 
 
 def _artifact() -> TourArtifact:

@@ -15,14 +15,15 @@
 # limit is intentional for the same reason (run_t4g_test.sh skips it in the
 # budget preflight).
 #
-# The api creates the schema on first boot (pgvector extension, tables, and the
-# GIN index), so a fresh volume needs no manual setup. The credentials below
-# are local-only throwaways, not secrets.
+# The migrate service creates the schema on first boot (pgvector extension,
+# tables, indexes, and the view) before the api and workers start, so a fresh
+# volume needs no manual setup. The credentials below are local-only
+# throwaways, not secrets.
 #
 # Cleanup between runs (host port 5433):
 #   psql postgresql://loadtest:loadtest@localhost:5433/loadtest \
 #     -c 'TRUNCATE jobs, code_chunks, code_chunk_embeddings, repo_index_state'
-# Full reset (next boot re-creates the schema):
+# Full reset (the next `up` migrates the empty volume again):
 #   docker compose ... down testdb && docker volume rm camino_testdb-data
 services:
   testdb:
@@ -35,13 +36,25 @@ services:
       POSTGRES_DB: loadtest
     volumes:
       - testdb-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U loadtest -d loadtest"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   api:
     environment:
-      - DATABASE_URL=postgresql://loadtest:loadtest@testdb:5432/loadtest
+      - &testdb-database-url DATABASE_URL=postgresql://loadtest:loadtest@testdb:5432/loadtest
     depends_on:
       testdb:
         condition: service_started
+
+  migrate:
+    environment:
+      - *testdb-database-url
+    depends_on:
+      testdb:
+        condition: service_healthy
 
   worker:
     environment:
