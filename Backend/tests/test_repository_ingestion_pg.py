@@ -9,11 +9,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, select
 
 from app.config import settings
-from app.models.code import CodeChunkEmbedding, CodeChunkModel, RepoIndexState
+from app.models.code import RepoIndexState
 from app.services.embeddings import EMBED_DIMENSIONS, EmbeddingError
 from app.services.repository_ingestion import (
     TransientRepositoryIngestionError,
@@ -37,13 +37,6 @@ FILES = {
 
 @pytest.fixture
 def engine(pg_engine):  # noqa: F811
-    try:
-        with pg_engine.begin() as conn:
-            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-    except (OperationalError, ProgrammingError) as error:
-        pytest.skip(f"pgvector not available ({error})")
-    CodeChunkModel.__table__.create(pg_engine, checkfirst=True)
-    CodeChunkEmbedding.__table__.create(pg_engine, checkfirst=True)
     with Session(pg_engine) as session:
         session.execute(
             text(

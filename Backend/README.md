@@ -40,6 +40,7 @@ docker compose up -d
 cd Backend
 cp .env.example .env        # fill in secrets (see below)
 uv sync
+uv run python -m app.migrate  # create or upgrade the schema
 uv run fastapi dev app/main.py --port 8000
 
 # In a second terminal
@@ -58,11 +59,16 @@ docker compose --profile worker up -d worker
 ```
 
 The Compose worker uses `restart: always`, connects to the Compose Postgres
-service, and runs the same `python -m app.worker` entrypoint.
+service, and runs the same `python -m app.worker` entrypoint. The worker profile
+also runs a one-off `migrate` service first, so the worker starts on a migrated
+schema.
 
-On a fresh database, start the API once before the standalone worker so the API can
-install pgvector and create the schema. Both entrypoints validate the embedding column
-type before accepting work; the worker does not create or migrate schema.
+Neither the API nor the worker creates or changes the schema. Both check at startup
+that the database is at the migration revision they expect and that its embedding
+column matches `VECTOR_TYPE`, and exit with a message otherwise; run
+`python -m app.migrate` after every pull that adds a migration. A database the
+API created before the migrations existed needs adopting once (see
+[Migrations](#migrations)).
 
 Clerk user sync and GitHub App uninstall cleanup arrive via webhooks, which need a
 publicly reachable backend. To exercise them locally, expose port 8000 with a tunnel and
@@ -82,7 +88,7 @@ configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
 | `OPENAI_API_KEY` | Embeddings + agent chat |
 | `AGENT_MODEL` | Chat model (default `gpt-4o-mini`) |
 | `VECTOR_TYPE` | pgvector embedding column/query type: `halfvec` (default) or `vector`; must match the existing database column |
-| `VECTOR_INDEX` | ANN index mode: `none` (default, exact scan) or `hnsw`; the API creates the configured HNSW index on startup but never drops one automatically |
+| `VECTOR_INDEX` | ANN index mode: `none` (default, exact scan) or `hnsw`; the index is created by hand ([Vector index](#vector-index)), and startup warns when the setting and the database disagree |
 | `CORS_ORIGINS` | Allowed browser origins, comma-separated (default `http://localhost:3000`) |
 | `CLERK_SECRET_KEY` | Clerk backend API |
 | `CLERK_WH_KEY` | Clerk webhook signing secret |
@@ -150,35 +156,85 @@ docker build --platform linux/arm64 -t camino-backend:$(git rev-parse --short HE
 - API: `uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers
   --forwarded-allow-ips '*' --no-server-header`. Only Caddy reaches port 8000 and it
   is never published from the host, which is why every proxy peer is trusted.
-- Worker: override the command with `python -m app.worker`. On a fresh database,
-  start the API once first so it creates the schema.
+- Worker: override the command with `python -m app.worker`.
+- Migrations: override the command with `python -m app.migrate` and run it once
+  before starting the API and worker; neither creates the schema.
 - Configuration is environment variables only (names in `.env.example`); nothing is
   baked in. `RUN_WORKER` stays `false` in the API container.
 - `docker stop` sends `SIGTERM`: the worker exits 0 after its loop stops; uvicorn
   finishes its shutdown and then re-raises the signal, so its exit code is 143.
   Both are normal. Run containers with `init: true` so signals are forwarded.
 
-### RDS and migrations
+### Migrations
 
-The current lifespan hook in `app/main.py` runs `CREATE EXTENSION`,
-`SQLModel.metadata.create_all()`, and the custom composite, partial, and GIN indexes
-plus `live_code_chunks` and `PLAIN` embedding storage. It intentionally does not
-perform compatibility migrations. `create_all()` creates missing tables but does not
-alter existing ones, so a database created before the shared `jobs` table or
-generation-based chunk schema must be recreated for local development or upgraded
-explicitly before startup.
+Alembic owns the schema. `python -m app.migrate` (`app/migrate.py`) applies every
+pending revision in `migrations/versions/` and needs only `DATABASE_URL`. In
+production it runs as the one-off `migrate` service before the API and worker start;
+[docs/deploy.md](../docs/deploy.md#migrations) covers lock timeouts, retries, and
+rollbacks.
 
-The targeted revision in `migrations/versions/20260928_01_github_connection_no_tokens.py`
-drops the obsolete stored OAuth-token columns and adds installation activity state for
-existing databases. Run
-`doppler run -- uv run alembic upgrade head` before starting this release. A full
-initial migration for databases that do not yet have an app-created schema remains
-deployment work below.
+```bash
+uv run python -m app.migrate            # upgrade to the newest revision
+uv run python -m app.migrate current    # the database's revision and this code's
+uv run python -m app.migrate adopt      # a database the old API startup created
+```
 
-#### Local DB created before 2026-09
+The first full revision, `20261029_01`, creates every table, index, and the
+`live_code_chunks` view on an empty database: `halfvec(1536)` embeddings with `PLAIN`
+storage and no HNSW index. Never edit a revision once it is merged; change the schema
+with a new one:
 
-The default embedding schema is now `halfvec(1536)` with exact scans. Recreate an old
-local volume, or convert an fp32 volume once before startup:
+1. Change the models, then generate a draft against a database at the newest
+   revision with `uv run alembic revision --autogenerate -m "<what changes>"`. Review
+   it by hand: autogenerate does not see partial index predicates, index methods,
+   views, or column storage, and it renders SQLModel string types as
+   `sqlmodel.sql.sqltypes.AutoString`, which should become `sa.String`.
+2. Keep it compatible with the previous release (add columns nullable or with a
+   default; drop or rename only a release after the code stopped using them), so a
+   rollback can run the previous release against the new schema.
+3. Keep it transactional. A failed or timed-out upgrade rolls back completely and is
+   retried as a whole; `op.get_context().autocommit_block()` (for example `CREATE
+   INDEX CONCURRENTLY`) would commit part of it, so such a change needs its own
+   restartable procedure first.
+4. `uv run alembic check` on the migrated database must report nothing, and
+   `tests/test_migrations_pg.py` compares the migrated catalog with the models plus
+   the view and storage settings, which `alembic check` cannot see.
+
+#### Adopting a database created by the API
+
+Until the baseline, the API created and altered the schema at every startup. Such a
+database (the local dev database, the exp7 eval database, or a load-test volume)
+already has the tables, so the baseline cannot run on it. Adopt it once instead,
+with this release checked out and the API and worker stopped:
+
+```bash
+uv run python -m app.migrate adopt     # or under doppler run --, like the app
+```
+
+`adopt` compares the database's catalog with the baseline (tables, columns, types,
+defaults, constraints, indexes including their predicates, methods, and validity, the
+view, and storage) and only when they match stamps it at `20261029_01`, changing no
+data. If they differ it prints every difference and stamps nothing: fix them by hand
+and run `adopt` again, or recreate the database (`docker compose down -v`, then
+`python -m app.migrate`). Recreating loses users, connections, jobs, and briefs; the
+code index can be rebuilt by ingesting again. An `ix_embeddings_hnsw` index is
+ignored.
+
+Differences an older API startup typically leaves, with their fixes:
+
+```sql
+-- "column jobs.refresh_cycles differs ... default=0": the column was added later
+ALTER TABLE jobs ALTER COLUMN refresh_cycles DROP DEFAULT;
+-- "missing index ix_jobs_ref" (or another ix_jobs_* on a column added later)
+CREATE INDEX ix_jobs_ref ON jobs (ref);
+-- "... (INVALID: a failed build ...)": an index whose build was interrupted
+DROP INDEX <name>;  -- then create it again as the difference shows
+```
+
+If the differences include the old token columns on `githubconnections`, the
+database missed the September revision; run `uv run alembic upgrade 20260928_01`
+first. A database that has not been started since September may still have a
+`vector(1536)` column; convert it first:
 
 ```sql
 DROP INDEX IF EXISTS ix_embeddings_hnsw;
@@ -188,21 +244,29 @@ ALTER TABLE code_chunk_embeddings
 ANALYZE code_chunk_embeddings;
 ```
 
-The API and standalone worker fail fast when `VECTOR_TYPE` disagrees with the database
-column, with this migration as the recovery path. `VECTOR_INDEX=none` does not drop an
-existing `ix_embeddings_hnsw`; startup logs a warning because that index consumes
-storage but is not used by the configured exact-scan path.
+#### Vector index
+
+Search scans every embedding by default (`VECTOR_INDEX=none`). The HNSW index is not
+part of the migrations; with `VECTOR_INDEX=hnsw`, create it by hand:
+
+```sql
+CREATE INDEX ix_embeddings_hnsw ON code_chunk_embeddings
+  USING hnsw (embedding halfvec_cosine_ops) WITH (m = 16, ef_construction = 64);
+```
+
+Startup warns when `VECTOR_INDEX` and the database disagree, and never creates or
+drops the index. The API and worker refuse to start when `VECTOR_TYPE` disagrees with
+the embedding column.
+
+### RDS
 
 Before connecting ECS to RDS:
 
-1. Create the full initial Alembic migration for all SQLModel tables, the `vector`
-   extension, `halfvec(1536)` embedding column with `PLAIN` storage, and GIN index.
-2. Keep schema migration permission separate from the runtime application's normal
-   database access where practical.
-3. Package migrations in the backend image and execute them as a one-off ECS task before
+1. Keep schema migration permission separate from the runtime application's normal
+   database access where practical; the API and worker need no DDL rights.
+2. Run `python -m app.migrate` from the backend image as a one-off task before
    updating the web service.
-4. Make application startup validate the schema rather than mutate it.
-5. Use an RDS connection URL with TLS enabled, and size
+3. Use an RDS connection URL with TLS enabled, and size
    `DATABASE_POOL_SIZE`/`DATABASE_MAX_OVERFLOW` against the instance's connection budget.
 
 The private alpha can begin with Single-AZ RDS, encrypted gp3 storage, seven-day backups,
@@ -278,9 +342,11 @@ target from contribution docs, pull-request templates, recently merged PRs, or t
 default branch. If that repository/ref is not indexed, the brief is parked behind a
 deduplicated ingestion job. The worker can also request a bounded refresh when cited
 files have changed, then resumes the brief without spending a normal retry attempt.
-Legacy active brief rows that predate the stored issue-repository identity are marked
-failed at startup and must be recreated; inferring that identity from the upstream
-repository would be unsafe for issues opened on forks.
+Brief rows that predate the stored issue-repository identity (`issue_repo` is
+null) cannot be resumed; inferring that identity from the upstream repository would
+be unsafe for issues opened on forks. Older API startups marked active ones failed.
+The migrations do not rewrite job data, so a database adopted with such a row still
+active needs it failed or deleted by hand, and the brief recreated.
 
 Multiple processes can share the queue. If a worker dies, lease recovery returns its
 row to `pending` (or marks it `failed` at the attempt limit) after
@@ -546,8 +612,9 @@ uv run pytest
 ```
 
 This command never uses Doppler or application credentials. Most tests run, while
-the real-PostgreSQL claim/recovery cases use a uniquely named scratch database if the
-sanitized local PostgreSQL endpoint is reachable and otherwise skip. On a fresh
+the real-PostgreSQL cases use uniquely named scratch databases if the sanitized local
+PostgreSQL endpoint is reachable and otherwise skip. They build their schema with the
+migrations, as deploys do. On a fresh
 checkout, the structural check against the untracked FastAPI fixture also skips. Use
 `-rs` to display skip reasons.
 
@@ -563,7 +630,11 @@ If an earlier clone was interrupted, the script preserves that incomplete direct
 with an `.incomplete.<timestamp>.<pid>` suffix and installs a fresh clone automatically.
 It then starts an isolated PostgreSQL 16 + pgvector container on loopback, waits
 for it, runs pytest with a passwordless `TEST_DATABASE_URL`, and removes the
-container on exit. The complete run should report **zero skipped tests**. Docker
+container on exit. With `TEST_DATABASE_URL` set, an unreachable database fails the
+Postgres tests instead of skipping them, and the complete run should report **zero
+skipped tests**. `TEST_DATABASE_URL` must point at an empty or migrated database on
+a server where its user may create databases and roles (the migration tests create
+their own scratch databases next to it). Docker
 must be running; set `CAMINO_PYTEST_DB_PORT` only if the default host port `55432`
 is occupied. Pytest arguments pass through, for example `./scripts/test_all.sh -q`.
 
@@ -581,8 +652,10 @@ validation, issue-brief generation, cooperative cancellation, journey, brief, an
 repository-ingestion route tests, CORS origin/preflight/`Retry-After` exposure,
 fixed-window rate-limit behavior, Clerk
 JWT validation, token-derived query scoping, and rejection of legacy `userId`
-paths/body fields. Startup coverage verifies current table/index/view provisioning and
-fails active legacy briefs that lack an issue-repository identity.
+paths/body fields. Migration coverage builds the schema from an empty database with
+only `DATABASE_URL`, compares it with the models, and checks lock-timeout retries,
+concurrent migrators, the rollback opt-in, adoption, and that startup runs as a role
+that cannot change the schema.
 Account-deletion tests cover full and shared-installation
 cleanup, idempotent webhook replay, rollback, retryable failures, and signature rejection.
 GitHub installation tests cover set-based cleanup, idempotent replay, rollback,

@@ -31,8 +31,8 @@ doppler run -- docker compose -f docker-compose.yml -f docker-compose.t4g.yml \
   -f docker-compose.testdb.yml --profile worker up -d --scale worker=3
 ```
 
-First boot takes a few minutes (uv installs into the venv volumes; the api then
-creates the schema in testdb). Later boots reuse the volumes and are fast.
+First boot takes a few minutes (uv installs into the venv volumes; the `migrate`
+service then creates the schema in testdb). Later boots reuse the volumes and are fast.
 
 **2. Confirm it's ready:**
 
@@ -89,7 +89,7 @@ scorched-earth reset of the test database only, add:
 docker volume rm camino_testdb-data
 ```
 
-(the api re-creates the schema on next boot, and the next enqueue re-seeds the
+(the `migrate` service re-creates the schema on next boot, and the next enqueue re-seeds the
 placeholder connection row). Avoid `down -v` unless you also want to sit through
 a full dependency reinstall — it deletes the venv/uv-cache volumes too.
 
@@ -130,8 +130,8 @@ The harness (committed alongside this doc):
   `./run_t4g_test.sh --local-db`. This is the recommended target: Neon's free tier is
   0.5 GB and already ~450 MB full, so full-ingestion runs there could hit the storage
   cap mid-test. The testdb sits **outside** the `/camino-t4g` cgroup on purpose — it
-  models Neon, which is external and consumes none of the instance's budget. The api
-  creates the schema on first boot; cleanup is a truncate on `localhost:5433` or a
+  models Neon, which is external and consumes none of the instance's budget. The `migrate`
+  service creates the schema on first boot; cleanup is a truncate on `localhost:5433` or a
   volume delete (commands in the file header). Fidelity trade-off: DB round-trips
   lose Neon's network latency, so drain times read slightly optimistic on DB I/O —
   the RAM/CPU/queue-wait verdicts are unaffected. The preflight fails if the testdb
@@ -457,8 +457,8 @@ Changes that could sneak up on us:
 - Between `--local-db` runs, truncate on the host port —
   `psql postgresql://loadtest:loadtest@localhost:5433/loadtest -c 'TRUNCATE jobs,
   code_chunks, code_chunk_embeddings, repo_index_state'` — or delete the
-  `camino_testdb-data` volume for a full reset (the api re-creates the schema on
-  next boot). No Neon storage is consumed either way.
+  `camino_testdb-data` volume for a full reset (the `migrate` service re-creates the
+  schema on next boot). No Neon storage is consumed either way.
 - Stop host dev servers before a run so they do not consume the shared CPU/memory
   budget or accidentally target the load-test database. The preflight checks this
   machine for stray processes and out-of-stack containers; the testdb overlay keeps

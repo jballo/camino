@@ -1,14 +1,20 @@
 # Production stack for the single EC2 box: Caddy (TLS and reverse proxy), the
-# API, one job worker, and Postgres with pgvector. This file stands alone; do
-# not combine it with docker-compose.yml, which mounts source for development.
+# API, one job worker, Postgres with pgvector, and a one-off migration step.
+# This file stands alone; do not combine it with docker-compose.yml, which
+# mounts source for development.
 #
-#   docker compose --env-file /etc/camino/compose.env -f docker-compose.prod.yml up -d --build
+#   docker compose --env-file /etc/camino/compose.env -f docker-compose.prod.yml build
+#   docker compose --env-file /etc/camino/compose.env -f docker-compose.prod.yml run --rm migrate
+#   docker compose --env-file /etc/camino/compose.env -f docker-compose.prod.yml up -d
+#
+# Migrate before `up -d`: if the migration fails, the running release stays up.
 #
 # Runbook: docs/deploy.md. Configuration lives outside the repository in
 # CAMINO_CONFIG_DIR (default /etc/camino):
 #
 #   compose.env   CAMINO_DOMAIN, CAMINO_CORS_ORIGIN, CAMINO_IMAGE_TAG,
-#                 CAMINO_CONFIG_DIR (no secrets; read by Compose itself through
+#                 CAMINO_CONFIG_DIR, and CAMINO_ALLOW_SCHEMA_REVISION during a
+#                 rollback only (no secrets; read by Compose itself through
 #                 --env-file)
 #   backend.env   API and worker settings; names in Backend/.env.example.
 #                 DATABASE_URL points at the db service: user camino, the
@@ -21,7 +27,8 @@
 #
 # Memory budget on the 2 GiB t4g.small (no swap), from docs/t4g-loadtest.md:
 # api 384 + worker 400 + db 384 + caddy 128 = 1296 MiB, leaving room for the
-# host, Docker, and one more worker (`--scale worker=2`).
+# host, Docker, and one more worker (`--scale worker=2`). migrate (192 MiB)
+# runs only for a moment during a deploy.
 
 x-logging: &logging
   # Rotated on the box so logs cannot fill the disk.
@@ -29,6 +36,11 @@ x-logging: &logging
   options:
     max-size: "10m"
     max-file: "5"
+
+# Empty unless a rollback runs a release against the newer schema the release
+# it replaced left behind (docs/deploy.md, "Rolling back").
+x-schema-revision: &schema-revision
+  CAMINO_ALLOW_SCHEMA_REVISION: ${CAMINO_ALLOW_SCHEMA_REVISION:-}
 
 x-backend: &backend
   image: camino-backend:${CAMINO_IMAGE_TAG:-local}
@@ -59,9 +71,27 @@ services:
     memswap_limit: 128m
     logging: *logging
 
+  # Applies pending migrations, then exits. The API and worker only check the
+  # schema revision, so they start after it succeeds.
+  migrate:
+    <<: *backend
+    command: ["python", "-m", "app.migrate"]
+    # One run per deploy; a failed migration is fixed by a person, not retried
+    # in a loop.
+    restart: "no"
+    environment:
+      <<: *schema-revision
+    depends_on:
+      db:
+        condition: service_healthy
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: 0.5
+
   api:
     <<: *backend
     environment:
+      <<: *schema-revision
       RUN_WORKER: "false"
     # Port 8000 is reachable only from the Compose network (Caddy); it is never
     # published on the host.
@@ -74,11 +104,13 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      # Startup DDL may wait on locks held by a running job.
-      start_period: 90s
+      # Imports and the read-only schema check; startup changes nothing.
+      start_period: 30s
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     mem_limit: 384m
     memswap_limit: 384m
     cpus: 0.5
@@ -86,15 +118,16 @@ services:
   worker:
     <<: *backend
     command: ["python", "-m", "app.worker"]
+    environment:
+      <<: *schema-revision
     # SIGTERM stops the loop; a job still running when the grace period ends
     # is requeued by lease recovery.
     stop_grace_period: 30s
     depends_on:
       db:
         condition: service_healthy
-      # The API provisions the schema on a fresh database.
-      api:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     mem_limit: 400m
     memswap_limit: 400m
     cpus: 0.75

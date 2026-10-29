@@ -121,9 +121,8 @@ latency, not storage; next step would be `db.t4g.small` (~$26/month) or Supabase
 ($25 flat, 8 GB) if leaving AWS is acceptable.
 
 RDS will start fresh rather than receive a vector migration. The production target is
-to apply the `vector` extension and phase-1 schema through the planned one-off migration
-task before starting the service; the current local app startup creates the equivalent
-schema. Then point the deployment at RDS and re-ingest followed repos (a few dollars
+to apply the `vector` extension and phase-1 schema through the one-off migration
+task (`python -m app.migrate`) before starting the service. Then point the deployment at RDS and re-ingest followed repos (a few dollars
 total).
 
 ## Unlocked follow-ups

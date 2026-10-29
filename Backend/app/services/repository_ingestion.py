@@ -19,7 +19,7 @@ from sqlalchemy import exc, text
 from sqlmodel import Session
 
 from app.config import settings
-from app.models.code import CodeChunkEmbedding, CodeChunkModel
+from app.models.code import CodeChunkModel, insert_embeddings
 from app.services.embeddings import (
     EMBED_DIMENSIONS,
     EMBED_MODEL,
@@ -417,16 +417,17 @@ async def _persist_wave(
         raise PermanentRepositoryIngestionError(
             f"Chunk text is incompatible with the database (files: {files})"
         ) from error
-    session.add_all(
+    insert_embeddings(
+        session,
         [
-            CodeChunkEmbedding(
-                chunk_id=chunk.id,
-                model_name=EMBED_MODEL,
-                dimension=EMBED_DIMENSIONS,
-                embedding=vector,
-            )
+            {
+                "chunk_id": chunk.id,
+                "model_name": EMBED_MODEL,
+                "dimension": EMBED_DIMENSIONS,
+                "embedding": vector,
+            }
             for chunk, vector in zip(chunk_models, vectors, strict=True)
-        ]
+        ],
     )
     session.commit()
     return len(chunk_models)

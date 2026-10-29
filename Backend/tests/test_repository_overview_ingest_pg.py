@@ -15,10 +15,8 @@ from sqlmodel import Session
 
 from app.api import repositories
 from app.api.repositories import repository_overview
-from app.models.code import CodeChunkModel
 from app.models.github_connection import GithubConnections
 from app.models.job import Job, JobStatus
-from app.models.repo_follow import UserRepoFollow
 from app.services.installation_state import SUSPENSION_ERROR
 from app.services.repository_ingestion import _PUBLISH_GENERATION_SQL
 from app.services.shared_ingests import enqueue_shared_ingest
@@ -33,8 +31,6 @@ INSTALLATION_ID = 12
 
 @pytest.fixture
 def engine(pg_engine):  # noqa: F811
-    UserRepoFollow.__table__.create(pg_engine, checkfirst=True)
-    CodeChunkModel.__table__.create(pg_engine, checkfirst=True)
     with Session(pg_engine) as session:
         session.execute(
             text(
