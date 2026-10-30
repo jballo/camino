@@ -51,7 +51,7 @@ container_id="$(docker run --rm \
   -e POSTGRES_USER=test_runner \
   -e POSTGRES_DB=testdb \
   -p "127.0.0.1:${host_port}:5432" \
-  -d pgvector/pgvector:pg16)"
+  -d pgvector/pgvector:0.8.7-pg16-trixie)"
 
 # Check over TCP like pytest does: during first-boot init the image's temporary
 # server listens on the Unix socket only, and the Postgres tests skip (not fail)
