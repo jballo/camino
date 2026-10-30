@@ -618,7 +618,8 @@ migrations, as deploys do. On a fresh
 checkout, the structural check against the untracked FastAPI fixture also skips. Use
 `-rs` to display skip reasons.
 
-Before merging any backend PR, run the complete suite:
+Before merging any backend PR, run the complete suite (CI runs the same script on
+every PR into `dev` and `main`):
 
 ```bash
 ./scripts/test_all.sh

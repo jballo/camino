@@ -286,7 +286,14 @@ uv run pytest
 cd ../Frontend
 npm test
 npm run lint
+npx next typegen && npx tsc --noEmit
 ```
+
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every PR into and
+push to `dev` and `main`: the `backend` job runs `uv sync --locked` and then
+`./scripts/test_all.sh`, and the `frontend` job runs lint, the typecheck above, and
+Vitest. Vercel builds the frontend, so CI does not run `next build`. Neither job uses
+secrets.
 
 Backend coverage includes API/auth behavior, webhook cleanup, rate limiting, retrieval,
 ref-aware staged ingestion, tour and issue-brief generation/cancellation, contribution
