@@ -18,8 +18,8 @@ person on the box.
 
 ## One-time setup
 
-1. **Launch the instance.** Ubuntu 24.04 arm64 on a `t4g.small`, 20 GB gp3 root
-   volume, an Elastic IP. Security group inbound: 22 from your IP only, 80 and 443
+1. **Launch the instance.** Ubuntu 24.04 arm64 on a `t4g.small`, 20 GB encrypted
+   gp3 root volume, an Elastic IP, and the IAM role from [Backups](#backups). Security group inbound: 22 from your IP only, 80 and 443
    from anywhere. Outbound open (GitHub, OpenAI, Clerk, Let's Encrypt).
 2. **Point DNS at it.** An `A` record for the backend hostname (for example
    `api.example.com`) to the Elastic IP. Caddy cannot obtain a certificate until the
@@ -142,6 +142,7 @@ person on the box.
 
 8. **Register the webhooks** at `https://api.example.com/webhooks/clerk` and
    `https://api.example.com/webhooks/github`, and set the GitHub App's callback URL.
+9. **Set up backups:** [Backups](#backups).
 
 ## Day to day
 
@@ -158,9 +159,22 @@ All commands take the same `--env-file` and `-f` flags; define a shell alias.
   for it. Any status the API itself returns, including its own `502` for a failed
   GitHub check, passes through unchanged.
 - **Deploy a new version:** first note the current `CAMINO_IMAGE_TAG` in
-  `compose.env`; that SHA is what a rollback returns to. Then `git pull`, set
+  `compose.env`; that SHA is what a rollback returns to. Then pause the nightly
+  dump and take one of your own:
+
+  ```bash
+  sudo systemctl stop camino-db-dump.timer
+  camino-db-dump pre-deploy
+  ```
+
+  It waits for a nightly dump that is still running. If it fails, do not deploy:
+  run `sudo systemctl start camino-db-dump.timer` and fix the dump first. Then
+  `git pull`, set
   `CAMINO_IMAGE_TAG` to the new short SHA, and run the same three commands as the
-  first start: `build`, `run --rm migrate`, `up -d`. If `migrate` fails, stop
+  first start: `build`, `run --rm migrate`, `up -d`. Whether the deploy worked or
+  not, finish with `sudo systemctl start camino-db-dump.timer`, and if the release
+  changed `deploy/backup/`, update the installed copies
+  ([Install on the box](#install-on-the-box-once)). If `migrate` fails, stop
   there: the previous release is still running and the database is unchanged
   ([Migrations](#migrations)). `up -d` runs `migrate` once more (it finds nothing
   to do) and replaces only the `api` and `worker` containers. If
@@ -224,11 +238,10 @@ tag running now.
    safe because every migration stays compatible with the release before it
    ([Migrations](#migrations)). Delete the line at the next deploy.
 
-3. **Follow one of these paths.** The release that added the Alembic baseline
-   (revision `20261029_01`) is a rollback boundary: older images have no
-   `app.migrate` and change the schema at startup themselves. To go back past
-   it, use a checkout path below (never the tag-only one) and restore the
-   database dump taken before the deploy.
+3. **Follow one of these paths.** Never roll back to a release older than the
+   first production deploy. That deploy already includes the Alembic baseline
+   (revision `20261029_01`); older images have no `app.migrate` and change the
+   schema at startup themselves.
 
    Every path first checks the schema with the previous release's own image,
    while the current release keeps serving. With the image already on the box,
@@ -275,7 +288,9 @@ that would use them.
 
 A rollback never undoes database changes: the previous release runs against the
 schema the newer one migrated to, accepted through `CAMINO_ALLOW_SCHEMA_REVISION`
-(step 2).
+(step 2). Putting the database itself back is a separate step,
+[Restoring from a dump](#restoring-from-a-dump), and loses every write made
+after the dump.
 
 ## Migrations
 
@@ -319,6 +334,296 @@ release expects, or the one `CAMINO_ALLOW_SCHEMA_REVISION` names.
   each other or for `migrate`. The API and worker check the revision again, and
   `restart: always` retries them until the database is up.
 
+## Backups
+
+`camino-db-dump` (`deploy/backup/dump-db.sh`) dumps the database every night at
+03:00 UTC and before every deploy. It keeps recent dumps in
+`/var/backups/camino` and copies each one to S3.
+
+- **What a dump holds:** every table's schema, and the rows of users, GitHub
+  connections, follows, rate limits, and jobs (every brief and tour lives in
+  a job). It leaves out the rows of `code_chunks`, `code_chunk_embeddings`, and
+  `repo_index_state`: they are the index cache, which re-ingesting rebuilds. The
+  index state goes with the chunks because, restored on its own, it would mark
+  repos as indexed with nothing behind them.
+- **What it can lose:** a restore loses every write made after the dump. With
+  one dump a night, that is up to a day, plus up to 15 minutes of timer jitter,
+  plus any nights whose dump failed.
+- **How it is checked:** pg_dump runs inside the `db` container over its local
+  socket, so no password is involved. Before a dump is kept, every row in it is
+  decoded once (`pg_restore --file=/dev/null`), and a `.sha256` file is written
+  next to it. A dump without its `.sha256` is incomplete; never restore one.
+- **Retention:** the newest 14 nightly and 3 pre-deploy dumps on the box. In S3,
+  a dump can expire once it is 30 days old; an expired or overwritten version can
+  be deleted for good 7 days after that. S3 runs these rules in the background,
+  so deletion can come a little later, never earlier.
+- **Privacy:** dumps are compressed, not encrypted. They hold email addresses,
+  issue text, and code snippets, so they stay in a directory only the deploy
+  user can read, on the encrypted root volume, and in an encrypted bucket
+  reached over HTTPS.
+
+### S3 (once, from your own machine or the console)
+
+1. **Create a bucket** in the box's region: Block Public Access on (all four
+   settings), Object Ownership "Bucket owner enforced", Versioning on, default
+   encryption SSE-S3.
+2. **Refuse plain HTTP** with a bucket policy:
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Sid": "DenyInsecureTransport",
+       "Effect": "Deny",
+       "Principal": "*",
+       "Action": "s3:*",
+       "Resource": ["arn:aws:s3:::<bucket>", "arn:aws:s3:::<bucket>/*"],
+       "Condition": {"Bool": {"aws:SecureTransport": "false"}}
+     }]
+   }
+   ```
+
+3. **Expire old dumps.** Save this as `lifecycle.json` and run
+   `aws s3api put-bucket-lifecycle-configuration --bucket <bucket> --lifecycle-configuration file://lifecycle.json`:
+
+   ```json
+   {
+     "Rules": [
+       {
+         "ID": "expire-dumps",
+         "Status": "Enabled",
+         "Filter": {"Prefix": "db/"},
+         "Expiration": {"Days": 30},
+         "NoncurrentVersionExpiration": {"NoncurrentDays": 7},
+         "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1}
+       },
+       {
+         "ID": "remove-expired-delete-markers",
+         "Status": "Enabled",
+         "Filter": {"Prefix": "db/"},
+         "Expiration": {"ExpiredObjectDeleteMarker": true}
+       }
+     ]
+   }
+   ```
+
+4. **Give the box upload-only access.** Create an IAM role for EC2 with only
+   this policy and attach it to the instance:
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Effect": "Allow",
+       "Action": "s3:PutObject",
+       "Resource": "arn:aws:s3:::<bucket>/db/*"
+     }]
+   }
+   ```
+
+   The box can add dumps but cannot list, read, or delete them. Someone who
+   breaks into the box can still overwrite a dump; versioning keeps the
+   overwritten version for the 7 days above, so check the bucket within a week
+   of a break-in. No access key is stored on the box.
+5. **Restores use your own AWS login**, which needs `s3:ListBucket` on the bucket
+   and `s3:GetObject` on `db/*` (plus `s3:ListBucketVersions` and
+   `s3:GetObjectVersion` to fetch an overwritten version). Never put its keys on
+   the box.
+
+### Install on the box (once)
+
+From the checkout, as the user who runs Compose:
+
+```bash
+sudo snap install aws-cli --classic
+sudo install -d -m 700 -o "$USER" -g "$USER" /var/backups/camino
+sudo install -m 755 deploy/backup/dump-db.sh /usr/local/bin/camino-db-dump
+[ -e /etc/camino/backup.conf ] || install -m 600 /dev/null /etc/camino/backup.conf
+```
+
+The script is installed outside the checkout, so a rollback that checks out an
+older commit keeps it. Fill `/etc/camino/backup.conf` in an editor (no quotes):
+
+```
+CAMINO_BACKUP_S3_URI=s3://<bucket>/db
+CAMINO_BACKUP_S3_REGION=<region>
+```
+
+Then the timer. The service file assumes the user `ubuntu` and the checkout
+`/home/ubuntu/camino`; edit `User=` and `WorkingDirectory=` if yours differ:
+
+```bash
+sudo cp deploy/backup/camino-db-dump.service deploy/backup/camino-db-dump.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl start camino-db-dump.service
+sudo systemctl enable --now camino-db-dump.timer
+```
+
+The `start` takes one dump right away, which proves the user, paths, and S3
+role work. Check that it shows up both in `/var/backups/camino` and in
+`aws s3 ls s3://<bucket>/db/` (run on your machine).
+
+When a release changes anything in `deploy/backup/`, update the installed copies.
+This leaves `backup.conf` alone, but the copied service file replaces any `User=`
+or `WorkingDirectory=` edits: make them again before `daemon-reload`.
+
+```bash
+sudo install -m 755 deploy/backup/dump-db.sh /usr/local/bin/camino-db-dump
+sudo cp deploy/backup/camino-db-dump.service deploy/backup/camino-db-dump.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+```
+
+### Check it
+
+- `systemctl list-timers camino-db-dump.timer`: when it last ran and runs next.
+- `systemctl status camino-db-dump.service`: whether the last run worked;
+  `journalctl -u camino-db-dump.service -n 50` shows its messages.
+- `ls -lt /var/backups/camino | head`: the newest `-nightly.dump` should be about
+  a day old at most (up to about 24¼ hours with the timer's random delay), with
+  its `.sha256` next to it. A dump on the box does not prove it reached S3; only
+  the service result does. A failed upload is not retried: S3 then holds at most
+  the dump without its `.sha256`, which cannot be restored from there, and only
+  the copy on the box is complete.
+- `df -h /` and `du -sh /var/backups/camino`: keep a few GB free for Docker
+  images, logs, and Postgres.
+
+Nothing alerts on a failed dump yet; check once a week until alerts exist.
+`Persistent=true` catches up a run missed while the box was off, but never
+retries one that failed.
+
+## Restoring from a dump
+
+Restoring puts the whole database back to the moment of a dump and loses every
+write made after it. Use it when data is lost or damaged (a bad migration, a
+mistaken delete, a lost volume). A normal rollback does not need it.
+
+Run everything from the checkout, with these two helpers:
+
+```bash
+dc() { docker compose --env-file /etc/camino/compose.env -f docker-compose.prod.yml "$@"; }
+pg() { dc exec -T db psql --no-password -h /var/run/postgresql -U camino -v ON_ERROR_STOP=1 "$@"; }
+```
+
+1. **Stop the timer and wait for any dump in progress:**
+
+   ```bash
+   sudo systemctl stop camino-db-dump.timer
+   flock --wait 900 /var/backups/camino/.lock true
+   ```
+
+   If `flock` waits, a dump is still finishing.
+
+   Do not deploy or run anything else against the database until the end.
+2. **Get the dump and its `.sha256`.** Local dumps are in `/var/backups/camino`.
+   For one from S3, download both files on your own machine with your own AWS
+   login, check them there (`sha256sum -c <name>.sha256`, or
+   `shasum -a 256 -c` on macOS), and copy both into `/var/backups/camino` with
+   `scp`.
+3. **Check its checksum on the box** (`<name>` is the dump's file name):
+
+   ```bash
+   (cd /var/backups/camino && sha256sum -c <name>.sha256)
+   ```
+
+4. **Stop the writers:** `dc stop api worker`. Caddy answers `503` until the end.
+   If the `pgdata` volume was lost, start an empty database instead, which the
+   swap below sets aside, and do not run `migrate` on it:
+
+   ```bash
+   dc up -d --wait db
+   ```
+
+5. **Decode it, then restore it into a fresh database:**
+
+   ```bash
+   dc exec -T db pg_restore --file=/dev/null < /var/backups/camino/<name>
+   pg -d postgres -c 'DROP DATABASE IF EXISTS camino_restore' -c 'CREATE DATABASE camino_restore'
+   dc exec -T db pg_restore --no-password -h /var/run/postgresql -U camino -d camino_restore \
+     --no-owner --exit-on-error --single-transaction < /var/backups/camino/<name>
+   ```
+
+6. **Fail the work that was in flight.** Jobs that were pending or running when
+   the dump was taken would otherwise run against the empty index cache (a tour
+   can fail for good with "no grounded steps"), and their dedupe keys would
+   block the same request from being made again:
+
+   ```bash
+   pg -d camino_restore <<'SQL'
+   UPDATE public.jobs
+   SET status = 'failed',
+       error = 'Restored from backup; request indexing, then retry this work.',
+       claimed_at = NULL,
+       claimed_by = NULL,
+       "updatedAt" = now()
+   WHERE status IN ('pending', 'running');
+   SQL
+   ```
+
+   Finished briefs and tours are untouched; they keep their own snippets and do
+   not need the cache.
+7. **Swap the databases**, keeping the current one as `camino_old`:
+
+   ```bash
+   pg -d postgres <<'SQL'
+   SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+   WHERE datname IN ('camino', 'camino_restore') AND pid <> pg_backend_pid();
+   ALTER DATABASE camino RENAME TO camino_old;
+   ALTER DATABASE camino_restore RENAME TO camino;
+   SQL
+   ```
+
+   If `camino_old` already exists from an earlier restore, drop it first. A
+   terminated session can take a moment to exit, so a rename can fail with
+   "being accessed by other users". The block stops at the first error: if the
+   first rename failed, nothing changed, so wait a few seconds and run the block
+   again; if only the second failed, run just that one,
+   `pg -d postgres -c 'ALTER DATABASE camino_restore RENAME TO camino'`.
+8. **Check the schema revision:**
+
+   ```bash
+   dc run --rm migrate python -m app.migrate current
+   ```
+
+   It prints `database:` and `release:`. They must match before you go on; the
+   command never fails on its own when they differ. If the dump is older than
+   the release, either run the release the dump came from, or upgrade on purpose
+   with `dc run --rm migrate`. To give up instead, swap back, then go on with
+   step 9:
+
+   ```bash
+   pg -d postgres <<'SQL'
+   SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+   WHERE datname IN ('camino', 'camino_old') AND pid <> pg_backend_pid();
+   ALTER DATABASE camino RENAME TO camino_restore;
+   ALTER DATABASE camino_old RENAME TO camino;
+   SQL
+   ```
+
+9. **Start everything:** `dc up -d`, then check `dc ps` and the `/health` probe,
+   and sign in and open a brief. `/health` alone proves nothing here: it never
+   touches the database.
+10. **Clean up** once the data looks right. Drop the copy you did not keep:
+    `camino_old` after a restore, `camino_restore` after a swap back.
+
+    ```bash
+    pg -d postgres -c 'DROP DATABASE camino_old'
+    sudo systemctl start camino-db-dump.timer
+    ```
+
+11. **Rebuild the index cache.** Request indexing again in Explore for the repos
+    people use. These list the candidates (follows miss repos people reach
+    through their GitHub App installation, so check both):
+
+    ```bash
+    pg -d camino -c "SELECT repo_name, ref, max(\"updatedAt\") AS last_indexed FROM jobs WHERE job_type = 'repository_ingest' AND status = 'complete' GROUP BY 1, 2 ORDER BY 3 DESC"
+    pg -d camino -c 'SELECT repo_name, count(*) AS followers FROM user_repo_follows GROUP BY 1 ORDER BY 2 DESC'
+    ```
+
+    Until a repo is indexed again, Explore still says "Index ready" for it
+    (#144), and requesting indexing still works.
+
+Rate limits are restored as they were; their windows expire on their own.
+
 ## Rules
 
 - The env files never leave `/etc/camino` and are never pasted into a chat or an
@@ -329,6 +634,6 @@ release expects, or the one `CAMINO_ALLOW_SCHEMA_REVISION` names.
 
 ## Not done yet
 
-Tracked on the project board: nightly database dump, CI, and the move to RDS. Until the dump exists, the `pgdata` volume is
-the only copy of users, connections, jobs, and briefs; code chunks and embeddings
-are a rebuildable cache.
+Tracked on the project board: the move to RDS, whose automated backups and
+point-in-time recovery replace the nightly dump, and alerts (today a failed dump
+shows only in the journal).

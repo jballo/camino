@@ -1,0 +1,19 @@
+# Nightly database dump; started by camino-db-dump.timer. Install and check it
+# with docs/deploy.md, "Backups". User and WorkingDirectory must be the account
+# that runs Compose and its repository checkout: edit them if yours differ.
+[Unit]
+Description=Camino database dump
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/camino
+# No login shell here: the AWS CLI snap lives in /snap/bin.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/snap/bin
+ExecStart=/usr/local/bin/camino-db-dump nightly
+TimeoutStartSec=30min
+Nice=10
+IOSchedulingClass=idle

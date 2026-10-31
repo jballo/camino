@@ -470,8 +470,10 @@ explicitly checked (not assumed) before real users touch the deployment.
 - [ ] **GitHub App permissions minimized.** Audit the App to least privilege
   (read-only contents/metadata/issues) before strangers install it; every
   granted scope is something the privacy policy has to answer for.
-- [ ] **Backups that actually restore.** RDS automated backups plus one tested
-  restore drill before launch; note the backup window as the accepted RPO. An
+- [ ] **Backups that actually restore.** Until RDS: the nightly and pre-deploy
+  dumps copied to S3 ([docs/deploy.md](docs/deploy.md#backups), up to a day of
+  writes at risk), and one restore of a dump downloaded from S3 before launch.
+  RDS automated backups and point-in-time recovery replace them later. An
   untested backup is not a backup.
 - [~] **Encryption everywhere.** GitHub user OAuth tokens are not persisted;
   RDS encrypted storage is planned (gate above). Remaining: require TLS on the
