@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "./api";
 import {
+  REPOSITORY_INGEST_LIMIT_DETAIL,
+  briefCreateErrorMessage,
   createIssueBrief,
   getIssueBrief,
   pollIssueBrief,
@@ -123,5 +125,35 @@ describe("issue brief client", () => {
 
     await expect(polling).resolves.toEqual(complete);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("brief creation error message", () => {
+  it("names the indexing limit and the wait when a new ingest is refused", () => {
+    const error = new ApiError(429, REPOSITORY_INGEST_LIMIT_DETAIL, 1800);
+    expect(briefCreateErrorMessage(error, "fallback")).toBe(
+      "This repository isn't indexed yet, and you've queued as many new repositories for indexing as you can for now. Try again in about 30 minutes.",
+    );
+  });
+
+  it("keeps the brief limit wording for the brief bucket", () => {
+    const error = new ApiError(429, "Rate limit exceeded. Try again later.", 90);
+    expect(briefCreateErrorMessage(error, "fallback")).toBe(
+      "Too many brief requests right now. Try again in about 2 minutes.",
+    );
+  });
+
+  it("says later when the wait is unknown", () => {
+    const error = new ApiError(429, "Rate limit exceeded. Try again later.");
+    expect(briefCreateErrorMessage(error, "fallback")).toBe(
+      "Too many brief requests right now. Try again later.",
+    );
+  });
+
+  it("passes other errors through", () => {
+    expect(briefCreateErrorMessage(new ApiError(502, "Github access check failed"), "fallback")).toBe(
+      "Github access check failed",
+    );
+    expect(briefCreateErrorMessage("boom", "fallback")).toBe("fallback");
   });
 });

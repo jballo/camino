@@ -4,9 +4,11 @@ These need a real Postgres (``FOR UPDATE SKIP LOCKED`` semantics can't be
 mocked). By default a uniquely named ``camino_worker_test_*`` scratch database
 is created on the same server as ``DATABASE_URL`` and dropped afterwards; if
 Postgres is unreachable the module skips. Set ``TEST_DATABASE_URL`` to use an
-existing database instead (it will have ``jobs`` truncated); as a safety
-net the fixture fails fast if it resolves to the database that was configured
-by ``DATABASE_URL`` before the test environment was sanitized.
+empty or migrated database instead (it will have ``jobs`` truncated); then an
+unreachable database fails instead of skipping. As a safety net the fixture
+fails fast if it resolves to the database that was configured by
+``DATABASE_URL`` before the test environment was sanitized. Either way the
+schema comes from the migrations.
 """
 
 from __future__ import annotations
@@ -21,16 +23,16 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
+from alembic import command
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, select
 
-from app import main as app_main
 from app.config import settings
 from app.db import get_session
 from app.main import app
@@ -39,6 +41,7 @@ from app.models.code import RepoIndexState
 from app.models.tour import TourArtifact, TourStep
 from app.models.job import Job, JobStatus, JobType
 from app.rate_limit import JOURNEY_CREATE_RATE_LIMIT
+from app.schema_revision import alembic_config
 from app.security import get_authenticated_user_id
 from app.services.installation_state import (
     SUSPENSION_ERROR,
@@ -138,6 +141,22 @@ def test_test_database_url_rejects_pre_sanitization_application_database():
         )
 
 
+def database_unavailable(reason: str) -> None:
+    """Skip in the quick suite; fail when a disposable database was given."""
+    if os.environ.get("TEST_DATABASE_URL"):
+        pytest.fail(reason)
+    pytest.skip(reason)
+
+
+def migrate_to_head(engine) -> None:
+    """Build the schema the way deploys do: with the migrations."""
+    with engine.connect() as connection:
+        config = alembic_config()
+        config.attributes["connection"] = connection
+        config.attributes["configure_logger"] = False
+        command.upgrade(config, "head")
+
+
 @pytest.fixture(scope="session")
 def pg_engine(application_database_name):
     override = os.environ.get("TEST_DATABASE_URL")
@@ -163,40 +182,20 @@ def pg_engine(application_database_name):
                 conn.execute(text(f"CREATE DATABASE {scratch_db_name}"))
         except OperationalError as e:
             admin_engine.dispose()
-            pytest.skip(f"Postgres not reachable ({e}); skipping claim integration tests")
+            database_unavailable(
+                f"Postgres not reachable ({e}); skipping claim integration tests"
+            )
         # Keep the URL object: str() would mask the password as "***".
         url = base.set(database=scratch_db_name)
 
     engine = create_engine(url)
     try:
-        Job.__table__.create(engine, checkfirst=True)
+        migrate_to_head(engine)
     except OperationalError as e:
         engine.dispose()
-        pytest.skip(f"Postgres not reachable ({e}); skipping claim integration tests")
-    GithubConnections.__table__.create(engine, checkfirst=True)
-    RepoIndexState.__table__.create(engine, checkfirst=True)
-    with engine.connect() as conn:
-        conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ"))
-        conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_by TEXT"))
-        conn.execute(text(
-            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0"
-        ))
-        conn.execute(text(
-            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS blocked_by_job_id INTEGER"
-        ))
-        conn.execute(text(
-            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS refresh_cycles INTEGER NOT NULL DEFAULT 0"
-        ))
-        conn.execute(text(
-            'CREATE INDEX IF NOT EXISTS ix_jobs_pending '
-            "ON jobs (\"createdAt\") WHERE status = 'pending'"
-        ))
-        conn.execute(text(
-            "CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_active_dedupe "
-            "ON jobs (dedupe_key) WHERE status IN ('pending', 'running') "
-            "AND dedupe_key IS NOT NULL"
-        ))
-        conn.commit()
+        database_unavailable(
+            f"Postgres not reachable ({e}); skipping claim integration tests"
+        )
 
     yield engine
 
@@ -775,124 +774,6 @@ def test_legacy_owned_ingest_without_dependency_fails_instead_of_running(
     assert row.error == MISSING_SHARED_INGEST_ERROR
     assert "request it again" in row.error
     assert row.attempts == 1
-
-
-async def _lifespan_conversion_sql() -> str:
-    """The startup statement that converts owned shared ingests."""
-    connection = MagicMock()
-    mock_engine = MagicMock()
-    mock_engine.connect.return_value.__enter__.return_value = connection
-    with (
-        patch.object(app_main, "engine", mock_engine),
-        patch.object(app_main.SQLModel.metadata, "create_all"),
-        patch.object(app_main, "verify_embedding_schema"),
-    ):
-        async with app_main.lifespan(app_main.app):
-            pass
-    (statement,) = [
-        str(call.args[0])
-        for call in connection.execute.call_args_list
-        if "WITH owned AS" in str(call.args[0])
-    ]
-    return statement
-
-
-def _jobs_snapshot(engine) -> list[tuple]:
-    with Session(engine) as session:
-        return [
-            (
-                job.id,
-                job.userId,
-                job.installation_id,
-                job.status,
-                job.dedupe_key,
-                job.blocked_by_job_id,
-                job.claimed_by,
-                job.attempts,
-            )
-            for job in session.exec(select(Job).order_by(Job.id)).all()
-        ]
-
-
-async def test_lifespan_converts_owned_shared_ingest_once(pg_engine_clean):
-    conversion = text(await _lifespan_conversion_sql())
-    now = dt.datetime.now(dt.timezone.utc)
-    with Session(pg_engine_clean) as session:
-        owned = _insert_job(
-            session,
-            userId="owner",
-            installation_id=101,
-            job_type=JobType.REPOSITORY_INGEST,
-            dedupe_key=SHARED_KEY,
-            status=JobStatus.RUNNING,
-            claimed_at=now,
-            claimed_by=WORKER_A,
-            attempts=1,
-        )
-        # Not converted: no global dedupe key, already finished, or already
-        # a waiting row.
-        legacy = _insert_job(
-            session,
-            userId="owner",
-            installation_id=101,
-            repo_name="org/legacy",
-            job_type=JobType.REPOSITORY_INGEST,
-        )
-        finished = _insert_job(
-            session,
-            userId="owner",
-            installation_id=101,
-            job_type=JobType.REPOSITORY_INGEST,
-            dedupe_key=SHARED_KEY,
-            status=JobStatus.COMPLETE,
-        )
-        existing_waiter = _insert_waiting_row(session, owned)
-
-    with Session(pg_engine_clean) as session:
-        session.execute(conversion)
-        session.commit()
-
-    converted = _reload(pg_engine_clean, owned.id)
-    assert converted.userId is None
-    assert converted.installation_id is None
-    assert converted.status == JobStatus.RUNNING
-    assert converted.claimed_by == WORKER_A
-    assert converted.attempts == 1
-    for unchanged in (legacy, finished, existing_waiter):
-        row = _reload(pg_engine_clean, unchanged.id)
-        assert row.userId == unchanged.userId
-        assert row.installation_id == unchanged.installation_id
-        assert row.status == unchanged.status
-    with Session(pg_engine_clean) as session:
-        waiting_rows = session.exec(
-            select(Job).where(
-                Job.blocked_by_job_id == owned.id,
-                Job.userId == "owner",
-            )
-        ).all()
-    assert len(waiting_rows) == 1
-    (owner_row,) = waiting_rows
-    assert owner_row.installation_id == 101
-    assert owner_row.job_type == JobType.REPOSITORY_INGEST
-    assert owner_row.dedupe_key == f"{SHARED_KEY}:user:owner"
-    assert owner_row.status == JobStatus.PENDING
-
-    # The run in flight keeps passing its guard under the owner's installation.
-    with Session(pg_engine_clean) as session:
-        _ensure_ingestion_owned(
-            session,
-            job_id=owned.id,
-            worker_id=WORKER_A,
-            installation_id=101,
-            lease_lost=threading.Event(),
-        )
-        session.rollback()
-
-    snapshot = _jobs_snapshot(pg_engine_clean)
-    with Session(pg_engine_clean) as session:
-        session.execute(conversion)
-        session.commit()
-    assert _jobs_snapshot(pg_engine_clean) == snapshot
 
 
 ORPHANED_ACTIVE_JOBS_SQL = text("""

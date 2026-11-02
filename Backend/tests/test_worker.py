@@ -1,12 +1,16 @@
 import asyncio
+import contextlib
+import logging
 import threading
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import exc
 
 from app.models.job import JobStatus, JobType
+from app.rate_limit import RateLimitDecision
 from app.brief import BriefNeedsRefreshError
 from app.models.tour import TourArtifact, TourStep
 from app.services.staleness import ChangedFile, HeadComparison
@@ -20,6 +24,7 @@ from app.services.repository_ingestion import (
 from app.tour import TourGenerationCancelledError, TourGenerationError
 from app.worker import (
     JobAuthorizationRevokedError,
+    _describe_cause,
     _run_standalone,
     _ensure_ingestion_owned,
     _fail_rejected_sponsor_waiters,
@@ -33,22 +38,47 @@ from app.worker import (
 WORKER_ID = "test-host:1:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 
-async def test_standalone_worker_verifies_embedding_schema():
+async def test_standalone_worker_verifies_schema_before_polling():
     connection = MagicMock()
     mock_engine = MagicMock()
     mock_engine.connect.return_value.__enter__.return_value = connection
     loop = asyncio.get_running_loop()
+    events: list[str] = []
+
+    async def record_loop(_stop_event):
+        events.append("poll")
 
     with (
         patch("app.worker.engine", mock_engine),
-        patch("app.worker.verify_embedding_schema") as verify_schema,
-        patch("app.worker.worker_loop", new=AsyncMock()) as loop_worker,
+        patch(
+            "app.worker.verify_schema",
+            side_effect=lambda _conn: events.append("verify"),
+        ) as verify_schema,
+        patch("app.worker.worker_loop", side_effect=record_loop),
         patch.object(loop, "add_signal_handler"),
     ):
         await _run_standalone()
 
     verify_schema.assert_called_once_with(connection)
-    loop_worker.assert_awaited_once()
+    assert events == ["verify", "poll"]
+
+
+async def test_standalone_worker_never_polls_when_the_schema_check_fails():
+    loop = asyncio.get_running_loop()
+
+    with (
+        patch("app.worker.engine", MagicMock()),
+        patch(
+            "app.worker.verify_schema",
+            side_effect=RuntimeError("schema is behind"),
+        ),
+        patch("app.worker.worker_loop", new=AsyncMock()) as loop_worker,
+        patch.object(loop, "add_signal_handler"),
+        pytest.raises(RuntimeError, match="schema is behind"),
+    ):
+        await _run_standalone()
+
+    loop_worker.assert_not_awaited()
 
 
 def _artifact() -> TourArtifact:
@@ -169,8 +199,8 @@ async def test_run_job_does_not_call_github_after_authorization_is_revoked():
     session.rollback.assert_called()
 
 
-async def test_issue_brief_parks_behind_refresh_without_spending_retry():
-    job = _job(
+def _refresh_brief_job():
+    return _job(
         job_type=JobType.ISSUE_BRIEF,
         issue_repo="org/repo",
         issue_number=44,
@@ -178,33 +208,142 @@ async def test_issue_brief_parks_behind_refresh_without_spending_retry():
         userId="user_1",
         topic="Fix refresh races",
     )
-    session = MagicMock()
-    session.get.return_value = job
-    dependency = MagicMock(id=17)
-    park = MagicMock(return_value=True)
 
-    with (
+
+def _run_refresh(session, *, created, decision=None, consume_error=None, generate=None):
+    """Run a brief whose first draft needs a refresh ingest.
+
+    ``created`` says whether the refresh starts a new shared ingest or joins
+    an active one; ``decision`` is what the ingest bucket answers.
+    """
+    dependency = MagicMock(id=17)
+    consume = MagicMock(return_value=decision, side_effect=consume_error)
+    mocks = SimpleNamespace(
+        enqueue=MagicMock(return_value=(dependency, dependency, created)),
+        consume=consume,
+        park=MagicMock(return_value=True),
+        persist=MagicMock(return_value=True),
+        requeue=MagicMock(),
+        generate=generate
+        or AsyncMock(side_effect=BriefNeedsRefreshError("stale")),
+    )
+    return dependency, mocks, (
         _patch_session(session),
         patch("app.worker._renew_job_lease", return_value=True),
         patch("app.worker.fetch_issue_thread", return_value=MagicMock(branch_instruction=None)),
         patch("app.worker.resolve_target_branch", return_value=MagicMock(branch="main", default_branch="main")),
         patch("app.worker.resolve_fork_status", return_value=MagicMock()),
-        patch("app.worker.generate_brief", new_callable=AsyncMock, side_effect=BriefNeedsRefreshError("stale")),
-        patch(
-            "app.worker.enqueue_shared_ingest",
-            return_value=(dependency, dependency, True),
-        ) as enqueue,
-        patch("app.worker.park_job", park),
-        patch("app.worker._update_owned_job") as persist,
-    ):
+        patch("app.worker.generate_brief", mocks.generate),
+        patch("app.worker.enqueue_shared_ingest", mocks.enqueue),
+        patch("app.rate_limit.consume_fixed_window", consume),
+        patch("app.worker.park_job", mocks.park),
+        patch("app.worker._update_owned_job", mocks.persist),
+        patch("app.worker._requeue_or_fail", mocks.requeue),
+    )
+
+
+async def _run_refresh_job(patches):
+    with contextlib.ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
         await run_job(1, WORKER_ID)
 
-    assert enqueue.call_args.kwargs["waiting_row"] is False
-    assert enqueue.call_args.kwargs["commit"] is False
-    park.assert_called_once_with(
+
+async def test_issue_brief_parks_behind_refresh_without_spending_retry():
+    session = MagicMock()
+    session.get.return_value = _refresh_brief_job()
+    _, mocks, patches = _run_refresh(
+        session,
+        created=True,
+        decision=RateLimitDecision(allowed=True, retry_after=60),
+    )
+
+    await _run_refresh_job(patches)
+
+    assert mocks.enqueue.call_args.kwargs["waiting_row"] is False
+    assert mocks.enqueue.call_args.kwargs["commit"] is False
+    mocks.park.assert_called_once_with(
         session, 1, WORKER_ID, blocked_by_job_id=17
     )
-    persist.assert_not_called()
+    mocks.persist.assert_not_called()
+
+
+async def test_refresh_that_starts_an_ingest_charges_the_requester_once():
+    session = MagicMock()
+    session.get.return_value = _refresh_brief_job()
+    _, mocks, patches = _run_refresh(
+        session,
+        created=True,
+        decision=RateLimitDecision(allowed=True, retry_after=60),
+    )
+
+    await _run_refresh_job(patches)
+
+    mocks.consume.assert_called_once()
+    assert mocks.consume.call_args.kwargs["bucket"] == "repository_ingest"
+    assert mocks.consume.call_args.kwargs["user_id"] == "user_1"
+    mocks.park.assert_called_once()
+
+
+async def test_refresh_that_joins_an_active_ingest_is_free():
+    session = MagicMock()
+    session.get.return_value = _refresh_brief_job()
+    _, mocks, patches = _run_refresh(session, created=False)
+
+    await _run_refresh_job(patches)
+
+    mocks.consume.assert_not_called()
+    mocks.park.assert_called_once_with(
+        session, 1, WORKER_ID, blocked_by_job_id=17
+    )
+
+
+async def test_refresh_with_an_empty_ingest_bucket_drafts_a_stale_brief():
+    session = MagicMock()
+    session.get.return_value = _refresh_brief_job()
+    artifact = MagicMock()
+    artifact.model_dump.return_value = {"summary": "stale but disclosed"}
+    generate = AsyncMock(side_effect=[BriefNeedsRefreshError("stale"), artifact])
+    _, mocks, patches = _run_refresh(
+        session,
+        created=True,
+        decision=RateLimitDecision(allowed=False, retry_after=60),
+        generate=generate,
+    )
+
+    await _run_refresh_job(patches)
+
+    # The uncommitted refresh ingest is rolled back, not parked on.
+    mocks.park.assert_not_called()
+    session.rollback.assert_called()
+    assert [call.kwargs["allow_stale"] for call in generate.await_args_list] == [
+        False,
+        True,
+    ]
+    mocks.persist.assert_called_once()
+    assert mocks.persist.call_args.kwargs["status"] == JobStatus.COMPLETE
+    assert mocks.persist.call_args.kwargs["artifact"] == {
+        "summary": "stale but disclosed"
+    }
+
+
+async def test_refresh_retries_the_brief_when_the_limiter_is_unavailable():
+    session = MagicMock()
+    session.get.return_value = _refresh_brief_job()
+    _, mocks, patches = _run_refresh(
+        session,
+        created=True,
+        consume_error=HTTPException(
+            status_code=503, detail="Rate limit service unavailable"
+        ),
+    )
+
+    await _run_refresh_job(patches)
+
+    mocks.park.assert_not_called()
+    mocks.persist.assert_not_called()
+    mocks.requeue.assert_called_once()
+    assert mocks.requeue.call_args.kwargs["error"] == "Rate limit service unavailable"
 
 
 async def test_legacy_issue_brief_without_issue_repo_fails_without_fetching():
@@ -660,6 +799,186 @@ async def test_run_job_fails_permanent_ingestion_failure():
         "Repository not found",
     )
 
+
+
+def _raise_wrapped(wrapper: Exception, cause: Exception):
+    """Return an async side effect that raises ``wrapper`` from ``cause``."""
+
+    async def side_effect(*_args, **_kwargs):
+        raise wrapper from cause
+
+    return side_effect
+
+
+def _job_failure_records(caplog) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.name == "app.worker"
+        and record.getMessage().startswith("job failed")
+    ]
+
+
+_INTEGRITY_CAUSE = (
+    'duplicate key value violates unique constraint "uq_chunk_identity_gen"\n'
+    "DETAIL:  Key (file_path, symbol_name, start_line)="
+    "(docs/jquery.min.js, n, 2) already exists."
+)
+
+
+def test_describe_cause_is_empty_without_a_chain():
+    assert _describe_cause(ValueError("plain")) == ""
+
+
+def test_describe_cause_reports_innermost_exception_on_one_line():
+    root = RuntimeError("line one\n  line two")
+    try:
+        try:
+            raise root
+        except RuntimeError as inner:
+            raise KeyError("middle") from inner
+    except KeyError as middle:
+        error = PermanentRepositoryIngestionError("outer")
+        error.__cause__ = middle
+
+    assert _describe_cause(error) == " | cause=RuntimeError: line one line two"
+
+
+
+def test_describe_cause_follows_implicit_context():
+    # Raised inside an except block without "from": only __context__ is set.
+    try:
+        try:
+            raise RuntimeError("root")
+        except RuntimeError:
+            raise PermanentRepositoryIngestionError("outer")
+    except PermanentRepositoryIngestionError as error:
+        assert error.__cause__ is None
+        assert error.__context__ is not None
+        assert _describe_cause(error) == " | cause=RuntimeError: root"
+
+
+def test_describe_cause_stops_on_a_cyclic_chain():
+    first = RuntimeError("first")
+    second = ValueError("second")
+    first.__cause__ = second
+    second.__cause__ = first
+    error = PermanentRepositoryIngestionError("outer")
+    error.__cause__ = first
+    result: list[str] = []
+
+    # Run in a daemon thread so a regression fails the test instead of
+    # hanging the suite.
+    thread = threading.Thread(
+        target=lambda: result.append(_describe_cause(error)), daemon=True
+    )
+    thread.start()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive(), "_describe_cause did not terminate"
+    assert result == [" | cause=ValueError: second"]
+
+def test_describe_cause_honours_from_none():
+    try:
+        try:
+            raise RuntimeError("hidden")
+        except RuntimeError:
+            raise PermanentRepositoryIngestionError("outer") from None
+    except PermanentRepositoryIngestionError as error:
+        assert _describe_cause(error) == ""
+
+
+def test_describe_cause_truncates_long_messages():
+    error = PermanentRepositoryIngestionError("outer")
+    error.__cause__ = RuntimeError("x" * 1000)
+
+    described = _describe_cause(error)
+
+    assert described == " | cause=RuntimeError: " + "x" * 300
+
+
+async def test_run_job_logs_cause_of_permanent_failure(caplog):
+    caplog.set_level(logging.WARNING, logger="app.worker")
+    job = _shared_ingest_job()
+    session = MagicMock()
+    session.get.return_value = job
+    mark_failed = MagicMock(return_value=True)
+
+    with (
+        _patch_session(session),
+        _patch_sponsors(12345),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._mark_failed", mark_failed),
+        patch(
+            "app.worker.ingest_repository",
+            new_callable=AsyncMock,
+            side_effect=_raise_wrapped(
+                PermanentRepositoryIngestionError(
+                    "Database integrity error during ingestion"
+                ),
+                RuntimeError(_INTEGRITY_CAUSE),
+            ),
+        ),
+    ):
+        await run_job(1, WORKER_ID)
+
+    [record] = _job_failure_records(caplog)
+    message = record.getMessage()
+    assert message.startswith("job failed permanently")
+    assert "\n" not in message
+    assert "cause=RuntimeError:" in message
+    assert '"uq_chunk_identity_gen"' in message
+    assert "(docs/jquery.min.js, n, 2) already exists." in message
+    assert record.exc_info is not None
+    assert isinstance(record.exc_info[1], PermanentRepositoryIngestionError)
+    mark_failed.assert_called_once_with(
+        session,
+        1,
+        WORKER_ID,
+        "Database integrity error during ingestion",
+    )
+
+
+async def test_run_job_logs_cause_of_transient_failure_without_traceback(caplog):
+    caplog.set_level(logging.WARNING, logger="app.worker")
+    job = _shared_ingest_job(attempts=2)
+    session = MagicMock()
+    session.get.return_value = job
+    requeue = MagicMock(return_value=True)
+
+    with (
+        _patch_session(session),
+        _patch_sponsors(12345),
+        patch("app.worker._renew_job_lease", return_value=True),
+        patch("app.worker._requeue_or_fail", requeue),
+        patch(
+            "app.worker.ingest_repository",
+            new_callable=AsyncMock,
+            side_effect=_raise_wrapped(
+                TransientRepositoryIngestionError(
+                    "GitHub request failed with status 502"
+                ),
+                ConnectionError("502 Bad Gateway"),
+            ),
+        ),
+    ):
+        await run_job(1, WORKER_ID)
+
+    [record] = _job_failure_records(caplog)
+    message = record.getMessage()
+    assert message.startswith("job failed transiently")
+    assert message.endswith(
+        "GitHub request failed with status 502"
+        " | cause=ConnectionError: 502 Bad Gateway"
+    )
+    assert record.exc_info is None
+    requeue.assert_called_once_with(
+        session,
+        1,
+        WORKER_ID,
+        attempts=2,
+        error="GitHub request failed with status 502",
+    )
 
 async def test_run_job_tries_next_sponsor_when_installation_is_invalid():
     job = _shared_ingest_job()

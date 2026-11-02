@@ -11,10 +11,23 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    public retryAfterSeconds?: number,
   ) {
     super(message);
     this.name = "ApiError";
   }
+}
+
+/** Human wording for a Retry-After wait, e.g. "in about 2 minutes". */
+export function retryWait(seconds: number | undefined) {
+  if (seconds === undefined) return "later";
+  const minutes = Math.ceil(seconds / 60);
+  return minutes <= 1 ? "in about a minute" : `in about ${minutes} minutes`;
+}
+
+function retryAfterSeconds(response: Response): number | undefined {
+  const value = response.headers.get("Retry-After")?.trim();
+  return value && /^\d+$/.test(value) ? Number(value) : undefined;
 }
 
 export async function backendFetch<T>(
@@ -49,6 +62,7 @@ export async function backendFetch<T>(
     throw new ApiError(
       response.status,
       message,
+      retryAfterSeconds(response),
     );
 
   }

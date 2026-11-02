@@ -9,6 +9,13 @@ services:
       POSTGRES_DB: onboarding_agent
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Over TCP: on a fresh volume the image's temporary init server listens
+      # on the Unix socket only.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U agent -d onboarding_agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   worker:
     image: ghcr.io/astral-sh/uv:python3.14-bookworm-slim
@@ -19,11 +26,14 @@ services:
     restart: always
     stop_grace_period: 30s
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       # secrets pass through by NAME from the shell env; run under
       # `doppler run -- docker compose ...` (there are no .env files)
-      - DATABASE_URL=postgresql://agent:localdev@db:5432/onboarding_agent
+      - &dev-database-url DATABASE_URL=postgresql://agent:localdev@db:5432/onboarding_agent
       - RUN_WORKER=false
       - UV_PROJECT_ENVIRONMENT=/opt/venv
       - CLERK_WH_KEY
@@ -38,6 +48,28 @@ services:
       - AGENT_MODEL
     volumes:
       - ./Backend:/app:ro
+      - worker-venv:/opt/venv
+      - uv-cache:/root/.cache/uv
+
+  # Applies the migrations, then exits; the worker starts after it succeeds.
+  # Without the worker profile, migrate from the host instead:
+  #   cd Backend && doppler run -- uv run python -m app.migrate
+  migrate:
+    image: ghcr.io/astral-sh/uv:python3.14-bookworm-slim
+    profiles: ["worker"]
+    working_dir: /app
+    command: ["uv", "run", "--frozen", "python", "-m", "app.migrate"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # migrations need nothing else
+      - *dev-database-url
+      - UV_PROJECT_ENVIRONMENT=/opt/venv
+    volumes:
+      - ./Backend:/app:ro
+      # The worker's environment: migrate exits before the worker starts.
       - worker-venv:/opt/venv
       - uv-cache:/root/.cache/uv
 

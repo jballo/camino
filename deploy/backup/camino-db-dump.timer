@@ -1,0 +1,12 @@
+# Runs camino-db-dump.service once a day. Persistent catches up a run missed
+# while the box was off; it does not retry a dump that failed.
+[Unit]
+Description=Nightly Camino database dump
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 UTC
+Persistent=true
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target

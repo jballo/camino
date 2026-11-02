@@ -1,10 +1,28 @@
-import { ApiError, backendFetch } from "./api";
+import { ApiError, backendFetch, retryWait } from "./api";
 import { isAbortError } from "./repository-ingestion";
 import type { BriefPreview, BriefResponse, BriefSummary } from "../types/brief";
 
 export type TokenGetter = () => Promise<string | null>;
 
 const DEFAULT_POLL_INTERVAL_MS = 2000;
+
+// Must match REPOSITORY_INGEST_RATE_LIMIT_DETAIL in Backend/app/rate_limit.py.
+// Creating a brief for an unindexed repository can hit this limit instead of
+// the brief limit.
+export const REPOSITORY_INGEST_LIMIT_DETAIL =
+  "Repository indexing limit reached. Try again later.";
+
+/** Message for a failed brief creation or regeneration. */
+export function briefCreateErrorMessage(caught: unknown, fallback: string) {
+  if (caught instanceof ApiError && caught.status === 429) {
+    const wait = retryWait(caught.retryAfterSeconds);
+    if (caught.message === REPOSITORY_INGEST_LIMIT_DETAIL) {
+      return `This repository isn't indexed yet, and you've queued as many new repositories for indexing as you can for now. Try again ${wait}.`;
+    }
+    return `Too many brief requests right now. Try again ${wait}.`;
+  }
+  return caught instanceof Error ? caught.message : fallback;
+}
 
 type PollIssueBriefOptions = {
   intervalMs?: number;

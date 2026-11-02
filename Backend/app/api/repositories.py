@@ -5,13 +5,12 @@ import re
 from collections.abc import Collection
 
 from fastapi import APIRouter, Depends, HTTPException
-from github import Auth, GithubException, GithubIntegration
+from github import GithubException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import bindparam, exc, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlmodel import Session, select
 
-from app.config import settings
 from app.services.embeddings import EmbeddingError
 from app.db import SessionDep
 from app.models.github_connection import GithubConnections
@@ -25,6 +24,7 @@ from app.rate_limit import (
 )
 from app.security import get_authenticated_user_id
 from app.services.jobs import cancel_job, normalize_repository_name
+from app.services.github_app import github_integration
 from app.services.search import hybrid_search
 from app.services.shared_ingests import enqueue_shared_ingest, waiting_row_outcome
 from app.services.repo_access import (
@@ -111,9 +111,19 @@ class RepoLookupResponse(BaseModel):
     refs: list[RepoRefResponse]
 
 
+class RepoIngestSummaryResponse(BaseModel):
+    """The caller's most recent index request for a repository."""
+
+    id: int
+    status: str
+    ref: str | None
+    error: str | None = None
+
+
 class RepoEntryResponse(BaseModel):
     repoName: str
     refs: list[RepoRefResponse]
+    ingest: RepoIngestSummaryResponse | None = None
 
 
 class RepoOverviewResponse(BaseModel):
@@ -132,6 +142,7 @@ class RepoFollowResponse(BaseModel):
     followed: bool
     indexed: bool
     jobQueued: bool
+    jobId: int | None = None
 
 
 _REPOSITORY_NAME = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -148,13 +159,7 @@ def _normalized_repository_name(repo_name: str) -> str:
 
 
 def _installed_repositories(installation_id: int) -> list[str]:
-    app_auth = Auth.AppAuth(
-        app_id=settings.gh_app_id,
-        private_key=settings.gh_app_private_key,
-    )
-    installation = GithubIntegration(auth=app_auth).get_app_installation(
-        installation_id
-    )
+    installation = github_integration().get_app_installation(installation_id)
     return [
         repo.full_name
         for repo in installation.get_repos()
@@ -167,6 +172,63 @@ def _installed_repository_names(installation_id: int) -> set[str]:
         normalize_repository_name(repo_name)
         for repo_name in _installed_repositories(installation_id)
     }
+
+
+def _persist_follow(
+    session: Session,
+    *,
+    user_id: str,
+    installation_id: int,
+    repo_name: str,
+    ref: str | None,
+    installed: bool,
+) -> tuple[bool, bool, int | None]:
+    """Write a follow and its ingest request in one transaction.
+
+    Runs on a worker thread, never the event loop. Between the first write and
+    the commit, an overlapping follow of the same repository blocks in Postgres
+    on these uncommitted rows. If that blocked call held the event loop while
+    this transaction waited for the loop to resume it, neither could finish and
+    the process would freeze. Returns ``(followed, job_queued, job_id)``, where
+    ``job_id`` is the requester's waiting row, new or joined, or ``None`` when
+    no ingest was requested.
+    """
+    followed = False
+    job_queued = False
+    job_id = None
+    try:
+        if not installed:
+            session.execute(
+                pg_insert(UserRepoFollow)
+                .values(userId=user_id, repo_name=repo_name)
+                .on_conflict_do_nothing(constraint="uq_user_repo_follow")
+            )
+            followed = True
+
+        if ref is not None:
+            waiting, _, job_queued = enqueue_shared_ingest(
+                session,
+                user_id=user_id,
+                installation_id=installation_id,
+                repo_name=repo_name,
+                ref=ref,
+                waiting_row=True,
+                commit=False,
+            )
+            job_id = waiting.id
+        if job_queued:
+            # Only a newly queued ingest spends money, so only it is charged,
+            # against the same bucket as /ingest. A 429 (or the limiter's 503)
+            # discards the pending follow and waiting row with it.
+            REPOSITORY_INGEST_RATE_LIMIT.check(user_id)
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except exc.SQLAlchemyError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+    return followed, job_queued, job_id
 
 
 def _index_rows(session: Session, repo_names: Collection[str]) -> list:
@@ -192,6 +254,35 @@ def _index_rows(session: Session, repo_names: Collection[str]) -> list:
         statement,
         {"repo_names": normalized_names},
     ).all()
+
+
+def _latest_ingests(
+    session: Session,
+    user_id: str,
+    repo_names: Collection[str],
+) -> list[Job]:
+    """The user's newest index request per repository, across all refs.
+
+    Only the user's own waiting rows count. Shared ingests are ownerless and
+    other users' requests are not theirs to see.
+    """
+    if not repo_names:
+        return []
+    # DISTINCT ON keeps the first row per repository in this order: the
+    # newest request. Finished rows are kept forever, so this must not
+    # load the whole history.
+    return list(
+        session.exec(
+            select(Job)
+            .distinct(Job.repo_name)
+            .where(
+                Job.userId == user_id,
+                Job.job_type == JobType.REPOSITORY_INGEST,
+                Job.repo_name.in_(sorted(repo_names)),
+            )
+            .order_by(Job.repo_name, Job.createdAt.desc(), Job.id.desc())
+        ).all()
+    )
 
 
 def _ref_response(row) -> RepoRefResponse:
@@ -296,13 +387,17 @@ def _repository_ingest_response(job: Job) -> RepoIngestStatusResponse:
     )
 
 
-def _repository_ingest_status(session: Session, job: Job) -> RepoIngestStatusResponse:
-    """Report a pending waiting row with its shared ingest's live state.
+def _effective_ingest_state(
+    session: Session,
+    job: Job,
+) -> tuple[str, int, dict | None, str | None]:
+    """``(status, attempts, artifact, error)`` a caller should see for ``job``.
 
-    The waiting row itself only settles at its next claim. Read-only.
+    A pending waiting row reports its shared ingest's live state, because the
+    row itself only settles at its next claim. Read-only.
     """
     if job.userId is None or job.status != JobStatus.PENDING:
-        return _repository_ingest_response(job)
+        return job.status, job.attempts, job.artifact, job.error
     try:
         shared = (
             session.get(Job, job.blocked_by_job_id)
@@ -324,6 +419,11 @@ def _repository_ingest_status(session: Session, job: Job) -> RepoIngestStatusRes
     else:
         status, artifact, error = outcome
         attempts = job.attempts
+    return status, attempts, artifact, error
+
+
+def _repository_ingest_status(session: Session, job: Job) -> RepoIngestStatusResponse:
+    status, attempts, artifact, error = _effective_ingest_state(session, job)
     return RepoIngestStatusResponse(
         id=job.id,
         status=status,
@@ -451,6 +551,20 @@ async def repository_overview(
             authorized_requested_names.add(repo_name)
 
         visible_names = installed_names | authorized_requested_names
+        # Read the request states before the index rows. A worker publishes an
+        # index and completes its job in one commit. Landing between these two
+        # reads, that commit yields an index beside a still-running request,
+        # which Explore polls to completion. The other order could yield a
+        # complete request beside no index, which nothing re-checks.
+        ingest_by_repo: dict[str, RepoIngestSummaryResponse] = {}
+        for job in _latest_ingests(session, auth_user_id, visible_names):
+            status, _, _, error = _effective_ingest_state(session, job)
+            ingest_by_repo[job.repo_name] = RepoIngestSummaryResponse(
+                id=job.id,
+                status=status,
+                ref=job.ref,
+                error=error,
+            )
         rows = _index_rows(session, visible_names)
     except exc.NoResultFound:
         raise HTTPException(
@@ -472,6 +586,7 @@ async def repository_overview(
         return RepoEntryResponse(
             repoName=repo_name,
             refs=refs_by_repo.get(repo_name, []),
+            ingest=ingest_by_repo.get(repo_name),
         )
 
     return RepoOverviewResponse(
@@ -528,37 +643,22 @@ async def follow_repository(
                 detail="Could not resolve repository ref",
             )
 
-    followed = False
-    job_queued = False
-    try:
-        if not installed:
-            session.execute(
-                pg_insert(UserRepoFollow)
-                .values(userId=auth_user_id, repo_name=repo_name)
-                .on_conflict_do_nothing(constraint="uq_user_repo_follow")
-            )
-            followed = True
-
-        if resolution is not None:
-            _, _, job_queued = enqueue_shared_ingest(
-                session,
-                user_id=auth_user_id,
-                installation_id=access.installation_id,
-                repo_name=repo_name,
-                ref=resolution.branch,
-                waiting_row=True,
-                commit=False,
-            )
-        session.commit()
-    except exc.SQLAlchemyError:
-        session.rollback()
-        raise HTTPException(status_code=500, detail="Database error")
+    followed, job_queued, job_id = await asyncio.to_thread(
+        _persist_follow,
+        session,
+        user_id=auth_user_id,
+        installation_id=access.installation_id,
+        repo_name=repo_name,
+        ref=resolution.branch if resolution is not None else None,
+        installed=installed,
+    )
 
     return RepoFollowResponse(
         repoName=repo_name,
         followed=followed,
         indexed=indexed,
         jobQueued=job_queued,
+        jobId=job_id,
     )
 
 

@@ -41,6 +41,12 @@ SKIP_DIRS = {
     ".next",
 }
 MAX_FILE_BYTES = 500_000
+# Minified or bundled code packs a whole library onto a few very long lines.
+# It is costly to embed, irrelevant to search, and repeats short names on one
+# line. Hand-written files with a line this long (embedded data) are skipped too.
+MAX_LINE_BYTES = 5_000
+_MINIFIED_NAME_EXTENSIONS = {".js", ".ts", ".tsx"}
+_MINIFIED_NAME_SUFFIXES = (".min", "-min")
 
 
 @dataclass
@@ -57,13 +63,33 @@ class CodeChunk:
     parent_class: str | None    # for methods
 
 
-def source_skip_reason(source_bytes: bytes) -> str | None:
+def _is_minified_name(file_path: str) -> bool:
+    stem, ext = os.path.splitext(os.path.basename(file_path).lower())
+    return ext in _MINIFIED_NAME_EXTENSIONS and stem.endswith(_MINIFIED_NAME_SUFFIXES)
+
+
+def _longest_line_bytes(source_bytes: bytes) -> int:
+    longest = 0
+    start = 0
+    while True:
+        end = source_bytes.find(b"\n", start)
+        if end == -1:
+            return max(longest, len(source_bytes) - start)
+        longest = max(longest, end - start)
+        start = end + 1
+
+
+def source_skip_reason(source_bytes: bytes, file_path: str | None = None) -> str | None:
     if b"\x00" in source_bytes:
         return "binary (NUL bytes)"
     try:
         source_bytes.decode("utf-8")
     except UnicodeDecodeError:
         return "invalid UTF-8"
+    if file_path is not None and _is_minified_name(file_path):
+        return "minified (file name)"
+    if _longest_line_bytes(source_bytes) > MAX_LINE_BYTES:
+        return f"minified (line over {MAX_LINE_BYTES} bytes)"
     return None
 
 
@@ -145,7 +171,7 @@ def extract_chunks(source_bytes: bytes, file_path: str) -> list[CodeChunk]:
         return []
     if len(source_bytes) > MAX_FILE_BYTES:
         return []
-    if source_skip_reason(source_bytes) is not None:
+    if source_skip_reason(source_bytes, file_path) is not None:
         return []
     language = LANGUAGES[ext]
     parser = Parser(language)
@@ -163,7 +189,23 @@ def extract_chunks(source_bytes: bytes, file_path: str) -> list[CodeChunk]:
         return results
 
     nodes = collect_nodes(tree.root_node)
-    chunks = []
+    chunks: list[CodeChunk] = []
+    # code_chunks is unique on (file_path, symbol_name, start_line) per
+    # generation. One-line code (minified bundles, fixtures that redeclare a
+    # name, nested same-name functions) can produce several nodes with the same
+    # identity. Nodes are visited in pre-order, so the first, outermost one wins.
+    seen: set[tuple[str, int]] = set()
+    dropped = 0
+
+    def add(chunk: CodeChunk) -> None:
+        nonlocal dropped
+        identity = (chunk.symbol_name, chunk.start_line)
+        if identity in seen:
+            dropped += 1
+            return
+        seen.add(identity)
+        chunks.append(chunk)
+
     for node in nodes:
         # Arrow functions: lexical_declaration → variable_declarator → arrow_function
         if node.type == "lexical_declaration":
@@ -188,7 +230,7 @@ def extract_chunks(source_bytes: bytes, file_path: str) -> list[CodeChunk]:
                     text = prev.text.decode("utf-8")
                     if text.startswith("/**"):
                         docstring = text
-                chunks.append(CodeChunk(
+                add(CodeChunk(
                     file_path=file_path,
                     symbol_name=name_node.text.decode("utf-8"),
                     symbol_type="function",
@@ -221,7 +263,9 @@ def extract_chunks(source_bytes: bytes, file_path: str) -> list[CodeChunk]:
             docstring=extract_docstring(node, source_bytes),
             parent_class=get_parent_class(node),
         )
-        chunks.append(chunk)
+        add(chunk)
+    if dropped:
+        logger.info("parse dedupe | file=%s dropped=%d", file_path, dropped)
     return chunks
 
 

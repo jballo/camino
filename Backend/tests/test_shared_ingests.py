@@ -163,7 +163,7 @@ def test_request_without_waiting_row_creates_shared_ingest_nobody_waits_on():
 
         requester_job, shared, created = _request(session, "a", waiting_row=False)
 
-        assert created is False
+        assert created is True
         assert requester_job is shared
         assert shared.userId is None
         assert session.exec(select(Job)).all() == [shared]

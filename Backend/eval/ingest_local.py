@@ -25,7 +25,7 @@ from sqlalchemy import text
 from sqlmodel import Session, create_engine, delete
 
 from app.config import settings
-from app.models.code import CodeChunkEmbedding, CodeChunkModel
+from app.models.code import CodeChunkModel, insert_embeddings
 from app.services.embeddings import (
     EMBED_DIMENSIONS,
     EMBED_MODEL,
@@ -144,21 +144,20 @@ async def ingest(
 
         embedding_count = 0
         for start in range(0, len(chunk_models), EMBEDDING_INSERT_BATCH_SIZE):
-            embedding_models = [
-                CodeChunkEmbedding(
-                    chunk_id=chunk.id,
-                    model_name=EMBED_MODEL,
-                    dimension=EMBED_DIMENSIONS,
-                    embedding=vector,
-                )
+            embedding_rows = [
+                {
+                    "chunk_id": chunk.id,
+                    "model_name": EMBED_MODEL,
+                    "dimension": EMBED_DIMENSIONS,
+                    "embedding": vector,
+                }
                 for chunk, vector in zip(
                     chunk_models[start:start + EMBEDDING_INSERT_BATCH_SIZE],
                     vectors[start:start + EMBEDDING_INSERT_BATCH_SIZE],
                 )
             ]
-            session.add_all(embedding_models)
-            session.flush()
-            embedding_count += len(embedding_models)
+            insert_embeddings(session, embedding_rows)
+            embedding_count += len(embedding_rows)
 
         session.exec(
             text(populate_search_vector_sql(only_null=True)).bindparams(

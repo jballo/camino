@@ -202,6 +202,7 @@ docker compose up -d
 cd Backend
 cp .env.example .env   # fill in secrets
 uv sync
+uv run python -m app.migrate   # create or upgrade the schema
 uv run fastapi dev app/main.py --port 8000
 
 # 3. Worker (in a second terminal)
@@ -243,15 +244,13 @@ or Cloudflare Tunnel when testing deletion flows locally. The install route targ
 GitHub App slug configured via the required `GITHUB_APP_SLUG` environment variable
 (e.g. `camino-onboarder`).
 
-Startup creates missing tables and provisions pgvector, custom indexes, and the
-`live_code_chunks` view. Embeddings default to `halfvec(1536)` with exact scans and no
-HNSW index. The API and standalone worker validate that the configured embedding type
-matches the database, but they do not migrate an older schema. A database created with
-the former `vector(1536)` default, or before the shared `jobs` table and
-generation-based indexes, must be recreated for local development or upgraded with the
-explicit migration in [Backend/README.md](Backend/README.md#local-db-created-before-2026-09).
-`SQLModel.metadata.create_all()` does not add, rename, or remove columns on existing
-tables.
+Alembic migrations own the schema: run `uv run python -m app.migrate` in `Backend/`
+before starting the API, and again after pulling a new migration. Embeddings are
+`halfvec(1536)` with exact scans and no HNSW index. The API and standalone worker
+only check the schema at startup: they refuse to run unless the database is at their
+migration revision and its embedding type matches `VECTOR_TYPE`. A database the API
+created before the migrations existed is adopted once with
+`python -m app.migrate adopt` ([Backend/README.md](Backend/README.md#migrations)).
 
 1. Sign in → open **Settings** → connect or manage the GitHub App.
 2. On **Home**, paste a GitHub issue URL, review the issue warnings and discovered
@@ -287,11 +286,18 @@ uv run pytest
 cd ../Frontend
 npm test
 npm run lint
+npx next typegen && npx tsc --noEmit
 ```
+
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every PR into and
+push to `dev` and `main`: the `backend` job runs `uv sync --locked` and then
+`./scripts/test_all.sh`, and the `frontend` job runs lint, the typecheck above, and
+Vitest. Vercel builds the frontend, so CI does not run `next build`. Neither job uses
+secrets.
 
 Backend coverage includes API/auth behavior, webhook cleanup, rate limiting, retrieval,
 ref-aware staged ingestion, tour and issue-brief generation/cancellation, contribution
-target discovery, shared-job lifecycle, and startup schema provisioning. The complete
+target discovery, shared-job lifecycle, and schema migrations. The complete
 backend command provisions and removes an isolated pgvector database for real concurrent
 claim/recovery tests; never point `TEST_DATABASE_URL` at the development or eval
 database because those tests truncate tables. See [Backend testing](Backend/README.md#tests)
@@ -348,13 +354,16 @@ Before the first backend deployment:
 
 - [x] Validate that a submitted GitHub installation belongs to the authenticated GitHub user.
 - [~] Revoke the external GitHub App authorization during account deletion; Clerk already provides the authenticated, confirmed deletion flow and webhook-driven local cleanup.
-- [ ] Add a production backend Dockerfile (arm64) and pinned production start command.
-- [ ] Add a production Compose file: Caddy, API (`RUN_WORKER=false`), worker replicas,
-  healthchecks, and restart policies.
-- [ ] Add `/health` and wire it into the Compose healthchecks and Caddy.
-- [ ] Add Alembic and commit an initial schema migration, including `halfvec` and indexes.
-- [ ] Run migrations as an explicit one-off step (`docker compose run`); do not run
-  schema creation on every app start.
+- [x] Add a production backend Dockerfile (arm64) and pinned production start command
+  (`Backend/Dockerfile`; one image for the API and the worker).
+- [x] Add a production Compose file: Caddy, API (`RUN_WORKER=false`), worker replicas,
+  healthchecks, and restart policies (`docker-compose.prod.yml`; runbook in
+  [docs/deploy.md](docs/deploy.md)).
+- [x] Add `/health` (unauthenticated liveness probe, no database or external calls)
+  and wire it into the Compose healthcheck and Caddy's upstream health check.
+- [x] Add Alembic and commit an initial schema migration, including `halfvec` and indexes.
+- [x] Run migrations as an explicit one-off step (`docker compose run --rm migrate`);
+  startup only checks the schema revision.
 - [~] Add explicit LLM timeouts and a parsed source-file-count limit; compressed
   tarballs, expanded archive bytes, archive entries, and generated chunks are capped.
 - [x] Recover shared jobs left `running` after a task restart with expiring leases,
@@ -392,9 +401,9 @@ explicitly checked (not assumed) before real users touch the deployment.
   deploy time set `CORS_ORIGINS` to exactly the production Vercel origin and
   confirm no wildcard or localhost entries ship.
 - [~] **Rate limiting on all API endpoints.** Per-user fixed windows cover the
-  costly operations (agent Q&A, ingest, direct search, contribution-target
-  discovery, journey creation, brief preview/creation) with `429` +
-  `Retry-After`. Remaining: decide per endpoint for the currently unlimited
+  costly operations (agent Q&A, ingest, follows and briefs that queue an
+  ingest, brief refreshes, direct search, contribution-target discovery,
+  journey creation, brief preview/creation) with `429` + `Retry-After`. Remaining: decide per endpoint for the currently unlimited
   routes (e.g. the GitHub connection endpoints in `github.py`) so nothing is
   accidentally unmetered. Redis-backed limiting (#36) is post-launch.
 - [ ] **Auth-flow expiry (password reset, sessions).** Clerk owns passwords,
@@ -461,8 +470,10 @@ explicitly checked (not assumed) before real users touch the deployment.
 - [ ] **GitHub App permissions minimized.** Audit the App to least privilege
   (read-only contents/metadata/issues) before strangers install it; every
   granted scope is something the privacy policy has to answer for.
-- [ ] **Backups that actually restore.** RDS automated backups plus one tested
-  restore drill before launch; note the backup window as the accepted RPO. An
+- [ ] **Backups that actually restore.** Until RDS: the nightly and pre-deploy
+  dumps copied to S3 ([docs/deploy.md](docs/deploy.md#backups), up to a day of
+  writes at risk), and one restore of a dump downloaded from S3 before launch.
+  RDS automated backups and point-in-time recovery replace them later. An
   untested backup is not a backup.
 - [~] **Encryption everywhere.** GitHub user OAuth tokens are not persisted;
   RDS encrypted storage is planned (gate above). Remaining: require TLS on the
@@ -510,8 +521,8 @@ to revisit only if usage demands them.
 
 ## Now / next 3 actions
 
-1. **Prepare the backend for the box** — add the production arm64 Dockerfile and
-   `/health`, and introduce the full Alembic baseline.
+1. **Prepare the backend for the box** — the production arm64 Dockerfile,
+   `/health`, and the Alembic baseline with a one-off `migrate` step are in; next is CI.
 2. **Stand up the data layer** — RDS `db.t4g.micro` + pgvector with backups
    (storage plan phase 2), production secrets provisioned outside agent sessions.
 3. **Bring up the Compose stack on a `t4g.small`** — Caddy TLS on a real domain,
@@ -587,7 +598,8 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 
 - [x] Direct browser → FastAPI integration — shared `backendFetch`/`ApiError`, JWT-derived identity, CORS, and only the three GitHub OAuth redirect routes retained in Next.js
 - [x] Frontend API client tests — Vitest covers successful JSON requests, authenticated POST bodies, FastAPI `detail` errors, and malformed/non-JSON error responses
-- [x] Per-user PostgreSQL fixed-window rate limiting for agent Q&A, ingest, direct search,
+- [x] Per-user PostgreSQL fixed-window rate limiting for agent Q&A, ingest (including
+  follows, briefs, and brief refreshes that queue one), direct search,
   contribution-target discovery, journey creation, and issue-brief preview/creation; the
   backend returns `429` and `Retry-After`
 
@@ -604,10 +616,10 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [x] Deployment decision: single EC2 `t4g.small` + Docker Compose (supersedes CDK/Fargate)
 - [x] `t4g.small` load test: RAM and API-latency gates passed ([docs/t4g-loadtest.md](docs/t4g-loadtest.md))
 - [x] Storage shrink: halfvec exact scan shipped ([docs/storage-capacity-plan.md](docs/storage-capacity-plan.md) phase 1)
-- [ ] Backend production Dockerfile (arm64) and pinned start command
-- [ ] Production Compose file: Caddy TLS, API (`RUN_WORKER=false`), worker replicas, healthchecks, restart policies
-- [ ] `/health` endpoint wired into Compose healthchecks and Caddy
-- [ ] Alembic baseline and explicit one-off migration step
+- [x] Backend production Dockerfile (arm64) and pinned start command
+- [x] Production Compose file: Caddy TLS, API (`RUN_WORKER=false`), worker replicas, healthchecks, restart policies ([docs/deploy.md](docs/deploy.md))
+- [x] `/health` endpoint wired into Compose healthchecks and Caddy
+- [x] Alembic baseline and explicit one-off migration step
 - [ ] RDS `db.t4g.micro` + pgvector, encrypted storage, backups, security-group-only access (storage plan phase 2)
 - [ ] Production secrets provisioned according to the documented deployment procedure
 - [ ] Domain + TLS for the backend origin (Route 53 + Caddy); Vercel origin in `CORS_ORIGINS`

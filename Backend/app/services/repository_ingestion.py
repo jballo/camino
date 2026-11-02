@@ -19,7 +19,7 @@ from sqlalchemy import exc, text
 from sqlmodel import Session
 
 from app.config import settings
-from app.models.code import CodeChunkEmbedding, CodeChunkModel
+from app.models.code import CodeChunkModel, insert_embeddings
 from app.services.embeddings import (
     EMBED_DIMENSIONS,
     EMBED_MODEL,
@@ -71,11 +71,20 @@ _CLEANUP_STAGED_SQL = text("""
       )
 """)
 
+# A publish whose commit landed but whose acknowledgment was lost reaches the
+# failure handlers with its generation already active, so never delete that.
 _CLEANUP_FAILED_GENERATION_SQL = text("""
-    DELETE FROM code_chunks
-    WHERE repo_name = :repo_name
-      AND ref = :ref
-      AND generation = :generation
+    DELETE FROM code_chunks AS c
+    WHERE c.repo_name = :repo_name
+      AND c.ref = :ref
+      AND c.generation = :generation
+      AND NOT EXISTS (
+          SELECT 1
+          FROM repo_index_state AS s
+          WHERE s.repo_name = c.repo_name
+            AND s.ref = c.ref
+            AND s.active_generation = c.generation
+      )
 """)
 
 _PUBLISH_GENERATION_SQL = text("""
@@ -236,7 +245,7 @@ def _iter_file_chunks(
                 continue
 
             relative_path = full_path.relative_to(root).as_posix()
-            skip_reason = source_skip_reason(source_bytes)
+            skip_reason = source_skip_reason(source_bytes, relative_path)
             if skip_reason is not None:
                 walk_stats.files_skipped += 1
                 if len(walk_stats.skipped_files) < _MAX_SKIPPED_FILES_RECORDED:
@@ -408,16 +417,17 @@ async def _persist_wave(
         raise PermanentRepositoryIngestionError(
             f"Chunk text is incompatible with the database (files: {files})"
         ) from error
-    session.add_all(
+    insert_embeddings(
+        session,
         [
-            CodeChunkEmbedding(
-                chunk_id=chunk.id,
-                model_name=EMBED_MODEL,
-                dimension=EMBED_DIMENSIONS,
-                embedding=vector,
-            )
+            {
+                "chunk_id": chunk.id,
+                "model_name": EMBED_MODEL,
+                "dimension": EMBED_DIMENSIONS,
+                "embedding": vector,
+            }
             for chunk, vector in zip(chunk_models, vectors, strict=True)
-        ]
+        ],
     )
     session.commit()
     return len(chunk_models)

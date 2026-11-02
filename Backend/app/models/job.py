@@ -1,6 +1,6 @@
 import datetime as dt
 
-from sqlalchemy import Column, DateTime, func
+from sqlalchemy import Column, DateTime, Index, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -22,10 +22,32 @@ class JobStatus:
     ACTIVE = (PENDING, RUNNING)
 
 
+_ACTIVE_DEDUPE = text(
+    "status IN ('pending', 'running') AND dedupe_key IS NOT NULL"
+)
+
+
 class Job(SQLModel, table=True):
     """A durable unit of background work handled by the shared worker."""
 
     __tablename__ = "jobs"
+    __table_args__ = (
+        # The claim query scans pending jobs oldest first.
+        Index(
+            "ix_jobs_pending",
+            "createdAt",
+            postgresql_where=text("status = 'pending'"),
+        ),
+        # At most one active job per dedupe key. SQLite unit tests build
+        # this table from the model, so they get the same predicate.
+        Index(
+            "ux_jobs_active_dedupe",
+            "dedupe_key",
+            unique=True,
+            postgresql_where=_ACTIVE_DEDUPE,
+            sqlite_where=_ACTIVE_DEDUPE,
+        ),
+    )
 
     id: int | None = Field(default=None, primary_key=True)
     # A shared repository ingest has neither: it belongs to nobody and runs

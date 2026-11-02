@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 
+from fastapi import HTTPException
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -35,10 +36,11 @@ from app.brief import (
 )
 from app.config import settings
 from app.db import engine
-from app.db_schema import verify_embedding_schema
+from app.db_schema import verify_schema
 from app.models.job import Job, JobStatus, JobType
 from app.models.code import RepoIndexState
 from app.models.tour import TourArtifact, TourFreshness
+from app.rate_limit import REPOSITORY_INGEST_RATE_LIMIT
 from app.services.fork_status import resolve_fork_status
 from app.services.issue_thread import IssueThreadError, fetch_issue_thread
 from app.services.repository_ingestion import (
@@ -173,6 +175,22 @@ SELECT EXISTS (
       AND active IS TRUE
 )
 """)
+
+
+class RefreshBudgetUnavailableError(Exception):
+    """The ingest rate limiter could not be reached; retry the brief later."""
+
+
+def _charge_refresh_ingest(user_id: str) -> bool:
+    """Charge a brief's refresh ingest to its requester's ingest bucket.
+
+    Returns ``False`` when the bucket is empty. A limiter outage is transient,
+    so the brief is retried rather than refreshed for free or failed.
+    """
+    try:
+        return REPOSITORY_INGEST_RATE_LIMIT.consume(user_id).allowed
+    except HTTPException as error:
+        raise RefreshBudgetUnavailableError(str(error.detail)) from error
 
 
 class JobAuthorizationRevokedError(Exception):
@@ -374,6 +392,24 @@ def _recover_stale() -> None:
             lease_timeout_seconds=settings.worker_lease_timeout,
             max_attempts=settings.worker_max_attempts,
         )
+
+
+def _generation_read_engine():
+    """Engine for reads made while a brief or tour is being generated.
+
+    Generation awaits the LLM, embeddings and GitHub between its reads. On a
+    normal session the first read opens a transaction that stays open across
+    those awaits, and its table locks block schema changes for the whole run.
+    Autocommit ends each statement's transaction as soon as it returns.
+
+    The session still holds one pooled connection until it is closed, and it
+    is not read-only: a write through it commits at once and cannot be rolled
+    back. Use it only for reads; claims, parking and results go through a
+    normal session. The isolation level is reset when the connection returns
+    to the pool. Built from ``engine`` at call time so tests that patch it
+    cover this engine too.
+    """
+    return engine.execution_options(isolation_level="AUTOCOMMIT")
 
 
 def _renew_job_lease(job_id: int, worker_id: str) -> bool:
@@ -596,8 +632,41 @@ _TRANSIENT_JOB_ERRORS = (
     APIConnectionError,
     InternalServerError,
     exc.OperationalError,
+    RefreshBudgetUnavailableError,
     TransientRepositoryIngestionError,
 )
+
+# Longest cause message kept on a failure log line.
+_CAUSE_MAX_CHARS = 300
+
+
+def _next_in_chain(error: BaseException) -> BaseException | None:
+    """Return the exception ``error`` was raised from, honouring ``from None``."""
+    if error.__cause__ is not None:
+        return error.__cause__
+    if error.__suppress_context__:
+        return None
+    return error.__context__
+
+
+def _describe_cause(error: BaseException) -> str:
+    """Return `` | cause=<Type>: <message>`` for the innermost chained exception.
+
+    Job errors wrap the real failure (a constraint violation, a GitHub status),
+    so logging only ``str(error)`` loses the reason. The message is collapsed to
+    one line so a Postgres ``DETAIL:`` line stays on the same log line.
+    """
+    seen = {id(error)}
+    innermost = None
+    cause = _next_in_chain(error)
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        innermost = cause
+        cause = _next_in_chain(cause)
+    if innermost is None:
+        return ""
+    message = " ".join(str(innermost).split())[:_CAUSE_MAX_CHARS]
+    return f" | cause={type(innermost).__name__}: {message}"
 
 
 async def _stamp_tour_freshness(
@@ -666,7 +735,10 @@ async def _stamp_tour_freshness(
 
 async def run_job(job_id: int, worker_id: str) -> None:
     """Dispatch one claimed job and persist its outcome. Never raises."""
-    with Session(engine) as session:
+    with (
+        Session(engine) as session,
+        Session(_generation_read_engine()) as read_session,
+    ):
         job = session.get(Job, job_id)
         if job is None:
             logger.error("job vanished before execution | id=%s", job_id)
@@ -690,6 +762,9 @@ async def run_job(job_id: int, worker_id: str) -> None:
         issue_repo = job.issue_repo
         issue_number = job.issue_number
         refresh_cycles = job.refresh_cycles
+        # End the read transaction before generation; everything below works
+        # from the copies above.
+        session.rollback()
 
         try:
             owns_lease = _renew_job_lease(job_id, worker_id)
@@ -732,7 +807,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
         job_parked = False
         try:
             if job_type != JobType.REPOSITORY_INGEST:
-                _ensure_job_authorized(session, user_id, installation_id)
+                _ensure_job_authorized(read_session, user_id, installation_id)
             if ref is None:
                 raise PermanentRepositoryIngestionError(
                     "Legacy job is missing its repository ref"
@@ -741,15 +816,15 @@ async def run_job(job_id: int, worker_id: str) -> None:
                 if topic is None:
                     raise TourGenerationError("Tour job is missing its topic")
                 artifact = await generate_tour(
-                    session,
+                    read_session,
                     topic=topic,
                     repo_name=repo_name,
                     ref=ref,
                     cancel_event=lease_lost,
                 )
-                _ensure_job_authorized(session, user_id, installation_id)
+                _ensure_job_authorized(read_session, user_id, installation_id)
                 await _stamp_tour_freshness(
-                    session,
+                    read_session,
                     artifact,
                     repo_name=repo_name,
                     installation_id=installation_id,
@@ -765,7 +840,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     raise BriefGenerationError(
                         "Issue brief job is missing its issue metadata"
                     )
-                _ensure_job_authorized(session, user_id, installation_id)
+                _ensure_job_authorized(read_session, user_id, installation_id)
                 issue = await asyncio.to_thread(
                     fetch_issue_thread,
                     issue_repo,
@@ -808,7 +883,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
                 )
                 try:
                     artifact = await generate_brief(
-                        session,
+                        read_session,
                         issue=issue,
                         repo_name=repo_name,
                         ref=ref,
@@ -824,21 +899,46 @@ async def run_job(job_id: int, worker_id: str) -> None:
                     _ensure_job_authorized(session, user_id, installation_id)
                     # Park in the same transaction as the enqueue so the shared
                     # ingest is never left without this brief waiting on it.
-                    _, shared, _ = enqueue_shared_ingest(
+                    # Nothing below awaits before park_job commits, so no other
+                    # job on this loop can run while the new row is uncommitted.
+                    _, shared, created = enqueue_shared_ingest(
                         session,
-                        user_id=job.userId,
+                        user_id=user_id,
                         installation_id=installation_id,
                         repo_name=repo_name,
                         ref=ref,
                         waiting_row=False,
                         commit=False,
                     )
-                    job_parked = park_job(
-                        session,
-                        job_id,
-                        worker_id,
-                        blocked_by_job_id=shared.id,
-                    )
+                    # Joining an active ingest is free; starting one is charged
+                    # to the requester like any other ingest.
+                    if created and not _charge_refresh_ingest(user_id):
+                        session.rollback()
+                        logger.info(
+                            "ingest limit reached; drafting brief without refresh "
+                            "| id=%s repo=%r",
+                            job_id,
+                            repo_name,
+                        )
+                        artifact = await generate_brief(
+                            read_session,
+                            issue=issue,
+                            repo_name=repo_name,
+                            ref=ref,
+                            installation_id=installation_id,
+                            target_resolution=target_resolution,
+                            fork_status=fork_status,
+                            allow_stale=True,
+                            cancel_event=lease_lost,
+                        )
+                        result = artifact.model_dump(mode="json")
+                    else:
+                        job_parked = park_job(
+                            session,
+                            job_id,
+                            worker_id,
+                            blocked_by_job_id=shared.id,
+                        )
             elif job_type == JobType.REPOSITORY_INGEST:
                 def finalize_ingestion_publication(
                     publication_session: Session,
@@ -934,21 +1034,24 @@ async def run_job(job_id: int, worker_id: str) -> None:
             PermanentRepositoryIngestionError,
         ) as error:
             logger.warning(
-                "job failed permanently | id=%s type=%s repo=%r: %s",
+                "job failed permanently | id=%s type=%s repo=%r: %s%s",
                 job_id,
                 job_type,
                 repo_name,
                 error,
+                _describe_cause(error),
+                exc_info=error,
             )
             session.rollback()
             permanent_error = str(error)
         except _TRANSIENT_JOB_ERRORS as error:
             logger.warning(
-                "job failed transiently | id=%s type=%s repo=%r: %s",
+                "job failed transiently | id=%s type=%s repo=%r: %s%s",
                 job_id,
                 job_type,
                 repo_name,
                 error,
+                _describe_cause(error),
             )
             session.rollback()
             transient_error = str(error) or type(error).__name__
@@ -964,6 +1067,7 @@ async def run_job(job_id: int, worker_id: str) -> None:
         finally:
             heartbeat_stop.set()
             heartbeat.join()
+            read_session.close()
 
         if ingestion_completed:
             logger.info(
@@ -1126,7 +1230,7 @@ async def worker_loop(
 
 async def _run_standalone() -> None:
     with engine.connect() as conn:
-        verify_embedding_schema(conn)
+        verify_schema(conn)
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()

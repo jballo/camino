@@ -3,10 +3,16 @@ import { ApiError, backendFetch } from "./api";
 
 const BACKEND_URL = "http://127.0.0.1:8000";
 
-function mockResponse(status: number, body: unknown, ok = status < 400) {
+function mockResponse(
+  status: number,
+  body: unknown,
+  ok = status < 400,
+  headers: Record<string, string> = {},
+) {
   return {
     ok,
     status,
+    headers: new Headers(headers),
     json:
       body === undefined
         ? vi.fn().mockRejectedValue(new SyntaxError("Unexpected token"))
@@ -75,6 +81,36 @@ describe("backendFetch", () => {
       status: 404,
       message: "Journey not found",
     });
+  });
+
+  it("reads Retry-After seconds into the error on 429", async () => {
+    fetchMock.mockResolvedValue(
+      mockResponse(429, { detail: "Rate limit exceeded. Try again later." }, false, {
+        "Retry-After": "1800",
+      }),
+    );
+
+    await expect(backendFetch("/follows", "my-token")).rejects.toMatchObject({
+      status: 429,
+      retryAfterSeconds: 1800,
+    });
+  });
+
+  it.each([
+    ["absent", {}],
+    ["an HTTP date", { "Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT" }],
+    ["negative", { "Retry-After": "-5" }],
+  ])("leaves retryAfterSeconds unset when the header is %s", async (_, headers) => {
+    fetchMock.mockResolvedValue(
+      mockResponse(429, { detail: "Rate limit exceeded." }, false, headers),
+    );
+
+    const error = await backendFetch("/follows", "my-token").catch(
+      (e: unknown) => e,
+    );
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).retryAfterSeconds).toBeUndefined();
   });
 
   it("falls back to a generic message when detail is missing", async () => {

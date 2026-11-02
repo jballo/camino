@@ -19,6 +19,18 @@ function mockResponse(body: unknown) {
   } as unknown as Response;
 }
 
+function mockErrorResponse(status: number, retryAfter?: string) {
+  return {
+    ok: false,
+    status,
+    json: vi.fn().mockResolvedValue({ detail: `Request failed (${status})` }),
+    headers: {
+      get: (name: string) =>
+        name === "Retry-After" ? (retryAfter ?? null) : null,
+    },
+  } as unknown as Response;
+}
+
 function job(
   status: RepositoryIngestionJob["status"],
   overrides: Partial<RepositoryIngestionJob> = {},
@@ -172,6 +184,177 @@ describe("repository ingestion jobs", () => {
 
     await rejection;
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("rejects on the first failed status request by default", async () => {
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await expect(
+      pollRepositoryIngestion(
+        42,
+        vi.fn().mockResolvedValue("my-token"),
+        { intervalMs: 0 },
+      ),
+    ).rejects.toBeInstanceOf(TypeError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries transient failures until the job completes", async () => {
+    const complete = job("complete");
+    fetchMock
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(mockErrorResponse(503))
+      .mockResolvedValueOnce(mockErrorResponse(401))
+      .mockResolvedValueOnce(mockResponse(complete));
+    const onUpdate = vi.fn();
+
+    await expect(
+      pollRepositoryIngestion(42, vi.fn().mockResolvedValue("my-token"), {
+        intervalMs: 0,
+        retryTransientErrors: true,
+        onUpdate,
+      }),
+    ).resolves.toEqual(complete);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("backs off between failures and resets after a successful poll", async () => {
+    vi.useFakeTimers();
+    fetchMock
+      .mockResolvedValueOnce(mockErrorResponse(500))
+      .mockResolvedValueOnce(mockErrorResponse(502))
+      .mockResolvedValueOnce(mockErrorResponse(503))
+      .mockResolvedValueOnce(mockResponse(job("running")))
+      .mockResolvedValueOnce(mockErrorResponse(500))
+      .mockResolvedValueOnce(mockResponse(job("complete")));
+
+    const polling = pollRepositoryIngestion(
+      42,
+      vi.fn().mockResolvedValue("my-token"),
+      {
+        intervalMs: 100,
+        maxRetryDelayMs: 250,
+        retryTransientErrors: true,
+        // Top of the jitter window, so each delay is the full backoff.
+        random: () => 1,
+      },
+    );
+    const resolution = expect(polling).resolves.toMatchObject({
+      status: "complete",
+    });
+
+    // Failures wait 100, 200, then the 250 cap.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(249);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    // A success resets the backoff: regular interval, then first-failure delay.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+
+    await resolution;
+  });
+
+  it("spreads retries across the upper half of the backoff window", async () => {
+    vi.useFakeTimers();
+    fetchMock
+      .mockResolvedValueOnce(mockErrorResponse(500))
+      .mockResolvedValueOnce(mockErrorResponse(500))
+      .mockResolvedValueOnce(mockResponse(job("complete")));
+    const random = vi
+      .fn<() => number>()
+      .mockReturnValueOnce(0)
+      .mockReturnValueOnce(0.5);
+
+    const polling = pollRepositoryIngestion(
+      42,
+      vi.fn().mockResolvedValue("my-token"),
+      { intervalMs: 100, retryTransientErrors: true, random },
+    );
+    const resolution = expect(polling).resolves.toMatchObject({
+      status: "complete",
+    });
+
+    // First failure: base 100, random 0 → 50.
+    await vi.advanceTimersByTimeAsync(49);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Second failure: base 200, random 0.5 → 150.
+    await vi.advanceTimersByTimeAsync(149);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    await resolution;
+    expect(random).toHaveBeenCalledTimes(2);
+  });
+
+  it("honors Retry-After on a rate-limited status request", async () => {
+    vi.useFakeTimers();
+    fetchMock
+      .mockResolvedValueOnce(mockErrorResponse(429, "3"))
+      .mockResolvedValueOnce(mockResponse(job("complete")));
+
+    const polling = pollRepositoryIngestion(
+      42,
+      vi.fn().mockResolvedValue("my-token"),
+      { intervalMs: 100, retryTransientErrors: true },
+    );
+    const resolution = expect(polling).resolves.toMatchObject({
+      status: "complete",
+    });
+
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await resolution;
+  });
+
+  it("rejects a final client error even when retrying transient ones", async () => {
+    fetchMock.mockResolvedValue(mockErrorResponse(404));
+
+    await expect(
+      pollRepositoryIngestion(
+        42,
+        vi.fn().mockResolvedValue("my-token"),
+        { intervalMs: 0, retryTransientErrors: true },
+      ),
+    ).rejects.toMatchObject({ name: "ApiError", status: 404 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps polling past the default window when the timeout is infinite", async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValue(mockResponse(job("running")));
+
+    const polling = pollRepositoryIngestion(
+      42,
+      vi.fn().mockResolvedValue("my-token"),
+      { intervalMs: 60_000, timeoutMs: Infinity },
+    );
+    const resolution = expect(polling).resolves.toMatchObject({
+      status: "complete",
+    });
+
+    await vi.advanceTimersByTimeAsync(11 * 60_000);
+    expect(fetchMock).toHaveBeenCalledTimes(12);
+
+    fetchMock.mockResolvedValue(mockResponse(job("complete")));
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    await resolution;
   });
 
   it("stops polling when the caller aborts", async () => {

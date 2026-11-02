@@ -142,10 +142,10 @@ docker run --rm --memory 32m --memory-swap 32m \
     test "$(cat /host-cgroup/camino-t4g/memory.swap.max)" = "0"
   ' || fail "shared t4g cgroup is not active; start the stack with docker-compose.t4g.yml"
 
-# The api must be answering before jobs are enqueued — on a fresh testdb
-# volume it is also what creates the schema on boot.
+# The api must be answering before jobs are enqueued; it starts only after the
+# migrate service has created the schema.
 curl -sf -o /dev/null --max-time 5 http://localhost:8001/openapi.json || \
-  fail "api on :8001 is not responding; wait for the stack to finish booting (first boot installs deps and creates the schema)"
+  fail "api on :8001 is not responding; wait for the stack to finish booting (first boot installs deps and migrates the schema)"
 
 OUT="$PWD/loadtest-results/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$OUT"
