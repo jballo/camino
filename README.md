@@ -16,6 +16,13 @@ even start?"
 **Live:** [www.camino.zone](https://www.camino.zone). Sign-up goes through a waitlist:
 join it from the sign-in page, and an approved request gets an email invite.
 
+### Demo
+
+[![Camino demo: paste a GitHub issue, get a grounded brief, then ask a follow-up](https://img.youtube.com/vi/lJYV6SQDckY/maxresdefault.jpg)](https://youtu.be/lJYV6SQDckY)
+
+A 50-second walkthrough on the live site: preview issue #110, generate its brief, open
+the full brief, and ask the codebase a follow-up question.
+
 ---
 
 ## Where we are
