@@ -229,10 +229,10 @@ npm run dev            # http://localhost:3000
 ```
 
 Instead of the standalone worker command, you can run the supervised Compose worker
-from the repository root with `doppler run -- docker compose --profile worker up -d worker`.
-`docker-compose.yml` passes the worker's secrets by name from the shell environment,
-which is what `doppler run` provides; the worker's settings loader also reads
-`Backend/.env` through the bind mount when that file exists. With
+from the repository root with `docker compose --profile worker up -d worker`. It reads
+the same `Backend/.env` as the host commands, through the `./Backend` bind mount;
+for the variables `docker-compose.yml` lists by name, values exported in your shell
+take precedence, and `DATABASE_URL` always points at the Compose Postgres. With
 `RUN_WORKER=false` by default, ingestion, tour, and issue-brief jobs remain queued
 unless either worker option is running.
 

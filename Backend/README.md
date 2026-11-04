@@ -53,14 +53,17 @@ uv run python -m app.worker
 API docs: http://127.0.0.1:8000/docs
 
 The API does not run jobs in-process by default. As an alternative to the
-second terminal, start the supervised Compose worker. `docker-compose.yml` passes
-its secrets by name from the shell environment, which is what `doppler run`
-provides; the worker's settings loader also reads `Backend/.env` through the bind
-mount when that file exists:
+second terminal, start the supervised Compose worker after filling in
+`Backend/.env`:
 
 ```bash
-doppler run -- docker compose --profile worker up -d worker
+docker compose --profile worker up -d worker
 ```
+
+The worker reads `Backend/.env` through the `./Backend` bind mount, like the host
+commands. For the variables `docker-compose.yml` lists by name, values exported in
+your shell take precedence; `DATABASE_URL` is set in the Compose file and always
+points at the Compose Postgres.
 
 The Compose worker uses `restart: always`, connects to the Compose Postgres
 service, and runs the same `python -m app.worker` entrypoint. The worker profile
@@ -219,7 +222,7 @@ already has the tables, so the baseline cannot run on it. Adopt it once instead,
 with this release checked out and the API and worker stopped:
 
 ```bash
-uv run python -m app.migrate adopt     # or under doppler run --, like the app
+uv run python -m app.migrate adopt
 ```
 
 `adopt` compares the database's catalog with the baseline (tables, columns, types,
@@ -637,7 +640,7 @@ Use the secret-free suite for quick feedback while developing:
 uv run pytest
 ```
 
-This command never uses Doppler or application credentials. Most tests run, while
+This command needs no application credentials. Most tests run, while
 the real-PostgreSQL cases use uniquely named scratch databases if the sanitized local
 PostgreSQL endpoint is reachable and otherwise skip. They build their schema with the
 migrations, as deploys do. On a fresh

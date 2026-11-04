@@ -68,8 +68,8 @@ The backend must be running on port 8000, and a shared job worker must be runnin
 repository processing, tour generation, and issue-brief generation (see
 [Backend/README.md](../Backend/README.md)). Start it with
 `uv run python -m app.worker` from `Backend/`, or use
-`doppler run -- docker compose --profile worker up -d worker` from the repository root
-(Compose passes the worker's secrets from the shell environment). Without a
+`docker compose --profile worker up -d worker` from the repository root; both read
+`Backend/.env`. Without a
 worker, jobs remain queued and the UI eventually reports its ten-minute polling timeout.
 
 Open the frontend at `http://localhost:3000` to match the backend's default

@@ -31,8 +31,8 @@ services:
       migrate:
         condition: service_completed_successfully
     environment:
-      # secrets pass through by NAME from the shell env; run under
-      # `doppler run -- docker compose ...` (there are no .env files)
+      # the app reads Backend/.env through the /app mount; the names listed
+      # below pass through from the shell and take precedence over that file
       - &dev-database-url DATABASE_URL=postgresql://agent:localdev@db:5432/onboarding_agent
       - RUN_WORKER=false
       - UV_PROJECT_ENVIRONMENT=/opt/venv
@@ -53,7 +53,7 @@ services:
 
   # Applies the migrations, then exits; the worker starts after it succeeds.
   # Without the worker profile, migrate from the host instead:
-  #   cd Backend && doppler run -- uv run python -m app.migrate
+  #   cd Backend && uv run python -m app.migrate
   migrate:
     image: ghcr.io/astral-sh/uv:python3.14-bookworm-slim
     profiles: ["worker"]
