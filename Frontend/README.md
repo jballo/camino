@@ -68,7 +68,8 @@ The backend must be running on port 8000, and a shared job worker must be runnin
 repository processing, tour generation, and issue-brief generation (see
 [Backend/README.md](../Backend/README.md)). Start it with
 `uv run python -m app.worker` from `Backend/`, or use
-`docker compose --profile worker up -d worker` from the repository root. Without a
+`doppler run -- docker compose --profile worker up -d worker` from the repository root
+(Compose passes the worker's secrets from the shell environment). Without a
 worker, jobs remain queued and the UI eventually reports its ten-minute polling timeout.
 
 Open the frontend at `http://localhost:3000` to match the backend's default
@@ -92,29 +93,42 @@ environment variable (e.g. `camino-onboarder` for local development).
 | `CLERK_SECRET_KEY` | Clerk backend key for the remaining GitHub App routes |
 | `BACKEND_URL` | Server-side FastAPI base URL used by the GitHub OAuth callback |
 | `NEXT_PUBLIC_BACKEND_URL` | Browser-visible FastAPI base URL (default `http://127.0.0.1:8000`) |
-| `NEXT_PUBLIC_APP_URL` | Public app URL for GitHub OAuth callback (default `http://localhost:3000`) |
+| `NEXT_PUBLIC_APP_URL` | Public app URL for the GitHub install and OAuth redirects (falls back to the incoming request's origin) |
 | `GITHUB_APP_SLUG` | Slug of the GitHub App the install route redirects to (required) |
 
 ---
 
 ## Production configuration
 
-The frontend is not part of the initial RDS/ECS CDK stacks, but it must be updated when
-the Fargate backend is deployed:
+The frontend runs on Vercel at `https://www.camino.zone`; the backend runs on one EC2
+box at `https://api.camino.zone` ([docs/deploy.md](../docs/deploy.md)). In Vercel:
 
-- Set both `BACKEND_URL` and `NEXT_PUBLIC_BACKEND_URL` to the backend's HTTPS
-  ALB/custom-domain origin. The public value is intentionally browser-visible.
+- Set both `BACKEND_URL` and `NEXT_PUBLIC_BACKEND_URL` to the backend's HTTPS origin.
+  The public value is intentionally browser-visible.
 - Set `NEXT_PUBLIC_APP_URL` to the frontend's canonical HTTPS origin.
-- Add the frontend's exact origin to the backend's `CORS_ORIGINS`.
-- Configure the production frontend URL in Clerk's allowed redirect/origin settings.
-- Configure GitHub App setup/callback URLs to use the production frontend routes and
-  webhook URLs to use the production backend.
 - Set `GITHUB_APP_SLUG` to the production GitHub App's slug; the install route fails
   fast when it is absent.
-- Make production builds fail when required URLs or credentials are absent instead of
-  falling back to localhost.
+- Use the Clerk production instance's keys for `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
+  and `CLERK_SECRET_KEY`.
 
-After deploying both the API and worker, smoke-test the complete browser flow: sign in,
+Outside Vercel:
+
+- The backend's `CORS_ORIGINS` (and Caddy's `CAMINO_CORS_ORIGIN`) must hold the
+  frontend's exact origin.
+- The GitHub App's setup and callback URLs point at the production frontend routes,
+  and its webhook URL at the production backend.
+- Clerk's GitHub sign-in on the production instance needs its own GitHub OAuth App
+  (custom credentials); it is separate from Camino's GitHub App.
+- Sign-up is in Clerk's waitlist mode, so the sign-in popup's sign-up link becomes
+  **Join waitlist** (Clerk's hosted page). Approve requests on the Clerk dashboard's
+  Waitlist page; an approved request gets an invite email to sign up. Existing users
+  sign in as usual.
+
+Still open: the browser-visible `NEXT_PUBLIC_BACKEND_URL` and the server-side
+`BACKEND_URL` fall back to `http://127.0.0.1:8000` when unset, so a missing value
+breaks at runtime instead of failing the build.
+
+After deploying a backend change, smoke-test the complete browser flow: sign in,
 connect GitHub, list and ingest a repository, ask a question, generate a tour, generate
 an issue brief, and poll both jobs to completion.
 
@@ -200,7 +214,11 @@ snippets, explanations, and optional "why" notes.
 npm test             # run Vitest once
 npm run test:watch   # watch mode
 npm run lint
+npx next typegen && npx tsc --noEmit   # typecheck
 ```
+
+CI runs lint, the typecheck, and Vitest on every pull request into `dev` and `main`.
+Vercel builds the app, so CI does not run `next build`.
 
 `src/lib/api.test.ts` covers successful JSON responses, bearer-token requests, JSON
 POST bodies, FastAPI `detail` errors, unexpected error shapes, and non-JSON responses.
@@ -208,3 +226,7 @@ POST bodies, FastAPI `detail` errors, unexpected error shapes, and non-JSON resp
 terminal states, token refresh, polling timeouts, and abort behavior.
 `src/lib/contribution-target.test.ts` covers target discovery responses, and
 `src/lib/briefs.test.ts` covers authenticated preview, create, and read requests.
+`src/lib/issue-url.test.ts` covers GitHub issue URL parsing,
+`src/lib/safe-redirect.test.ts` covers the same-origin `redirect_url` check, and
+`src/app/explore/state.test.ts` covers Explore's repository selection, follow error
+messages, index-request status polling, and overlapping overview loads.

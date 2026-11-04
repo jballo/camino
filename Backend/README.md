@@ -8,8 +8,10 @@ rate limiting, and Clerk account-lifecycle and GitHub installation webhook handl
 **Retrieval loop:** paused at a tuned stack — exp1–5 shipped (hit@5 0.900), plus an
 optional exp6 cross-encoder reranker (BGE blend → 0.950). See
 [eval/EXPERIMENTS.md](eval/EXPERIMENTS.md).
-**Phase 2 status:** the issue-brief backend — the main product surface — is wired end
-to end with the frontend home page: GitHub issue preflight, fork/upstream and
+**Deployed:** the backend runs at `https://api.camino.zone` on one EC2 box with Docker
+Compose; see [Production deployment](#production-deployment).
+**Product status:** the issue-brief backend — the main product surface — is wired end
+to end with the frontend `/briefs` workbench: GitHub issue preflight, fork/upstream and
 contribution-target resolution, ref-aware ingestion dependencies, grounded generation,
 polling, listing, and cancellation through `/api/v1/briefs`, all backed by the durable
 shared Postgres `Job` queue. The same queue backs asynchronous repository ingestion and
@@ -51,11 +53,13 @@ uv run python -m app.worker
 API docs: http://127.0.0.1:8000/docs
 
 The API does not run jobs in-process by default. As an alternative to the
-second terminal, start the supervised Compose worker after filling in
-`Backend/.env`:
+second terminal, start the supervised Compose worker. `docker-compose.yml` passes
+its secrets by name from the shell environment, which is what `doppler run`
+provides; the worker's settings loader also reads `Backend/.env` through the bind
+mount when that file exists:
 
 ```bash
-docker compose --profile worker up -d worker
+doppler run -- docker compose --profile worker up -d worker
 ```
 
 The Compose worker uses `restart: always`, connects to the Compose Postgres
@@ -112,28 +116,35 @@ configure Clerk to send `user.created`, `user.updated`, and `user.deleted` to
 | `WORKER_LEASE_TIMEOUT` | Seconds before a dead worker's claim is stale (default `600`); active jobs renew their lease every one-third of this interval |
 | `WORKER_MAX_ATTEMPTS` | Claims allowed before stale recovery marks a job failed (default `3`) |
 
-## AWS deployment target
+## Production deployment
 
-The backend will run on **ECS Fargate**, provisioned by the TypeScript CDK app in the
-planned `Infrastructure/` directory. PostgreSQL will run on **Amazon RDS** in isolated
-subnets. See the "AWS deployment plan" section of the root [README](../README.md) for
-stack boundaries and deployment order.
+The backend runs on a single EC2 `t4g.small` with Docker Compose
+(`docker-compose.prod.yml` at the repository root): Caddy for TLS, the API, one
+worker, Postgres with pgvector on the same box, and a one-off `migrate` step. The
+runbook for setup, deploys, rollbacks, migrations, backups, and restores is
+[docs/deploy.md](../docs/deploy.md); the root [README](../README.md#deployment-ec2--docker-compose)
+has the topology and the remaining checklists.
 
-### Backend work required before Fargate
+In place:
 
-- Done: `Dockerfile` builds the production image (see "Production image" below).
-- Done: unauthenticated `GET /health` liveness endpoint with no database or external
-  calls. It is left out of the OpenAPI schema. A separate readiness check is not
-  needed: startup fails when the database or the embedding schema is unusable.
-- Completed: `POST /api/v1/github/connect` verifies `installationId` against the
-  authenticated GitHub user's accessible installations before persisting it.
+- `Dockerfile` builds the production image (see "Production image" below).
+- Unauthenticated `GET /health` liveness endpoint with no database or external
+  calls, used by the Compose healthcheck. It is left out of the OpenAPI schema. A
+  separate readiness check is not needed: startup fails when the database or the
+  embedding schema is unusable.
+- `POST /api/v1/github/connect` verifies `installationId` against the authenticated
+  GitHub user's accessible installations before persisting it.
+- On `SIGTERM` the worker stops claiming new jobs and exits after its current one;
+  Compose gives it 30 seconds. A job still running after that stays `running` until
+  lease recovery requeues or fails it.
+
+Still to do:
+
 - Revoke or uninstall the external GitHub App authorization when Clerk's confirmed
   account-deletion flow triggers the existing local cleanup service.
 - Add explicit request/model deadlines and cap the parsed repository file count before
   generating tours. Compressed tarballs, expanded archive bytes, archive entries, and
   generated chunks are already capped.
-- Handle `SIGTERM` so in-flight jobs can finish or be cancelled cleanly; stale
-  `running` rows are requeued or failed by the worker's lease recovery.
 
 ### Production image
 
@@ -258,24 +269,29 @@ Startup warns when `VECTOR_INDEX` and the database disagree, and never creates o
 drops the index. The API and worker refuse to start when `VECTOR_TYPE` disagrees with
 the embedding column.
 
-### RDS
+### Moving to RDS
 
-Before connecting ECS to RDS:
+Postgres runs on the box until the move to RDS. Before pointing the API and worker at
+RDS:
 
 1. Keep schema migration permission separate from the runtime application's normal
    database access where practical; the API and worker need no DDL rights.
-2. Run `python -m app.migrate` from the backend image as a one-off task before
-   updating the web service.
+2. Keep running `python -m app.migrate` from the backend image as the one-off step
+   before the API and worker start.
 3. Use an RDS connection URL with TLS enabled, and size
    `DATABASE_POOL_SIZE`/`DATABASE_MAX_OVERFLOW` against the instance's connection budget.
 
-The private alpha can begin with Single-AZ RDS, encrypted gp3 storage, seven-day backups,
-and one Fargate web task. RDS must not be publicly accessible; its security group should
-accept port 5432 only from the Fargate task security group.
+Plan for Single-AZ RDS with encrypted gp3 storage and automated backups, which
+replace the nightly dump. RDS must not be publicly accessible; its security group
+should accept port 5432 only from the EC2 instance's security group.
 
 ### Secrets and runtime configuration
 
-Inject these values from Secrets Manager into the task definition:
+On the box, configuration lives in env files under `/etc/camino`, outside the
+repository: `backend.env` holds the API and worker settings (names in
+`.env.example`), and `compose.env` holds the Compose-level settings such as the
+domain, the frontend origin for Caddy, and the image tag. The secrets among the
+backend settings are:
 
 - `DATABASE_URL`
 - `OPENAI_API_KEY`
@@ -283,10 +299,8 @@ Inject these values from Secrets Manager into the task definition:
 - `GH_APP_ID`, `GH_APP_CLIENT_ID`, `GH_APP_SECRET`, `GH_APP_PRIVATE_KEY`, and
   `GH_WEBHOOK_SECRET`
 
-Non-secret settings such as `AGENT_MODEL`, `CORS_ORIGINS`, pool sizes, and rate-limit
-thresholds can be plain task-definition environment variables. Secret values must not
-be embedded in the Docker image, CDK source, CloudFormation outputs, or committed
-`.env` files. Production `CORS_ORIGINS` must include the Vercel frontend origin.
+Secret values must not be embedded in the Docker image or committed `.env` files.
+Production `CORS_ORIGINS` must hold the exact Vercel frontend origin.
 
 ### Job queue
 
@@ -362,8 +376,7 @@ the running shared ingest stops at its next wave commit and goes back to `pendin
 job returns `409`, while cancelling an already-cancelled job is idempotent.
 
 Keep `RUN_WORKER=false` in API processes and supervise the separate worker process.
-The local Compose worker uses `restart: always`; production orchestration should apply
-the equivalent always-restart policy. `RUN_WORKER=true` remains available for an
+The local and production Compose workers both use `restart: always`. `RUN_WORKER=true` remains available for an
 explicitly combined local process. Atomic claims make either topology—and multiple
 worker processes—safe.
 
@@ -373,7 +386,10 @@ worker processes—safe.
 
 ```
 app/
-├── main.py              # FastAPI app, local DB/table initialization, indexes and view
+├── main.py              # FastAPI app, CORS, /health, startup schema check
+├── migrate.py           # python -m app.migrate: upgrade, current, adopt
+├── schema_revision.py   # how migrations run, and the startup revision check
+├── schema_catalog.py    # compare the database catalog with the models (adopt, tests)
 ├── db_schema.py         # embedding type validation and stale-index warning
 ├── worker.py            # Postgres-backed shared job claim/dispatch loop
 ├── rate_limit.py        # PostgreSQL fixed-window limiter dependencies
@@ -399,7 +415,10 @@ app/
 ├── services/
 │   ├── account_deletion.py # transactional, idempotent local account cleanup
 │   ├── installation_deletion.py # installation-scoped GitHub webhook cleanup
+│   ├── installation_state.py # installation suspend/unsuspend handling
+│   ├── authorization_revocation.py # GitHub authorization revoked: remove the user's connections, cancel their work
 │   ├── jobs.py          # shared enqueue, deduplication, normalization and cancellation
+│   ├── shared_ingests.py # ownerless shared ingest, waiting rows, releasing a user's jobs
 │   ├── repository_ingestion.py # snapshot, bounded waves and atomic generation publish
 │   ├── target_branch.py # contribution-target evidence ladder
 │   ├── repo_access.py   # live GitHub authorization for shared indexes
@@ -411,6 +430,9 @@ app/
 │   └── search_index.py  # tsvector population SQL
 ├── models/              # SQLModel tables (users, chunks, embeddings, …)
 └── webhooks/            # Clerk + GitHub webhook handlers
+
+migrations/versions/     # Alembic revisions (see Migrations)
+scripts/test_all.sh      # complete test suite against a throwaway pgvector container
 
 eval/
 ├── golden_dataset.json  # 20 hand-labeled FastAPI questions
@@ -432,7 +454,8 @@ eval/
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/v1/github/connection` | Return the authenticated user's GitHub connection status |
-| `POST` | `/api/v1/github/connect` | Exchange GitHub OAuth code and persist encrypted, expiring user-to-server credentials |
+| `GET` | `/health` | Unauthenticated liveness probe (no database or external calls) |
+| `POST` | `/api/v1/github/connect` | Exchange a GitHub OAuth code, verify the installation belongs to the user, and store the connection (the token is not persisted) |
 | `GET` | `/api/v1/repositories` | List repos for the authenticated user's GitHub installation |
 | `GET` | `/api/v1/repositories/overview` | List installed and personally requested repositories with index facts |
 | `GET` | `/api/v1/repositories/lookup` | Check an exact `owner/repo` against GitHub and the shared index |
@@ -454,7 +477,7 @@ eval/
 | `GET` | `/api/v1/briefs/{id}` | Poll an issue brief, including its dependency phase and artifact/error |
 | `POST` | `/api/v1/briefs/{id}/cancel` | Cancel an owned pending/running issue brief |
 | `POST` | `/webhooks/clerk` | Process signed Clerk lifecycle events, including account cleanup |
-| `POST` | `/webhooks/github` | Process signed GitHub installation events and clean up deleted installations |
+| `POST` | `/webhooks/github` | Process signed GitHub installation (deleted, suspend, unsuspend) and authorization-revoked events |
 
 All `/api/v1/*` routes require `Authorization: Bearer <clerk_session_jwt>`. The backend
 verifies the token and uses its `sub` claim as the sole source of user identity; API
@@ -509,7 +532,8 @@ HTTP status when the error body is missing, malformed, non-JSON, or uses another
 ### Rate limiting
 
 The authenticated Clerk user ID keys atomic fixed-window counters in the `rate_limits`
-table. Limits apply to `POST /api/v1/agent/ask`, repository ingest/search,
+table. Limits apply to `POST /api/v1/agent/ask`, repository ingest, search, and
+lookup (lookup shares the search bucket),
 `GET /api/v1/repositories/contribution-target`, journey creation, and issue-brief
 preview/creation. Preview and create share one issue-brief bucket. `POST
 /api/v1/repositories/follows` is charged to the ingest bucket only when it queues a new
@@ -576,7 +600,9 @@ signatures return `401`.
 
 Configure the GitHub App to deliver installation events to `POST /webhooks/github`.
 Requests are verified with the HMAC secret in `GH_WEBHOOK_SECRET`. The handler also
-marks every shared connection inactive on `suspend` and active again on `unsuspend`.
+marks every shared connection inactive on `suspend` and active again on `unsuspend`,
+and a `github_app_authorization` `revoked` event removes that GitHub user's
+connections and cancels their active work.
 
 ---
 
