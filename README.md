@@ -13,11 +13,20 @@ need more context on the repository behind the issue: ask-the-codebase Q&A on
 Built for OSS contributors and anyone who's opened an issue and thought, "where do I
 even start?"
 
+**Live:** [www.camino.zone](https://www.camino.zone). Sign-up goes through a waitlist:
+join it from the sign-in page, and an approved request gets an email invite.
+
 ---
 
 ## Where we are
 
-**Phase 2 — Issue briefs + supporting tours** · `✅ M6 implemented`
+**Phase 3 — Ship to users** · `✅ deployed`
+
+Camino is live. The frontend runs on Vercel at `www.camino.zone`, and the backend runs
+on a single EC2 `t4g.small` with Docker Compose at `api.camino.zone`: Caddy for TLS,
+the API, one worker, and Postgres with pgvector, with nightly database dumps copied to
+S3. CI runs the backend and frontend checks on every pull request, and a deployed
+end-to-end smoke test passed. The runbook is [docs/deploy.md](docs/deploy.md).
 
 The contribution flow is end to end: the briefs workbench previews a GitHub issue thread,
 surfaces warnings, discovers the repository's preferred target branch, indexes code by
@@ -49,7 +58,8 @@ What works today:
 | Per-user API rate limiting                  | ✅ PostgreSQL fixed windows on costly API operations        |
 | Clerk account-deletion webhook cleanup      | ✅ idempotent, transactional local-data cleanup             |
 | GitHub installation webhook cleanup         | ✅ removes local data when an installation is deleted       |
-| Production deploy                           | ❌ local dev only                                          |
+| CI                                          | ✅ backend tests + frontend lint/typecheck/Vitest, required on `dev` and `main` |
+| Production deploy                           | ✅ EC2 + Docker Compose behind Caddy, nightly dumps to S3   |
 
 
 **Eval hero repo:** [FastAPI 0.115.6](https://github.com/tiangolo/fastapi). See
@@ -67,8 +77,8 @@ flowchart LR
   P3 --> P4["Phase 4<br/>CLI + PR bot"]
 
   style P1 fill:#f0fdf4,stroke:#16a34a
-  style P2 fill:#fef3c7,stroke:#d97706
-  style P3 fill:#f3f4f6,stroke:#6b7280
+  style P2 fill:#f0fdf4,stroke:#16a34a
+  style P3 fill:#fef3c7,stroke:#d97706
   style P4 fill:#f3f4f6,stroke:#6b7280
 ```
 
@@ -78,8 +88,8 @@ flowchart LR
 | Phase           | Goal                                 | Key deliverables                                                                            |
 | --------------- | ------------------------------------ | ------------------------------------------------------------------------------------------- |
 | **1 — Done**    | Best-in-class retrieval for code Q&A | exp1–5 shipped (0.900 hit@5); optional exp6 BGE reranker (0.950, closes q17); q03 last miss |
-| **2 — Now**     | Issue briefs + supporting tours      | End-to-end brief/tour flows, M5 evals, and M6 durable Postgres queue landed                   |
-| **3**           | Ship to users                        | Single EC2 box + Docker Compose (Caddy, API, workers), RDS PostgreSQL + pgvector, health checks, CI, deployed smoke test |
+| **2 — Done**    | Issue briefs + supporting tours      | End-to-end brief/tour flows, M5 evals, and M6 durable Postgres queue landed                   |
+| **3 — Now**     | Ship to users                        | Live: single EC2 box + Docker Compose (Caddy, API, worker, Postgres), health checks, CI, nightly S3 dumps, deployed smoke test. Next: RDS, observability, and the checklists below |
 | **4 — Stretch** | Meet contributors where they work    | CLI (`camino brief`), PR reviewer bot                                                       |
 
 
@@ -96,7 +106,8 @@ flowchart TB
     Clerk[Clerk auth]
     Settings["/settings — GitHub connection"]
     Explore["/explore — ingest + Q&A"]
-    Home["/ — issue preflight + brief list"]
+    Landing["/ — landing page (signed out)"]
+    Home["/briefs — issue preflight + brief list"]
     TourUI["/tours — library + generator"]
     GenerateUI["/generate — tour polling"]
     BriefUI["/briefs/[id] — brief reader"]
@@ -125,6 +136,7 @@ flowchart TB
     Counters[(rate_limits)]
   end
 
+  Landing -->|sign in| Clerk
   Clerk --> Settings
   Clerk --> Explore
   Clerk --> Home
@@ -217,7 +229,10 @@ npm run dev            # http://localhost:3000
 ```
 
 Instead of the standalone worker command, you can run the supervised Compose worker
-from the repository root with `docker compose --profile worker up -d worker`. With
+from the repository root with `docker compose --profile worker up -d worker`. It reads
+the same `Backend/.env` as the host commands, through the `./Backend` bind mount;
+for the variables `docker-compose.yml` lists by name, values exported in your shell
+take precedence, and `DATABASE_URL` always points at the Compose Postgres. With
 `RUN_WORKER=false` by default, ingestion, tour, and issue-brief jobs remain queued
 unless either worker option is running.
 
@@ -238,6 +253,9 @@ at `http://127.0.0.1:3000` or another origin, add that exact value to the backen
 - Clerk webhook URL: `{public-backend-origin}/webhooks/clerk`, subscribed to
   `user.created`, `user.updated`, and `user.deleted` (the backend syncs local user
   profiles from the first two and runs account cleanup on the third)
+- Production Clerk settings (waitlist mode, a separate GitHub OAuth App for Clerk's
+  GitHub sign-in) are in
+  [Frontend/README.md](Frontend/README.md#production-configuration)
 
 Clerk and GitHub cannot reach localhost webhooks directly; use a tunnel such as ngrok
 or Cloudflare Tunnel when testing deletion flows locally. The install route targets the
@@ -253,7 +271,7 @@ created before the migrations existed is adopted once with
 `python -m app.migrate adopt` ([Backend/README.md](Backend/README.md#migrations)).
 
 1. Sign in → open **Settings** → connect or manage the GitHub App.
-2. On **Home**, paste a GitHub issue URL, review the issue warnings and discovered
+2. On **Briefs** (`/briefs`), paste a GitHub issue URL, review the issue warnings and discovered
    target branch, then generate a brief. Camino queues the required ref ingestion
    automatically, if needed, before producing setup steps, grounded reading guidance,
    tests, and an implementation checklist.
@@ -307,50 +325,58 @@ and error behavior, plus contribution-target and issue-brief clients.
 
 ---
 
-## Deployment plan: EC2 + Docker Compose
+## Deployment: EC2 + Docker Compose
 
 > **Decision (2026-09, supersedes the earlier CDK/ECS Fargate plan):** Camino
-> launches on a **single EC2 instance running Docker Compose**. At launch the user
-> base is one person, the eventual target is a low couple hundred users, and an
-> always-on Fargate + ALB topology (~$95/mo) is not justified at that scale. The
-> real variable cost is OpenAI tokens, not compute. ECS/CDK remains the post-alpha
-> upgrade path if usage ever demands it.
+> runs on a **single EC2 instance running Docker Compose**. The expected user base
+> is a low couple hundred users at most, and an always-on Fargate + ALB topology
+> (~$95/mo) is not justified at that scale. The real variable cost is OpenAI tokens,
+> not compute. ECS/CDK remains the upgrade path if usage ever demands it.
 >
 > **Database decision (2026-09-17):** the storage capacity ceiling, the halfvec
 > embedding shrink, and the move to RDS `db.t4g.micro` are planned in
 > [docs/storage-capacity-plan.md](docs/storage-capacity-plan.md). Neon was dropped
-> on 2026-09-23; development runs on local Postgres until the RDS instance exists.
+> on 2026-09-23. Until RDS exists, Postgres runs on the box itself.
 
-### Target topology (~$33/mo)
+The backend went live on 2026-11-02. Setup, deploys, rollbacks, migrations, backups,
+and restores are in the runbook, [docs/deploy.md](docs/deploy.md).
 
-- **EC2 `t4g.small`** (2 vCPU ARM, 2 GB RAM, ~$19/mo) running Docker Compose:
-  Caddy (TLS + reverse proxy), the FastAPI API container with `RUN_WORKER=false`,
-  and 1–2 dedicated worker containers with an always-restart policy. Images must be
-  built for **arm64**. RAM is the sizing constraint — workers held ~290 MiB each and
-  the RAM/latency gates passed reproducibly in the load test
-  ([docs/t4g-loadtest.md](docs/t4g-loadtest.md)).
-- **RDS PostgreSQL `db.t4g.micro`**, single-AZ, 20 GB gp3 (~$14/mo) with pgvector,
-  encrypted storage, and automated backups, reachable only from the instance's
-  security group. Only <0.5 MB of the database (users, connections, jobs, brief
+### Topology today
+
+- **EC2 `t4g.small`** (2 vCPU ARM, 2 GB RAM) running `docker-compose.prod.yml`:
+  Caddy (automatic TLS + reverse proxy, the only container with published ports),
+  the FastAPI API container with `RUN_WORKER=false`, one worker container, and
+  Postgres with pgvector. Images are built on the box for **arm64** and tagged with
+  the git short SHA, so a rollback is the previous tag. RAM is the sizing
+  constraint: each container has a memory limit, and the RAM/latency gates passed
+  in the load test ([docs/t4g-loadtest.md](docs/t4g-loadtest.md)).
+- **Postgres on the box** for now, with a nightly and a pre-deploy dump copied to S3
+  through an upload-only instance role. A restore drill from S3 passed on
+  2026-11-03. Only a small part of the database (users, connections, jobs, brief
   artifacts) is irreplaceable; chunks and embeddings are a rebuildable cache
-  (~$0.25/repo to re-ingest).
-- **Frontend stays on Vercel.** The browser calls the backend directly with Clerk
-  JWTs, so the backend needs a real domain and certificate (Route 53 + Caddy's
-  automatic TLS) and the Vercel origin in `CORS_ORIGINS`.
+  (~$0.25/repo to re-ingest), so they are not dumped.
+- **Frontend stays on Vercel** at `www.camino.zone`. The browser calls the backend
+  directly with Clerk JWTs at `api.camino.zone`; Caddy gets its certificate
+  automatically, and `CORS_ORIGINS` holds the exact frontend origin.
 - **Worker replicas are the throughput knob.** Jobs are I/O-bound (GitHub/OpenAI
   calls) and the Postgres queue (`FOR UPDATE SKIP LOCKED` + leases) already
-  supports concurrent workers, so scaling is adding worker containers, not
-  resizing the box.
-- No production credentials exist yet. Define the production provisioning
-  procedure before creating them.
-- Jobs are claimed from Postgres, so more than one worker can share the queue. A killed
-  worker leaves its current job in `running` until the 600-second lease expires and
-  recovery requeues or fails it. Active jobs renew their lease every one-third of the
-  lease timeout (200 seconds with the defaults), independently of empty-queue polling.
+  supports concurrent workers, so scaling is adding worker containers
+  (`--scale worker=2`), not resizing the box.
+- A killed worker leaves its current job in `running` until the 600-second lease
+  expires and recovery requeues or fails it. Active jobs renew their lease every
+  one-third of the lease timeout (200 seconds with the defaults), independently of
+  empty-queue polling.
+
+### Next: RDS
+
+**RDS PostgreSQL `db.t4g.micro`**, single-AZ, 20 GB gp3 (~$14/mo) with pgvector,
+encrypted storage, automated backups with point-in-time recovery, and TLS from the
+app, reachable only from the instance's security group. Its backups replace the
+nightly dump, and the restore drill is repeated there.
 
 ### Deployment gates
 
-Before the first backend deployment:
+For the first backend deployment:
 
 - [x] Validate that a submitted GitHub installation belongs to the authenticated GitHub user.
 - [~] Revoke the external GitHub App authorization during account deletion; Clerk already provides the authenticated, confirmed deletion flow and webhook-driven local cleanup.
@@ -360,7 +386,7 @@ Before the first backend deployment:
   healthchecks, and restart policies (`docker-compose.prod.yml`; runbook in
   [docs/deploy.md](docs/deploy.md)).
 - [x] Add `/health` (unauthenticated liveness probe, no database or external calls)
-  and wire it into the Compose healthcheck and Caddy's upstream health check.
+  and wire it into the Compose healthcheck.
 - [x] Add Alembic and commit an initial schema migration, including `halfvec` and indexes.
 - [x] Run migrations as an explicit one-off step (`docker compose run --rm migrate`);
   startup only checks the schema revision.
@@ -368,21 +394,23 @@ Before the first backend deployment:
   tarballs, expanded archive bytes, archive entries, and generated chunks are capped.
 - [x] Recover shared jobs left `running` after a task restart with expiring leases,
   bounded attempts, and periodic requeue/fail sweeps.
-- [ ] Add CI checks for backend tests, frontend lint/build, the arm64 image build, and
-  migrations.
-- [ ] Provision the RDS instance and production secrets after documenting the
-  production provisioning procedure.
-- [ ] Run a deployed smoke test: auth → GitHub connect → ingest → ask → generate tour
-  → generate issue brief.
-- [ ] Register `https://<backend>/webhooks/clerk` for Clerk user lifecycle events
-  (`user.created`, `user.updated`, `user.deleted`) and
-  `https://<backend>/webhooks/github` for GitHub installation and
+- [~] CI: backend tests (including the migration tests) and frontend lint, typecheck,
+  and Vitest are required on `dev` and `main`. The arm64 image build is not in CI.
+- [x] Production secrets live in env files under `/etc/camino` on the box, outside
+  the repository ([docs/deploy.md](docs/deploy.md)).
+- [x] Nightly and pre-deploy database dumps to S3, with a tested restore.
+- [x] Deployed smoke test (2026-11-03): sign-up → GitHub connect → ingest → ask →
+  generate tour → generate issue brief.
+- [x] Register `https://api.camino.zone/webhooks/clerk` for Clerk user lifecycle
+  events (`user.created`, `user.updated`, and `user.deleted`) and
+  `https://api.camino.zone/webhooks/github` for GitHub installation and
   authorization-revoked events.
 
-### Pre-deployment checklist: security & operations
+### Before strangers use it: security & operations
 
-A walk-through list, separate from the build gates above. Each item must be
-explicitly checked (not assumed) before real users touch the deployment.
+A walk-through list, separate from the build gates above. Sign-up is in Clerk's
+waitlist mode, so only approved users get in today; each item must be explicitly
+checked (not assumed) before the waitlist opens to strangers.
 
 - [~] **Authorization: a logged-in user can only access their own data.**
   Identity comes solely from the verified Clerk JWT `sub` claim, and job, brief,
@@ -397,17 +425,19 @@ explicitly checked (not assumed) before real users touch the deployment.
   `rehype-raw` and no `dangerouslySetInnerHTML`, so raw HTML is escaped.
   Remaining: constrain `repoName` (#28) and sweep the other unconstrained
   string fields for length/shape limits.
-- [~] **CORS policy configured.** Exact-origin matching is implemented; at
-  deploy time set `CORS_ORIGINS` to exactly the production Vercel origin and
-  confirm no wildcard or localhost entries ship.
+- [x] **CORS policy configured.** Exact-origin matching is implemented, and
+  production sets `CORS_ORIGINS` (and Caddy's `CAMINO_CORS_ORIGIN`) to exactly
+  `https://www.camino.zone`, with no wildcard or localhost entries.
 - [~] **Rate limiting on all API endpoints.** Per-user fixed windows cover the
   costly operations (agent Q&A, ingest, follows and briefs that queue an
-  ingest, brief refreshes, direct search, contribution-target discovery,
-  journey creation, brief preview/creation) with `429` + `Retry-After`. Remaining: decide per endpoint for the currently unlimited
+  ingest, brief refreshes, direct search and repository lookup,
+  contribution-target discovery, journey creation, brief preview/creation) with
+  `429` + `Retry-After`. Remaining: decide per endpoint for the currently unlimited
   routes (e.g. the GitHub connection endpoints in `github.py`) so nothing is
   accidentally unmetered. Redis-backed limiting (#36) is post-launch.
 - [ ] **Auth-flow expiry (password reset, sessions).** Clerk owns passwords,
-  reset links, and sessions. Walk the Clerk dashboard before launch: reset-link
+  reset links, and sessions; production sign-up is in waitlist mode. Walk the
+  Clerk dashboard before opening sign-up: reset-link
   and magic-link expiry, session lifetime and revocation, and bot/abuse
   protection on the sign-up flow. Document the chosen settings.
 - [ ] **Client-side error screens — users never see a raw stack trace.**
@@ -416,27 +446,32 @@ explicitly checked (not assumed) before real users touch the deployment.
   `ApiError` statuses to distinct screens: expired session (401 → re-auth),
   not found (404), rate limited (429 with retry guidance), and a generic
   "something broke" fallback for 5xx/unexpected errors.
-- [~] **Indexes on the most common data operations.** Startup provisions the
-  tuned retrieval indexes (halfvec exact scan by design, FTS/tsvector, the
+- [~] **Indexes on the most common data operations.** The baseline migration
+  creates the tuned retrieval indexes (halfvec exact scan by design, FTS/tsvector, the
   generation-based indexes) — the hot read path is covered by the exp1–8 work.
-  No users yet, so the rest is educated guesses to re-check with production
-  telemetry: the job-queue claim path and the rate-limit counter lookups.
-- [~] **Production logging to debug incidents.** Stdlib logging exists but
-  there is no production config. Define log level, timestamps, and a request
-  correlation ID; ship container logs off the box with a retention policy
-  (gate above) so a crashed container's logs survive it.
-- [ ] **Alerts when something breaks.** Nothing today. Start small: alarm on
-  health-check failure, sustained 5xx rate, worker job-failure rate, and
-  disk/RAM pressure on the instance.
-- [ ] **Rollback when a deploy goes wrong.** Deploy immutable, versioned image
-  tags (never `latest`) so rollback is redeploying the previous tag.
-  Investigate blue-green on a single box: bring up the new Compose stack
-  alongside the old one and swap the Caddy upstream, falling back to tag
-  rollback (brief downtime) if that's too heavy for the alpha. Alembic
-  migrations must stay backward-compatible one release back so old code runs
-  against the new schema during a rollback.
+  The rest is educated guesses to re-check with production telemetry: the job-queue claim path and the rate-limit counter lookups.
+- [~] **Production logging to debug incidents.** The API and worker use Python
+  stdlib logging, worker failure logs include the underlying cause (#105), and
+  Caddy writes one JSON line per request; `docker compose logs` reads them all on
+  the box.
+  Next: wide events (#106), one JSON event per API request and per worker job,
+  instead of request correlation IDs; then ship logs off the box with a retention
+  policy so a crashed container's logs survive it.
+- [ ] **Alerts when something breaks.** Nothing today (a failed nightly dump
+  shows only in the journal). Start small: alarm on health-check failure,
+  sustained 5xx rate, worker job-failure rate, and disk/RAM pressure on the
+  instance.
+- [~] **Rollback when a deploy goes wrong.** Images are tagged with the git
+  short SHA (`CAMINO_IMAGE_TAG`, never `latest`), so rollback is redeploying the
+  previous tag; the runbook's
+  [Rolling back](docs/deploy.md#rolling-back) section covers it, including env
+  file and Caddyfile changes. Alembic migrations stay backward-compatible one
+  release back so old code runs against the new schema during a rollback.
+  Remaining: investigate blue-green on a single box (bring up the new Compose
+  stack alongside the old one and swap the Caddy upstream) instead of the brief
+  downtime of a tag rollback.
 
-### Pre-deployment checklist: compliance, data retention & governance
+### Before strangers use it: compliance, data retention & governance
 
 - [ ] **Privacy policy + terms of service published.** Required by GitHub's App
   policies and expected for the Clerk/OpenAI integrations. Must disclose what
@@ -470,26 +505,30 @@ explicitly checked (not assumed) before real users touch the deployment.
 - [ ] **GitHub App permissions minimized.** Audit the App to least privilege
   (read-only contents/metadata/issues) before strangers install it; every
   granted scope is something the privacy policy has to answer for.
-- [ ] **Backups that actually restore.** Until RDS: the nightly and pre-deploy
+- [~] **Backups that actually restore.** Until RDS: the nightly and pre-deploy
   dumps copied to S3 ([docs/deploy.md](docs/deploy.md#backups), up to a day of
-  writes at risk), and one restore of a dump downloaded from S3 before launch.
-  RDS automated backups and point-in-time recovery replace them later. An
-  untested backup is not a backup.
-- [~] **Encryption everywhere.** GitHub user OAuth tokens are not persisted;
-  RDS encrypted storage is planned (gate above). Remaining: require TLS on the
-  app→RDS connection and confirm no plaintext listener.
-- [ ] **Operator account hardening (the real biggest risk for a solo project).**
-  MFA on the AWS root/IAM, GitHub, Clerk, and OpenAI accounts; SSM Session
-  Manager or key-only SSH for the EC2 box; no long-lived AWS access keys on
-  laptops.
+  writes at risk). A dump downloaded from S3 was restored into a scratch database
+  on 2026-11-03. Remaining: RDS automated backups and point-in-time recovery
+  replace the dumps, and the restore drill is repeated there. An untested backup
+  is not a backup.
+- [~] **Encryption everywhere.** GitHub user OAuth tokens are not persisted.
+  Browser traffic to the API is HTTPS through Caddy, the box's root volume is
+  encrypted, S3 dumps use SSE-S3 and the bucket accepts HTTPS only, and Postgres
+  is reachable only on the Compose network. Remaining for RDS: encrypted storage
+  and TLS on the app→RDS connection.
+- [x] **Operator account hardening (the real biggest risk for a solo project).**
+  MFA on AWS, GitHub, Clerk, and OpenAI. AWS sign-in goes through IAM Identity
+  Center (no root use, no long-lived access keys on the laptop), the box uses an
+  instance role instead of access keys, and SSH to the box is open only to one IP.
 - [ ] **Dependency and image scanning.** Dependabot (or `pip-audit` +
   `npm audit`) in CI plus a container image scan, with a habit of applying
   patches — a solo project's dependencies rot silently.
 - [ ] **Security contact.** A `SECURITY.md` with a private reporting channel,
   so the first vulnerability report doesn't arrive as a public issue.
-- [ ] **Cost guardrails.** A hard monthly cap or spend alert on the OpenAI
-  account and an AWS billing alarm. The per-user rate limits are the abuse
-  backstop, but a bug can outspend an abuser.
+- [x] **Cost guardrails.** An enforced monthly spend limit with an email alert
+  on the OpenAI account, and an AWS budget with email alerts (AWS has no hard
+  cap). The per-user rate limits are the abuse backstop, but a bug can outspend
+  an abuser.
 
 Account deletion is initiated through Clerk's authenticated UserButton security UI,
 which requires the user to type `Delete account` before continuing. Clerk deletes the
@@ -513,25 +552,27 @@ which removes every Camino connection, indexed repository, tour, and embedding f
 installation. Clerk account deletion may instead preserve installation-scoped indexed
 data when another Camino user still references the same installation.
 
-The first alpha is one box and Single-AZ RDS. Multi-AZ RDS, ECS Fargate with CDK,
-autoscaling, SQS workers, and S3 artifact storage are post-alpha reliability upgrades
-to revisit only if usage demands them.
+The alpha is one box with Postgres on it, then Single-AZ RDS. Multi-AZ RDS, ECS
+Fargate with CDK, autoscaling, SQS workers, and S3 artifact storage are later
+reliability upgrades to revisit only if usage demands them.
 
 ---
 
 ## Now / next 3 actions
 
-1. **Prepare the backend for the box** — the production arm64 Dockerfile,
-   `/health`, and the Alembic baseline with a one-off `migrate` step are in; next is CI.
-2. **Stand up the data layer** — RDS `db.t4g.micro` + pgvector with backups
-   (storage plan phase 2), production secrets provisioned outside agent sessions.
-3. **Bring up the Compose stack on a `t4g.small`** — Caddy TLS on a real domain,
-   API + worker replicas, webhook registration, CI, and the live end-to-end smoke
-   test.
+1. **Show it** — a short demo video and screenshots at the top of this README and
+   on the landing page.
+2. **Fix the issues found while getting ready for real users** — wide events
+   (#106), blocking calls on the API's event loop (#119), transactions held open
+   across GitHub and OpenAI calls (#134), live access rechecks in the worker (#93),
+   the chunk cap firing after embedding (#52), and deleting briefs (#53).
+3. **Move the database to RDS and work through the checklists above** — RDS
+   `db.t4g.micro` + pgvector (storage plan phase 2), then privacy policy and terms,
+   the authorization audit, input validation, error screens, and alerts.
 
 **Retrieval status:** loop paused. exp6 (cross-encoder reranker) is complete — BGE blend
 hits the ≥0.95 target and closes q17; only q03 remains. Kept optional (off by default) to
-avoid prod latency. No critical retrieval blockers for the current Phase 2 eval work.
+avoid prod latency. No critical retrieval blockers.
 
 ---
 
@@ -618,13 +659,16 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [x] Storage shrink: halfvec exact scan shipped ([docs/storage-capacity-plan.md](docs/storage-capacity-plan.md) phase 1)
 - [x] Backend production Dockerfile (arm64) and pinned start command
 - [x] Production Compose file: Caddy TLS, API (`RUN_WORKER=false`), worker replicas, healthchecks, restart policies ([docs/deploy.md](docs/deploy.md))
-- [x] `/health` endpoint wired into Compose healthchecks and Caddy
+- [x] `/health` endpoint wired into the Compose healthcheck
 - [x] Alembic baseline and explicit one-off migration step
+- [x] Box live at `api.camino.zone` (2026-11-02): production secrets in `/etc/camino` on the box, Clerk and GitHub App webhooks registered
+- [x] Domain + TLS for the backend origin (DNS on Vercel, automatic TLS in Caddy); `https://www.camino.zone` in `CORS_ORIGINS`
+- [x] Postgres on the box with nightly and pre-deploy dumps copied to S3; restore drill passed ([docs/deploy.md](docs/deploy.md#backups))
+- [x] Deployed end-to-end smoke test: sign-up, GitHub connect, ingest, ask, tour, brief
+- [x] Clerk sign-up in waitlist mode; MFA on AWS, GitHub, Clerk, and OpenAI; OpenAI spend limit and AWS budget alerts
+- [~] CI: backend tests (including migrations) and frontend lint/typecheck/Vitest required on `dev` and `main`; arm64 Docker build not in CI
 - [ ] RDS `db.t4g.micro` + pgvector, encrypted storage, backups, security-group-only access (storage plan phase 2)
-- [ ] Production secrets provisioned according to the documented deployment procedure
-- [ ] Domain + TLS for the backend origin (Route 53 + Caddy); Vercel origin in `CORS_ORIGINS`
 - [ ] Logs with retention and basic alarms (CloudWatch agent or shipped container logs)
-- [ ] CI: tests, frontend build/lint, arm64 Docker build, migration validation
 - [ ] Post-alpha, only if usage demands: ECS/CDK, SQS workers, S3 artifacts, Bedrock routing
 
 ### Evaluation (the differentiator)
@@ -651,7 +695,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` todo
 - [x] README: known limitations & failure modes (tour doc §12)
 - [ ] Langfuse + CloudWatch screenshots
 - [ ] Medium blog post
-- [ ] Live end-to-end test (web + CLI)
+- [~] Live end-to-end test (web + CLI) — web passed on 2026-11-03; the CLI is not built
 - [ ] Publish
 
 ---
