@@ -48,6 +48,19 @@ describe("backendFetch", () => {
     });
   });
 
+  it("returns undefined for 204 No Content without reading a body", async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
+
+    await expect(
+      backendFetch<void>("/api/v1/briefs/7", "my-token", { method: "DELETE" }),
+    ).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith(`${BACKEND_URL}/api/v1/briefs/7`, {
+      method: "DELETE",
+      headers: { Authorization: "Bearer my-token" },
+      body: undefined,
+    });
+  });
+
   it("sends JSON body and Content-Type header on POST", async () => {
     fetchMock.mockResolvedValue(mockResponse(200, {}));
 

@@ -117,6 +117,23 @@ export async function cancelIssueBrief(
   );
 }
 
+/** Delete a brief. A brief that is already gone counts as deleted. */
+export async function deleteIssueBrief(
+  id: number | string,
+  getToken: TokenGetter,
+): Promise<void> {
+  try {
+    await backendFetch<void>(
+      `/api/v1/briefs/${encodeURIComponent(id)}`,
+      await tokenOrThrow(getToken),
+      { method: "DELETE" },
+    );
+  } catch (caught) {
+    if (caught instanceof ApiError && caught.status === 404) return;
+    throw caught;
+  }
+}
+
 export async function listIssueBriefs(
   getToken: TokenGetter,
   signal?: AbortSignal,

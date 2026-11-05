@@ -291,3 +291,65 @@ def test_get_brief_forbids_another_user():
 
     app.dependency_overrides[get_session] = custom_session
     assert client.get("/api/v1/briefs/8").status_code == 403
+
+
+def _session_returning(job):
+    session = MagicMock()
+    session.get.return_value = job
+
+    def custom_session():
+        yield session
+
+    app.dependency_overrides[get_session] = custom_session
+    return session
+
+
+def test_delete_brief_removes_own_brief():
+    job = MagicMock(job_type=JobType.ISSUE_BRIEF, userId="user_123")
+    session = _session_returning(job)
+
+    response = client.delete("/api/v1/briefs/8")
+
+    assert response.status_code == 204
+    assert response.content == b""
+    session.delete.assert_called_once_with(job)
+    session.commit.assert_called_once_with()
+
+
+def test_delete_brief_forbids_another_user():
+    session = _session_returning(
+        MagicMock(job_type=JobType.ISSUE_BRIEF, userId="other")
+    )
+
+    assert client.delete("/api/v1/briefs/8").status_code == 403
+    session.delete.assert_not_called()
+
+
+def test_delete_brief_reports_missing_brief():
+    session = _session_returning(None)
+
+    assert client.delete("/api/v1/briefs/8").status_code == 404
+    session.delete.assert_not_called()
+
+
+def test_delete_brief_refuses_jobs_that_are_not_briefs():
+    session = _session_returning(
+        MagicMock(job_type=JobType.TOUR, userId="user_123")
+    )
+
+    assert client.delete("/api/v1/briefs/8").status_code == 404
+    session.delete.assert_not_called()
+
+
+def test_delete_brief_rolls_back_on_database_error():
+    from sqlalchemy import exc
+
+    session = _session_returning(
+        MagicMock(job_type=JobType.ISSUE_BRIEF, userId="user_123")
+    )
+    session.commit.side_effect = exc.OperationalError("DELETE", {}, Exception("down"))
+
+    response = client.delete("/api/v1/briefs/8")
+
+    assert response.status_code == 500
+    session.rollback.assert_called_once_with()
