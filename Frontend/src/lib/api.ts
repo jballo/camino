@@ -67,5 +67,8 @@ export async function backendFetch<T>(
 
   }
 
+  // 204 No Content has no body to parse.
+  if (response.status === 204) return undefined as T;
+
   return (await response.json()) as T;
 }

@@ -7,11 +7,13 @@ import {
   Loader2,
   RefreshCw,
   Square,
+  Trash2,
 } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 
+import { ApiError } from "@/lib/api";
 import type { BriefResponse } from "@/types/brief";
 
 type BriefPaneProps = {
@@ -19,9 +21,16 @@ type BriefPaneProps = {
   createdAt?: string;
   loading: boolean;
   error?: string;
+  /** True when no brief is selected, e.g. after deleting the last one shown. */
+  nothingSelected?: boolean;
   onCancel: (brief: BriefResponse) => Promise<void>;
   onRegenerate: (brief: BriefResponse) => Promise<void>;
+  /** Rejects when the delete fails; the pane shows the error. */
+  onDelete: (brief: BriefResponse) => Promise<void>;
 };
+
+type PaneAction = "cancel" | "regenerate" | "delete";
+type FocusTarget = "trigger" | "keep";
 
 function relativeTime(value: string | undefined): string {
   if (!value) return "recently";
@@ -46,10 +55,18 @@ export default function BriefPane({
   createdAt,
   loading,
   error,
+  nothingSelected = false,
   onCancel,
   onRegenerate,
+  onDelete,
 }: BriefPaneProps) {
-  const [action, setAction] = useState<"cancel" | "regenerate">();
+  const [action, setAction] = useState<PaneAction>();
+  // Kept here, above the status branches, so an open confirmation survives
+  // the brief finishing while it is open.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState<string>();
+  // Where focus goes when the delete controls next mount.
+  const pendingFocusRef = useRef<FocusTarget | undefined>(undefined);
 
   async function runAction(kind: "cancel" | "regenerate") {
     if (!brief) return;
@@ -60,6 +77,62 @@ export default function BriefPane({
       setAction(undefined);
     }
   }
+
+  function askToDelete() {
+    setDeleteError(undefined);
+    pendingFocusRef.current = "keep";
+    setConfirmingDelete(true);
+  }
+
+  function keepBrief() {
+    pendingFocusRef.current = "trigger";
+    setConfirmingDelete(false);
+    setDeleteError(undefined);
+  }
+
+  async function confirmDelete() {
+    if (!brief || action !== undefined) return;
+    setAction("delete");
+    setDeleteError(undefined);
+    try {
+      // On success the workbench selects another brief and this pane unmounts.
+      await onDelete(brief);
+    } catch (caught) {
+      setDeleteError(
+        caught instanceof ApiError
+          ? caught.message
+          : "Failed to delete this brief. Try again.",
+      );
+    } finally {
+      setAction(undefined);
+    }
+  }
+
+  function takePendingFocus() {
+    const target = pendingFocusRef.current;
+    pendingFocusRef.current = undefined;
+    return target;
+  }
+
+  const deleteControl = brief ? (
+    confirmingDelete ? (
+      <DeleteConfirm
+        briefId={brief.id}
+        generating={!["complete", "failed", "cancelled"].includes(brief.status)}
+        deleting={action === "delete"}
+        error={deleteError}
+        takePendingFocus={takePendingFocus}
+        onConfirm={() => void confirmDelete()}
+        onKeep={keepBrief}
+      />
+    ) : (
+      <DeleteTrigger
+        disabled={action !== undefined}
+        takePendingFocus={takePendingFocus}
+        onClick={askToDelete}
+      />
+    )
+  ) : null;
 
   if (loading && !brief) {
     return (
@@ -88,7 +161,15 @@ export default function BriefPane({
     );
   }
 
-  if (!brief) return null;
+  if (!brief) {
+    return nothingSelected ? (
+      <PaneFrame>
+        <p className="flex min-h-40 items-center justify-center px-6 text-center text-sm text-muted-foreground">
+          Select a brief to preview it.
+        </p>
+      </PaneFrame>
+    ) : null;
+  }
 
   const terminal = ["complete", "failed", "cancelled"].includes(brief.status);
   if (!terminal) {
@@ -96,12 +177,9 @@ export default function BriefPane({
     const queued = brief.phase === "queued" || brief.status === "pending";
     return (
       <PaneFrame>
-        <div
-          aria-busy="true"
-          className="flex min-h-80 flex-col items-center justify-center gap-5 px-6 py-12 text-center"
-        >
+        <div className="flex min-h-80 flex-col items-center justify-center gap-5 px-6 py-12 text-center">
           <Loader2 aria-hidden="true" className="size-9 animate-spin text-primary" />
-          <div role="status" aria-live="polite" className="flex flex-col gap-2">
+          <div role="status" aria-live="polite" aria-busy="true" className="flex flex-col gap-2">
             <h2 className="text-2xl font-semibold">
               {refreshing
                 ? "Refreshing the repository first"
@@ -119,18 +197,25 @@ export default function BriefPane({
           </div>
           {error && <p className="max-w-md text-sm text-destructive">{error}</p>}
           <span className="state-pill capitalize">Phase · {brief.phase.replaceAll("_", " ")}</span>
-          <Button
-            onClick={() => void runAction("cancel")}
-            disabled={action !== undefined}
-            className="button-ghost text-muted-foreground hover:border-destructive hover:bg-transparent hover:text-destructive"
-          >
-            {action === "cancel" ? (
-              <Loader2 aria-hidden="true" className="size-4 animate-spin" />
-            ) : (
-              <Square aria-hidden="true" className="size-3.5" />
-            )}
-            {action === "cancel" ? "Stopping…" : "Stop generating"}
-          </Button>
+          {confirmingDelete ? (
+            <div className="w-full max-w-lg text-left">{deleteControl}</div>
+          ) : (
+            <div className="flex flex-wrap justify-center gap-2.5">
+              <Button
+                onClick={() => void runAction("cancel")}
+                disabled={action !== undefined}
+                className="button-ghost text-muted-foreground hover:border-destructive hover:bg-transparent hover:text-destructive"
+              >
+                {action === "cancel" ? (
+                  <Loader2 aria-hidden="true" className="size-4 animate-spin" />
+                ) : (
+                  <Square aria-hidden="true" className="size-3.5" />
+                )}
+                {action === "cancel" ? "Stopping…" : "Stop generating"}
+              </Button>
+              {deleteControl}
+            </div>
+          )}
         </div>
       </PaneFrame>
     );
@@ -147,17 +232,24 @@ export default function BriefPane({
               {error ?? brief.error ?? `This brief was ${brief.status}.`}
             </p>
           </div>
-          <Button
-            onClick={() => void runAction("regenerate")}
-            disabled={action !== undefined}
-            className="button-ghost"
-          >
-            <RefreshCw
-              aria-hidden="true"
-              className={`size-4 ${action === "regenerate" ? "animate-spin" : ""}`}
-            />
-            {action === "regenerate" ? "Starting…" : "Regenerate"}
-          </Button>
+          {confirmingDelete ? (
+            <div className="w-full max-w-lg text-left">{deleteControl}</div>
+          ) : (
+            <div className="flex flex-wrap justify-center gap-2.5">
+              <Button
+                onClick={() => void runAction("regenerate")}
+                disabled={action !== undefined}
+                className="button-ghost"
+              >
+                <RefreshCw
+                  aria-hidden="true"
+                  className={`size-4 ${action === "regenerate" ? "animate-spin" : ""}`}
+                />
+                {action === "regenerate" ? "Starting…" : "Regenerate"}
+              </Button>
+              {deleteControl}
+            </div>
+          )}
         </div>
       </PaneFrame>
     );
@@ -233,25 +325,164 @@ export default function BriefPane({
           )}
         </div>
 
-        <div className="flex flex-wrap gap-2.5">
-          <Link href={`/briefs/${brief.id}`} className="button-primary min-h-11 px-5">
-            Open full brief
-            <ArrowUpRight aria-hidden="true" className="size-4" />
-          </Link>
-          <Button
-            onClick={() => void runAction("regenerate")}
-            disabled={action !== undefined}
-            className="button-ghost"
-          >
-            <RefreshCw
-              aria-hidden="true"
-              className={`size-4 ${action === "regenerate" ? "animate-spin" : ""}`}
-            />
-            {action === "regenerate" ? "Starting…" : "Regenerate"}
-          </Button>
-        </div>
+        {confirmingDelete ? (
+          deleteControl
+        ) : (
+          <div className="flex flex-wrap items-center gap-2.5">
+            <Link href={`/briefs/${brief.id}`} className="button-primary min-h-11 px-5">
+              Open full brief
+              <ArrowUpRight aria-hidden="true" className="size-4" />
+            </Link>
+            <Button
+              onClick={() => void runAction("regenerate")}
+              disabled={action !== undefined}
+              className="button-ghost"
+            >
+              <RefreshCw
+                aria-hidden="true"
+                className={`size-4 ${action === "regenerate" ? "animate-spin" : ""}`}
+              />
+              {action === "regenerate" ? "Starting…" : "Regenerate"}
+            </Button>
+            <div className="sm:ml-auto">{deleteControl}</div>
+          </div>
+        )}
       </div>
     </section>
+  );
+}
+
+/** True when focus fell to the page because its element was removed. */
+function focusWasLost() {
+  const active = document.activeElement;
+  return active === null || active === document.body;
+}
+
+function DeleteTrigger({
+  disabled,
+  takePendingFocus,
+  onClick,
+}: {
+  disabled: boolean;
+  takePendingFocus: () => FocusTarget | undefined;
+  onClick: () => void;
+}) {
+  const buttonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    // Back from the confirmation (Keep or Escape): return focus here.
+    if (takePendingFocus() === "trigger") buttonRef.current?.focus();
+    // Mount only: later renders must not move focus.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <Button
+      ref={buttonRef}
+      onClick={onClick}
+      disabled={disabled}
+      className="button-ghost text-destructive hover:border-destructive"
+    >
+      <Trash2 aria-hidden="true" className="size-4" />
+      Delete
+    </Button>
+  );
+}
+
+function DeleteConfirm({
+  briefId,
+  generating,
+  deleting,
+  error,
+  takePendingFocus,
+  onConfirm,
+  onKeep,
+}: {
+  briefId: number;
+  generating: boolean;
+  deleting: boolean;
+  error?: string;
+  takePendingFocus: () => FocusTarget | undefined;
+  onConfirm: () => void;
+  onKeep: () => void;
+}) {
+  const keepRef = useRef<HTMLButtonElement>(null);
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  const questionId = `delete-brief-question-${briefId}`;
+  const detailId = `delete-brief-detail-${briefId}`;
+
+  useEffect(() => {
+    if (takePendingFocus() === "keep") {
+      keepRef.current?.focus();
+    } else if (focusWasLost()) {
+      // The pane re-rendered a different status branch (the brief finished
+      // while this was open), so the focused button was replaced.
+      (deleting ? confirmRef : keepRef).current?.focus();
+    }
+    // Mount only: later renders must not move focus.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div
+      role="group"
+      aria-labelledby={questionId}
+      aria-describedby={detailId}
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && !deleting) {
+          event.stopPropagation();
+          onKeep();
+        }
+      }}
+      className="flex w-full flex-col gap-3 rounded-[8px] border border-destructive/45 bg-destructive/[.07] px-4 py-3 sm:flex-row sm:flex-wrap sm:items-center"
+    >
+      <div className="min-w-0 flex-1 text-sm">
+        <p id={questionId} className="font-medium">
+          Delete this brief?
+        </p>
+        <p id={detailId} className="mt-0.5 text-xs text-muted-foreground">
+          {generating
+            ? "It will stop generating and be removed."
+            : "It disappears from your list. You can generate it again later."}
+        </p>
+        {error && (
+          <p role="alert" className="mt-1.5 text-xs text-destructive">
+            {error}
+          </p>
+        )}
+      </div>
+      <div className="flex gap-2">
+        {/* aria-disabled rather than disabled while deleting, so the focused
+            button keeps focus. */}
+        <button
+          ref={confirmRef}
+          type="button"
+          aria-disabled={deleting}
+          onClick={() => {
+            if (!deleting) onConfirm();
+          }}
+          className="inline-flex min-h-[35px] items-center justify-center gap-2 rounded-[4px] bg-destructive px-4 font-mono text-[10px] uppercase tracking-[.2em] text-primary-foreground transition hover:brightness-110 aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
+        >
+          {deleting ? (
+            <Loader2 aria-hidden="true" className="size-4 animate-spin" />
+          ) : (
+            <Trash2 aria-hidden="true" className="size-4" />
+          )}
+          {deleting ? "Deleting…" : "Delete brief"}
+        </button>
+        <button
+          ref={keepRef}
+          type="button"
+          aria-disabled={deleting}
+          onClick={() => {
+            if (!deleting) onKeep();
+          }}
+          className="button-ghost aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
+        >
+          Keep
+        </button>
+      </div>
+    </div>
   );
 }
 

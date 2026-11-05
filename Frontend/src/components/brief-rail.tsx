@@ -1,8 +1,9 @@
 "use client";
 
 import { Search } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 
+import { filterBriefs } from "@/lib/brief-selection";
 import type { BriefSummary } from "@/types/brief";
 import type { JourneyStatus } from "@/types/tour";
 
@@ -10,7 +11,17 @@ type BriefRailProps = {
   briefs: BriefSummary[];
   selectedId: number | undefined;
   onSelect: (id: number) => void;
+  query: string;
+  onQueryChange: (query: string) => void;
 };
+
+/** DOM id of a rail item, so focus can move to it after a delete. */
+export function briefRailItemId(id: number) {
+  return `brief-rail-item-${id}`;
+}
+
+/** DOM id of whichever "nothing to show" message is on screen. */
+export const BRIEFS_EMPTY_ID = "briefs-empty";
 
 const STATUS: Record<
   JourneyStatus,
@@ -52,21 +63,10 @@ export default function BriefRail({
   briefs,
   selectedId,
   onSelect,
+  query,
+  onQueryChange,
 }: BriefRailProps) {
-  const [query, setQuery] = useState("");
-  const filteredBriefs = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return briefs;
-
-    return briefs.filter((brief) =>
-      [
-        brief.issueTitle,
-        brief.issueRepo,
-        `#${brief.issueNumber}`,
-        `${brief.issueRepo} #${brief.issueNumber}`,
-      ].some((value) => value.toLowerCase().includes(normalized)),
-    );
-  }, [briefs, query]);
+  const filteredBriefs = useMemo(() => filterBriefs(briefs, query), [briefs, query]);
 
   return (
     <aside className="console" aria-label="Brief list">
@@ -79,7 +79,7 @@ export default function BriefRail({
           id="brief-filter"
           type="search"
           value={query}
-          onChange={(event) => setQuery(event.target.value)}
+          onChange={(event) => onQueryChange(event.target.value)}
           placeholder="Filter briefs…"
           className="min-h-8 min-w-0 flex-1 bg-transparent font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground"
         />
@@ -92,6 +92,7 @@ export default function BriefRail({
           return (
             <button
               key={brief.id}
+              id={briefRailItemId(brief.id)}
               type="button"
               onClick={() => onSelect(brief.id)}
               aria-current={selected ? "true" : undefined}
@@ -127,7 +128,11 @@ export default function BriefRail({
         })}
 
         {filteredBriefs.length === 0 && (
-          <p className="px-4 py-8 text-center text-sm text-muted-foreground">
+          <p
+            id={BRIEFS_EMPTY_ID}
+            tabIndex={-1}
+            className="px-4 py-8 text-center text-sm text-muted-foreground outline-none"
+          >
             No briefs match “{query.trim()}”.
           </p>
         )}

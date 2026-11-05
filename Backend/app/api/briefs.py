@@ -1,4 +1,4 @@
-"""Issue-brief preview, queue, reader, and cancellation endpoints."""
+"""Issue-brief preview, queue, reader, cancellation, and deletion endpoints."""
 
 from __future__ import annotations
 
@@ -433,3 +433,25 @@ async def cancel_brief(
     cancel_job(session, job_id)
     session.refresh(job)
     return _response(session, job)
+
+
+@router.delete("/{job_id}", status_code=204)
+async def delete_brief(
+    job_id: int,
+    session: SessionDep,
+    auth_user_id: str = Depends(get_authenticated_user_id),
+) -> None:
+    """Delete one of the caller's briefs, whatever its status.
+
+    A running brief is removed outright: the worker's final writes require
+    the row to still be running under its claim, so they match nothing and
+    the outcome is discarded. A shared ingest the brief waited on loses this
+    waiter the same way it would on cancellation.
+    """
+    job = _authorized_brief(session, job_id, auth_user_id)
+    try:
+        session.delete(job)
+        session.commit()
+    except exc.SQLAlchemyError:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Database error")

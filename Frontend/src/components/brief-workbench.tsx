@@ -12,13 +12,19 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import BriefPane from "@/components/brief-pane";
-import BriefRail from "@/components/brief-rail";
+import BriefRail, { BRIEFS_EMPTY_ID, briefRailItemId } from "@/components/brief-rail";
 import { ChakanaMark, LlamaTrail, Scribble, TileCluster } from "@/components/trail-art";
 import { ApiError } from "@/lib/api";
+import {
+  filterBriefs,
+  nextSelection,
+  resolveSelection,
+} from "@/lib/brief-selection";
 import {
   briefCreateErrorMessage,
   cancelIssueBrief,
   createIssueBrief,
+  deleteIssueBrief,
   getIssueBrief,
   isAbortError,
   listIssueBriefs,
@@ -82,22 +88,48 @@ export default function BriefWorkbench({
   const [selectedBrief, setSelectedBrief] = useState<BriefResponse>();
   const [paneLoading, setPaneLoading] = useState(false);
   const [paneError, setPaneError] = useState<string>();
+  const [briefQuery, setBriefQuery] = useState("");
   const paneAbortRef = useRef<AbortController | undefined>(undefined);
   const selectedIdRef = useRef<number | undefined>(undefined);
+  // Briefs deleted on this page. A list request that started before a delete
+  // can resolve after it, so every list result is filtered through this.
+  const deletedIdsRef = useRef(new Set<number>());
+  // Set when a delete leaves nothing selected on purpose, so a list reload
+  // does not fall back to selecting a brief the filter is hiding.
+  const selectionClearedRef = useRef(false);
+  // After a delete: the rail item to focus, or "empty" for the empty message.
+  const focusAfterDeleteRef = useRef<number | "empty" | undefined>(undefined);
 
-  const setSelectedId = useCallback((id: number) => {
+  const visibleBriefs = useMemo(
+    () => filterBriefs(briefs, briefQuery),
+    [briefs, briefQuery],
+  );
+  // Read by deleteBrief, which can finish after later renders.
+  const visibleBriefsRef = useRef(visibleBriefs);
+  useEffect(() => {
+    visibleBriefsRef.current = visibleBriefs;
+  }, [visibleBriefs]);
+
+  const setSelectedId = useCallback((id: number | undefined) => {
     selectedIdRef.current = id;
+    selectionClearedRef.current = id === undefined;
     setSelectedIdState(id);
   }, []);
 
   const loadBriefs = useCallback(
     async (signal?: AbortSignal) => {
       try {
-        const result = await listIssueBriefs(getToken, signal);
+        const result = (await listIssueBriefs(getToken, signal)).filter(
+          (brief) => !deletedIdsRef.current.has(brief.id),
+        );
         setBriefs(result);
         setBriefsError(undefined);
         setSelectedIdState((current) => {
-          const next = current ?? result[0]?.id;
+          const next = resolveSelection(
+            current,
+            result,
+            selectionClearedRef.current,
+          );
           selectedIdRef.current = next;
           return next;
         });
@@ -154,7 +186,9 @@ export default function BriefWorkbench({
         setSelectedBrief(terminal);
         await loadBriefs(controller.signal);
       } catch (caught) {
-        if (isAbortError(caught)) return;
+        // A request for a brief that is no longer selected (or was just
+        // deleted) can fail after its controller was aborted.
+        if (controller.signal.aborted || isAbortError(caught)) return;
         setPaneError(
           caught instanceof ApiError
             ? caught.message
@@ -168,6 +202,16 @@ export default function BriefWorkbench({
     void loadSelectedBrief();
     return () => controller.abort();
   }, [getToken, loadBriefs, selectedId, selectionVersion]);
+
+  // Move focus after a delete once the rail or empty message has rendered.
+  useEffect(() => {
+    const target = focusAfterDeleteRef.current;
+    if (target === undefined) return;
+    focusAfterDeleteRef.current = undefined;
+    document
+      .getElementById(target === "empty" ? BRIEFS_EMPTY_ID : briefRailItemId(target))
+      ?.focus();
+  }, [briefs, selectedId]);
 
   const selectedSummary = useMemo(
     () => briefs.find((brief) => brief.id === selectedId),
@@ -258,6 +302,22 @@ export default function BriefWorkbench({
           : "Failed to cancel this issue brief.",
       );
     }
+  }
+
+  /** Rejects on failure so the pane can show the error in its confirmation. */
+  async function deleteBrief(brief: BriefResponse) {
+    await deleteIssueBrief(brief.id, getToken);
+    deletedIdsRef.current.add(brief.id);
+    setBriefs((current) => current.filter((item) => item.id !== brief.id));
+    // The user may have selected another brief while this was in flight.
+    if (selectedIdRef.current !== brief.id) return;
+    const next = nextSelection(
+      visibleBriefsRef.current,
+      brief.id,
+      deletedIdsRef.current,
+    );
+    focusAfterDeleteRef.current = next ?? "empty";
+    setSelectedId(next);
   }
 
   async function regenerateBrief(brief: BriefResponse) {
@@ -484,7 +544,11 @@ export default function BriefWorkbench({
           <BriefListError message={briefsError} onRetry={retryBriefs} />
         ) : briefs.length === 0 ? (
           <div className="console console-cell min-h-32">
-            <p className="text-sm text-muted-foreground">
+            <p
+              id={BRIEFS_EMPTY_ID}
+              tabIndex={-1}
+              className="text-sm text-muted-foreground outline-none"
+            >
               No briefs yet — paste an issue URL to generate your first one.
             </p>
           </div>
@@ -494,6 +558,8 @@ export default function BriefWorkbench({
               briefs={briefs}
               selectedId={selectedId}
               onSelect={setSelectedId}
+              query={briefQuery}
+              onQueryChange={setBriefQuery}
             />
             <BriefPane
               key={selectedId}
@@ -501,8 +567,10 @@ export default function BriefWorkbench({
               createdAt={selectedSummary?.createdAt}
               loading={paneLoading}
               error={paneError}
+              nothingSelected={selectedId === undefined}
               onCancel={cancelBrief}
               onRegenerate={regenerateBrief}
+              onDelete={deleteBrief}
             />
           </div>
         )}

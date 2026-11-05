@@ -5,6 +5,7 @@ import {
   REPOSITORY_INGEST_LIMIT_DETAIL,
   briefCreateErrorMessage,
   createIssueBrief,
+  deleteIssueBrief,
   getIssueBrief,
   pollIssueBrief,
   previewIssueBrief,
@@ -46,6 +47,43 @@ describe("issue brief client", () => {
     await createIssueBrief("https://github.com/acme/app/issues/4", "main", token);
     await getIssueBrief(9, token);
     expect(fetchMock.mock.calls[1][0]).toContain("/api/v1/briefs/9");
+  });
+
+  it("deletes a brief", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      deleteIssueBrief(9, vi.fn().mockResolvedValue("token")),
+    ).resolves.toBeUndefined();
+    expect(fetchMock.mock.calls[0][0]).toContain("/api/v1/briefs/9");
+    expect(fetchMock.mock.calls[0][1].method).toBe("DELETE");
+  });
+
+  it("treats an already deleted brief as deleted", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ detail: "Brief not found" }), { status: 404 }),
+      ),
+    );
+    await expect(
+      deleteIssueBrief(9, vi.fn().mockResolvedValue("token")),
+    ).resolves.toBeUndefined();
+  });
+
+  it.each([
+    [403, "Forbidden"],
+    [500, "Database error"],
+  ])("reports a %i when deleting", async (status, detail) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ detail }), { status }),
+      ),
+    );
+    await expect(
+      deleteIssueBrief(9, vi.fn().mockResolvedValue("token")),
+    ).rejects.toEqual(new ApiError(status, detail));
   });
 
   it("does not fetch without a token", async () => {
